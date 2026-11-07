@@ -2,7 +2,7 @@
 // Method names match the contract and signer so phase 2 swaps this for chain-gateway + signer calls.
 import { createHash, randomUUID } from 'node:crypto';
 import { share } from '../shared/money.ts';
-import type { AcceptsRow, X402Config } from '../shared/types.ts';
+import type { AcceptsRow, Receipt, X402Config } from '../shared/types.ts';
 
 export class LedgerError extends Error {
   constructor(public reason: string) { super(`ledger refused: ${reason}`); this.name = 'LedgerError'; }
@@ -21,7 +21,35 @@ type Acct = {
   subs: Map<number, SubAcct>;
 };
 
-export type Ledger = ReturnType<typeof createLedger>;
+type Awaitable<T> = T | Promise<T>;
+/**
+ * How an authorization ends unpaid. `terminal`: the agent reported REJECTED/FAILED/CANCELED (or the header never left
+ * Rook); `wait`: it may still settle, so wait until it expires; `now`: drop it from Rook's books immediately (kill,
+ * shutdown) while the signer keeps refusing a new one until it expires.
+ */
+export type ReleaseHow = 'terminal' | 'wait' | 'now';
+export type LedgerView = NonNullable<ReturnType<ReturnType<typeof createLedger>['view']>> & Record<string, unknown>;
+export type ReceiptEvidence = { receipt_tx: string | null; evidence?: { account_id: string; ft_balance_atomic: string } };
+
+/** What the runner talks to: the in-memory ledger below (`sim`) or chain-ledger.ts (`chain`). Methods may be async. */
+export interface Ledger {
+  createTask(task_id: string, funder: string, budget: bigint, reserve_share: number): Awaitable<object>;
+  fundSubtask(task_id: string, n: number, cap: bigint): Awaitable<bigint>;
+  topUp(task_id: string, n: number, amount: bigint): Awaitable<bigint>;
+  authorize(task_id: string, n: number, row: AcceptsRow, allow: Recipient[]): Awaitable<{ header: string; payment_hash: string; amount: bigint }>;
+  settle(task_id: string, n: number): Awaitable<bigint>;
+  /** `settled`: the chain shows the payment landed although the hire ended unpaid; booked as spent instead. */
+  release(task_id: string, n: number, how?: ReleaseHow): Awaitable<bigint | { amount: bigint; settled: true }>;
+  returnLeftover(task_id: string, n: number): Awaitable<bigint>;
+  closeTask(task_id: string): Awaitable<bigint>;
+  kill(task_id: string): void;
+  holds(task_id: string): boolean;
+  view(task_id: string): LedgerView | null;
+  /** Chain only: what a payment must leave in the sub-account (an empty one can never return its leftover). */
+  minLeft?: bigint;
+  /** Chain only: writes the receipt on the contract. */
+  recordReceipt?(task_id: string, n: number, receipt: Receipt): Promise<ReceiptEvidence>;
+}
 
 const sha256 = (s: string) => createHash('sha256').update(s).digest('hex');
 
@@ -91,8 +119,8 @@ export function createLedger() {
       });
     },
 
-    /** Signer /sign stand-in. Returns the payment header (never stored) and its sha256. */
-    authorize(task_id: string, n: number, row: AcceptsRow, allow: Recipient[]) {
+    /** Signer /sign stand-in. Returns the payment header (never stored) and its sha256. `signed`: a header the real signer built. */
+    authorize(task_id: string, n: number, row: AcceptsRow, allow: Recipient[], signed?: { header: string; payment_hash: string }) {
       const a = open(task_id), s = sub(a, n);
       if (s.returned !== null) refuse(`subtask ${n} already returned its leftover`);
       if (s.auth) refuse(`subtask ${n} has an outstanding authorization`);
@@ -101,8 +129,8 @@ export function createLedger() {
       const amount = BigInt(row.amount);
       if (amount <= 0n) refuse('amount must be positive');
       if (amount > s.balance) refuse(`amount ${amount} exceeds subtask balance ${s.balance}`);
-      const header = Buffer.from(JSON.stringify({ x402Version: 2, accepted: row, payload: { sim: { task_id, n, nonce: randomUUID() } } })).toString('base64');
-      const payment_hash = sha256(header);
+      const header = signed?.header ?? Buffer.from(JSON.stringify({ x402Version: 2, accepted: row, payload: { sim: { task_id, n, nonce: randomUUID() } } })).toString('base64');
+      const payment_hash = signed?.payment_hash ?? sha256(header);
       return mutate(task_id, () => {
         s.auth = { amount, payment_hash };
         return { header, payment_hash, amount };

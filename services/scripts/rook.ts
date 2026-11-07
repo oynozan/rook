@@ -1,7 +1,7 @@
 // Rook CLI against the orchestrator (ORCHESTRATOR_URL). No dependencies; argv parsed by hand.
 //   rook plan "<prompt>" --budget <usdc> [--reserve 0.2]
 //   rook run "<prompt>" --budget <usdc> [--reserve 0.2] [--yes]
-//   rook approve <id> [--yes] | status <id> | watch <id> | kill <id> | list
+//   rook approve <id> [--yes] | funded <id> <contract_task_id> | status <id> | watch <id> | kill <id> | list
 import { createInterface } from 'node:readline/promises';
 import { config } from '../src/shared/config.ts';
 import { call } from '../src/shared/http.ts';
@@ -11,6 +11,7 @@ const USAGE = `usage:
   rook plan "<prompt>" --budget <usdc> [--reserve 0.2]
   rook run "<prompt>" --budget <usdc> [--reserve 0.2] [--yes]
   rook approve <task_id> [--yes]
+  rook funded <task_id> <contract_task_id>     (ROOK_LEDGER=chain, after your funding transfer)
   rook status <task_id>
   rook watch <task_id>
   rook kill <task_id>
@@ -243,7 +244,21 @@ const simLlmUsd = () => fetch(`${config.urls.simulator}/llm-cost`, { signal: Abo
 async function approveAndWatch(id: string, yes: boolean) {
   if (!yes && !(await confirm('\nApprove? [y/N] '))) { console.log(`Not approved. Later: rook approve ${id}`); return; }
   const simBefore = await simLlmUsd();
-  await api(`/tasks/${id}/approve`, {});
+  const approved = await api(`/tasks/${id}/approve`, {});
+  if (approved.funding) { printFunding(id, approved.funding); return; }
+  await runAndReport(id, simBefore);
+}
+
+/** ROOK_LEDGER=chain: Rook never moves the budget itself; the human's own transfer creates the task with the caps. */
+function printFunding(id: string, f: any) {
+  console.log(`\n${bold('Fund this task on chain')} (${f.network}): send ${bold(usdc(f.amount_atomic))} to ${f.contract_id} with the approved caps.`);
+  console.log(`  token ${f.usdc}, from ${f.funder} (the contract owner), msg ${f.msg}`);
+  const args = JSON.stringify({ receiver_id: f.contract_id, amount: f.amount_atomic, msg: f.msg });
+  console.log(`\n  near contract call-function as-transaction ${f.usdc} ft_transfer_call json-args '${args}' prepaid-gas '100 Tgas' attached-deposit '1 yoctoNEAR' sign-as ${f.funder} network-config ${f.network} sign-with-keychain send\n`);
+  console.log(`Read the contract task id from the task_created event in that transaction's logs, then: ${bold(`rook funded ${id} <contract_task_id>`)}`);
+}
+
+async function runAndReport(id: string, simBefore: number | null) {
   console.log();
   await watch(id, true);
   const snap = await api(`/tasks/${id}`);
@@ -275,11 +290,20 @@ async function main() {
       await approveAndWatch(id, flags.yes === true);
       break;
     }
+    case 'funded': {
+      if (!pos[1]) throw new Error(USAGE);
+      const simBefore = await simLlmUsd();
+      const t = await api(`/tasks/${needId()}/funded`, { contract_task_id: pos[1] });
+      console.log(`task ${t.id} funded by contract task ${t.contract_task_id}; running`);
+      await runAndReport(id, simBefore);
+      break;
+    }
     case 'status': printSummary(await api(`/tasks/${needId()}`)); break;
     case 'watch': await watch(needId()); printSummary(await api(`/tasks/${id}`)); break;
     case 'kill': {
       const t = await api(`/tasks/${needId()}/kill`, {});
       console.log(`task ${t.id} ${red(t.status)}`);
+      if (t.human_action) console.log(yellow(t.human_action));
       break;
     }
     case 'list': {

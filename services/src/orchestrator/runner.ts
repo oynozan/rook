@@ -56,11 +56,15 @@ function deferred(): Deferred {
   return { promise, resolve };
 }
 
-function ledgerOp<T extends bigint | object>(t: Task, op: string, sub: Sub | null, fn: () => T, extra: object = {}): T {
+/** Runs one ledger call and emits its event. A synchronous ledger (sim) emits synchronously, so kill() stays atomic. */
+function ledgerOp<T extends bigint | object>(t: Task, op: string, sub: Sub | null, fn: () => T | Promise<T>, extra: object = {}): Promise<T> {
+  const record = (out: T) => {
+    const amount = typeof out === 'bigint' ? out : (out as any).amount ?? null;
+    emit(t, 'ledger', { op, ...(sub ? { n: sub.n } : {}), amount_atomic: amount, ...extra }, sub?.id);
+    return out;
+  };
   const out = fn();
-  const amount = typeof out === 'bigint' ? out : (out as any).amount ?? null;
-  emit(t, 'ledger', { op, ...(sub ? { n: sub.n } : {}), amount_atomic: amount, ...extra }, sub?.id);
-  return out;
+  return out instanceof Promise ? out.then(record) : Promise.resolve(record(out));
 }
 
 function cancelBestEffort(handle: string, id: string) {
@@ -79,11 +83,11 @@ export async function runTask(ledger: Ledger, t: Task) {
     const x402 = await call<X402Config>(gw('/x402'), undefined, { signal });
     signal.throwIfAborted();
     t.allow = x402.recipients ?? [];
-    ledgerOp(t, 'createTask', null, () => ledger.createTask(t.id, t.funder!, BigInt(t.budget_atomic), t.reserve_share));
+    await ledgerOp(t, 'createTask', null, () => ledger.createTask(t.id, t.funder!, BigInt(t.budget_atomic), t.reserve_share));
     setStatus(t, 'funded');
     for (const s of t.subtasks) {
       if (s.self_do) continue;
-      ledgerOp(t, 'fundSubtask', s, () => ledger.fundSubtask(t.id, s.n, BigInt(s.cap_atomic)));
+      await ledgerOp(t, 'fundSubtask', s, () => ledger.fundSubtask(t.id, s.n, BigInt(s.cap_atomic)));
       setSub(t, s, 'funded');
     }
     setStatus(t, 'running');
@@ -91,14 +95,14 @@ export async function runTask(ledger: Ledger, t: Task) {
     // One subtask's error (planner /self-do down, evaluator unreachable, a ledger refusal) abandons that subtask
     // only; the others keep their paid work. Only an abort (kill, shutdown) stops the whole task.
     const done = new Map(t.subtasks.map((s) => [s.id, deferred()]));
-    await Promise.allSettled(t.subtasks.map((s) => runSubtask(ledger, t, s, done).catch((e) => {
+    await Promise.allSettled(t.subtasks.map((s) => runSubtask(ledger, t, s, done).catch(async (e) => {
       if (signal.aborted) throw e;
       t.llm_calls.push(...paidCalls(e));
       emit(t, 'error', { message: `${s.id} abandoned: ${msg(e)}` }, s.id);
       if (!s.final_outcome) finish(t, s, 'abandoned', done);
       try {
         if (!s.self_do && ledger.view(t.id)?.subtasks.find((x) => x.n === s.n)?.returned_atomic === null) {
-          ledgerOp(t, 'returnLeftover', s, () => ledger.returnLeftover(t.id, s.n));
+          await ledgerOp(t, 'returnLeftover', s, () => ledger.returnLeftover(t.id, s.n));
         }
       } catch (e2) { emit(t, 'error', { message: `${s.id}: ${msg(e2)}` }, s.id); }
       setSub(t, s, 'returned');
@@ -125,7 +129,7 @@ export async function runTask(ledger: Ledger, t: Task) {
     t.llm_calls.push(...(agg.llm_calls ?? []));
 
     setStatus(t, 'closing');
-    const refunded = ledgerOp(t, 'closeTask', null, () => ledger.closeTask(t.id));
+    const refunded = await ledgerOp(t, 'closeTask', null, () => ledger.closeTask(t.id));
     const view = ledger.view(t.id)!;
     t.final_result = {
       final_markdown: agg.final_markdown, attribution: agg.attribution ?? [],
@@ -136,14 +140,14 @@ export async function runTask(ledger: Ledger, t: Task) {
   } catch (e) {
     if (t.status === 'killed') return; // kill already released and reported everything
     emit(t, 'error', { message: msg(e) });
-    salvage(ledger, t);
+    await salvage(ledger, t);
     t.error = msg(e);
     setStatus(t, 'failed');
   }
 }
 
 /** After a failure: cancel A2A tasks, release authorizations, return leftovers and refund, so no funds stay locked. */
-function salvage(ledger: Ledger, t: Task) {
+async function salvage(ledger: Ledger, t: Task) {
   for (const f of t.inflight.values()) {
     if (f.a2a_task_id) cancelBestEffort(f.handle, f.a2a_task_id);
     f.hire.state = 'CANCELED'; f.hire.ended_at = now();
@@ -154,11 +158,11 @@ function salvage(ledger: Ledger, t: Task) {
     const v = ledger.view(t.id)!.subtasks.find((x) => x.n === s.n);
     if (!v) continue;
     try {
-      if (v.authorized_atomic !== null) ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n));
-      if (v.returned_atomic === null) ledgerOp(t, 'returnLeftover', s, () => ledger.returnLeftover(t.id, s.n));
+      if (v.authorized_atomic !== null) await ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n, 'now'));
+      if (v.returned_atomic === null) await ledgerOp(t, 'returnLeftover', s, () => ledger.returnLeftover(t.id, s.n));
     } catch (e) { emit(t, 'error', { message: `salvage ${s.id}: ${msg(e)}` }, s.id); }
   }
-  try { ledgerOp(t, 'closeTask', null, () => ledger.closeTask(t.id)); } catch (e) { emit(t, 'error', { message: `salvage close: ${msg(e)}` }); }
+  try { await ledgerOp(t, 'closeTask', null, () => ledger.closeTask(t.id)); } catch (e) { emit(t, 'error', { message: `salvage close: ${msg(e)}` }); }
 }
 
 /** Kill switch (section 8.7). Synchronous, so no loop can emit between the ledger kill and the killed status. */
@@ -176,7 +180,8 @@ export function kill(ledger: Ledger, t: Task) {
   for (const v of ledger.view(t.id)?.subtasks ?? []) {
     if (v.authorized_atomic === null || sending.has(v.n)) continue;
     const s = t.subtasks.find((x) => x.n === v.n) ?? null;
-    ledgerOp(t, 'release', s, () => ledger.release(t.id, v.n));
+    // 'now': released in Rook's books synchronously; on chain the signer keeps refusing until the header expires.
+    ledgerOp(t, 'release', s, () => ledger.release(t.id, v.n, 'now')).catch((e) => console.error('[orchestrator] kill release', e));
   }
   setStatus(t, 'killed');
 }
@@ -186,7 +191,7 @@ export function kill(ledger: Ledger, t: Task) {
 async function runSubtask(ledger: Ledger, t: Task, s: Sub, done: Map<string, Deferred>) {
   if (s.self_do) await selfDo(t, s, done);
   else await hireLoop(ledger, t, s, done);
-  if (!s.self_do) ledgerOp(t, 'returnLeftover', s, () => ledger.returnLeftover(t.id, s.n));
+  if (!s.self_do) await ledgerOp(t, 'returnLeftover', s, () => ledger.returnLeftover(t.id, s.n));
   setSub(t, s, 'returned');
 }
 
@@ -203,7 +208,7 @@ function failedVerdict(s: Sub) {
 }
 
 /** Every paid hire gets a receipt (8.8); verdict and attestation are null when it was never judged. */
-function writeReceipt(t: Task, s: Sub, hire: Hire, ev: Evaluation | null) {
+async function writeReceipt(ledger: Ledger, t: Task, s: Sub, hire: Hire, ev: Evaluation | null) {
   hire.verdict = ev?.verdict ?? null;
   const receipt: Receipt = {
     id: `rc_${randomUUID().slice(0, 8)}`, task_id: t.id, subtask_id: s.id, hire_id: hire.id, agent_handle: hire.agent_handle,
@@ -211,6 +216,9 @@ function writeReceipt(t: Task, s: Sub, hire: Hire, ev: Evaluation | null) {
     attestation_hash: ev?.attestation_hash ?? null, payment_hash: hire.payment_hash, payment_tx: null, receipt_tx: null,
   };
   t.receipts.push(receipt);
+  if (ledger.recordReceipt) { // chain: record_receipt on the contract fills receipt_tx
+    try { Object.assign(receipt, await ledger.recordReceipt(t.id, s.n, receipt)); } catch (e) { emit(t, 'error', { message: `receipt on chain: ${msg(e)}` }, s.id); }
+  }
   emit(t, 'receipt', receipt, s.id);
 }
 
@@ -228,7 +236,7 @@ async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Defer
     const hire = await hire1(ledger, t, s, c, row);
     if (!hire) continue;
     if (hire.state === 'OUTCOME_UNKNOWN') { // counted as spent, nothing to judge; counts against the re-hire limit
-      writeReceipt(t, s, hire, null);
+      await writeReceipt(ledger, t, s, hire, null);
       if (failedVerdict(s)) return finish(t, s, 'abandoned', done);
       continue;
     }
@@ -237,13 +245,13 @@ async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Defer
     try {
       ev = await evaluate(t, s, hire.deliverable_text ?? '', hire.parts, hire.id, hire.agent_handle, done);
     } catch (e) {
-      writeReceipt(t, s, hire, null); // paid even though the evaluation never finished (kill, evaluator outage)
+      await writeReceipt(ledger, t, s, hire, null); // paid even though the evaluation never finished (kill, evaluator outage)
       if (signal.aborted) throw e;
       // Rook's own outage is not the agent's failure: no verdict, no re-hire spend against a broken evaluator.
       emit(t, 'error', { message: `evaluation of ${hire.agent_handle} failed, subtask abandoned unjudged: ${msg(e)}` }, s.id);
       return finish(t, s, 'abandoned', done);
     }
-    writeReceipt(t, s, hire, ev);
+    await writeReceipt(ledger, t, s, hire, ev);
     if (ev.verdict === 'pass') {
       s.accepted = { hire_id: hire.id, agent_handle: hire.agent_handle, text: hire.deliverable_text ?? '' };
       return finish(t, s, 'passed', done);
@@ -262,6 +270,8 @@ function checkQuote(row: AcceptsRow, allow: Recipient[]): { reason: string; aler
   if (!rows.length) return { reason: `network ${row.network} / asset ${row.asset} not accepted by the marketplace` };
   if (!rows.some((r) => r.payTo === row.payTo)) return { reason: `payTo ${row.payTo} is not the marketplace treasury`, alert: true };
   if (!/^\d+$/.test(row.amount) || BigInt(row.amount) <= 0n) return { reason: `invalid amount ${row.amount}` };
+  const ttl = row.maxTimeoutSeconds;
+  if (!Number.isInteger(ttl) || ttl < 1 || ttl > config.maxPaymentTimeoutS) return { reason: `maxTimeoutSeconds ${ttl} is not an integer from 1 to ${config.maxPaymentTimeoutS}` };
   return null;
 }
 
@@ -295,8 +305,9 @@ async function quote(ledger: Ledger, t: Task, s: Sub, c: Candidate): Promise<Acc
   }
   const v = ledger.view(t.id)!;
   const balance = v.subtasks.find((x) => x.n === s.n)!.balance_atomic;
-  if (amount > balance) {
-    const short = amount - balance;
+  const need = amount + (ledger.minLeft ?? 0n); // chain: a payment never empties the sub-account
+  if (need > balance) {
+    const short = need - balance;
     if (short > v.reserve_remaining_atomic) {
       rejectQuote(t, s, c.handle, `price ${formatUsdc(amount)} exceeds balance ${formatUsdc(balance)} and the reserve cannot cover the ${formatUsdc(short)} top-up`);
       return null;
@@ -304,7 +315,7 @@ async function quote(ledger: Ledger, t: Task, s: Sub, c: Candidate): Promise<Acc
     try {
       // ponytail: the top-up happens before the hire; if that hire is then skipped unpaid, the money waits in this
       // subtask's balance until returnLeftover instead of going back to the shared reserve.
-      ledgerOp(t, 'topUp', s, () => ledger.topUp(t.id, s.n, short), { agent_handle: c.handle });
+      await ledgerOp(t, 'topUp', s, () => ledger.topUp(t.id, s.n, short), { agent_handle: c.handle });
     } catch (e) {
       if (!(e instanceof LedgerError)) throw e;
       signal.throwIfAborted();
@@ -325,12 +336,16 @@ async function hire1(ledger: Ledger, t: Task, s: Sub, c: Candidate, row: Accepts
   try {
     let auth: { header: string; payment_hash: string; amount: bigint };
     try {
-      auth = ledgerOp(t, 'authorize', s, () => ledger.authorize(t.id, s.n, row, t.allow), { agent_handle: c.handle });
+      auth = await ledgerOp(t, 'authorize', s, () => ledger.authorize(t.id, s.n, row, t.allow), { agent_handle: c.handle });
     } catch (e) {
       if (!(e instanceof LedgerError)) throw e;
       signal.throwIfAborted();
       rejectQuote(t, s, c.handle, `authorization refused: ${e.reason}`);
       return null;
+    }
+    if (signal.aborted) { // only an async (chain) signer lets an abort land here; the header never left Rook
+      await ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n, 'terminal'));
+      throw signal.reason;
     }
     const authAt = Date.now();
     const hire: Hire = {
@@ -339,6 +354,14 @@ async function hire1(ledger: Ledger, t: Task, s: Sub, c: Candidate, row: Accepts
       deliverable_text: null, parts: [], verdict: null, started_at: now(), ended_at: null,
     };
     s.hires.push(hire);
+    /** Ends the hire unpaid; true when the chain shows the payment landed anyway, and then it counts as paid. */
+    const endUnpaid = async (how: 'terminal' | 'wait') => {
+      const r = await ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n, how));
+      if (typeof r !== 'object' || !r.settled) return false;
+      hire.paid = true; hire.state = 'OUTCOME_UNKNOWN'; hire.ended_at = now();
+      emit(t, 'error', { message: `${c.handle}: the payment landed on chain although the hire ended unpaid; counted as spent` }, s.id);
+      return true;
+    };
 
     // No abort signal on /send: once the request leaves, the payment header is out. Waiting for the answer lets a
     // kill still learn the task id, cancel it and record how the payment ended (kill() leaves this one to us).
@@ -353,20 +376,21 @@ async function hire1(ledger: Ledger, t: Task, s: Sub, c: Candidate, row: Accepts
     if (signal.aborted) {
       if (sent.ok) { hire.a2a_task_id = sent.task.id; hire.context_id = sent.task.context_id; cancelBestEffort(c.handle, sent.task.id); }
       hire.state = t.status === 'killed' ? 'KILLED' : 'CANCELED'; hire.ended_at = now();
-      if (authorizedNow(ledger, t, s)) ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n));
+      // ponytail: released in Rook's books at once; on chain the header may still settle until it expires.
+      if (authorizedNow(ledger, t, s)) await ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n, 'now'));
       throw signal.reason;
     }
     if (!sent.ok && sent.error.code === 'outcome_unknown') {
       // The gateway saw a 502 and cannot tell whether the payment settled: count it as spent, never release it.
-      ledgerOp(t, 'settle', s, () => ledger.settle(t.id, s.n), { agent_handle: c.handle, payment_hash: hire.payment_hash, outcome: 'unknown' });
+      await ledgerOp(t, 'settle', s, () => ledger.settle(t.id, s.n), { agent_handle: c.handle, payment_hash: hire.payment_hash, outcome: 'unknown' });
       hire.paid = true; hire.state = 'OUTCOME_UNKNOWN'; hire.ended_at = now();
       emit(t, 'error', { message: `send to ${c.handle}: ${sent.error.message}; counted as spent` }, s.id);
       return hire;
     }
     if (!sent.ok) {
-      // ponytail: any other send failure releases the authorization. In live mode a network error after the agent
-      // accepted the payment could still charge; phase 2 checks the chain before releasing.
-      ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n));
+      // A 402 means the agent refused the payment: nothing can settle. Anything else waits for the expiry on chain,
+      // and a payment that landed meanwhile (the agent accepted it before the connection failed) counts as paid.
+      if (await endUnpaid(sent.error.code === 402 ? 'terminal' : 'wait')) return hire;
       hire.state = 'SEND_FAILED'; hire.ended_at = now();
       rejectQuote(t, s, c.handle, `send failed: ${sent.error.code} ${sent.error.message}`);
       return null;
@@ -394,14 +418,12 @@ async function hire1(ledger: Ledger, t: Task, s: Sub, c: Candidate, row: Accepts
     if (!final) {
       hire.state = 'TIMEOUT';
       emit(t, 'a2a_state', { hire_id: hire.id, agent_handle: c.handle, a2a_task_id: sent.task.id, state: 'TIMEOUT' }, s.id);
-      ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n));
-      return null;
+      return (await endUnpaid('wait')) ? hire : null;
     }
-    if (final.state !== 'COMPLETED') {
-      ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n));
-      return null;
+    if (final.state !== 'COMPLETED') { // REJECTED, FAILED, CANCELED: terminal and unpaid
+      return (await endUnpaid('terminal')) ? hire : null;
     }
-    ledgerOp(t, 'settle', s, () => ledger.settle(t.id, s.n), { agent_handle: c.handle, payment_hash: hire.payment_hash });
+    await ledgerOp(t, 'settle', s, () => ledger.settle(t.id, s.n), { agent_handle: c.handle, payment_hash: hire.payment_hash });
     hire.paid = true;
     hire.parts = final.artifacts.flatMap((a) => a.parts ?? []);
     hire.deliverable_text = hire.parts.filter((p) => typeof p.text === 'string').map((p) => p.text).join('\n\n');

@@ -3,10 +3,13 @@ import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 // ponytail: tiny .env loader (repo root, then cwd); real env vars win.
+// NEAR role keys are never read from a .env file: keys come from the environment or files outside the repo.
+const NEAR_KEY = /^ROOK_(SIGNER|ORCHESTRATOR)_KEY$/;
 for (const p of [resolve(import.meta.dirname, '../../../.env'), resolve(process.cwd(), '.env')]) {
   if (!existsSync(p)) continue;
   for (const line of readFileSync(p, 'utf8').split(/\r?\n/)) {
     const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
+    if (m && NEAR_KEY.test(m[1])) { console.warn(`[config] ignoring ${m[1]} in ${p}: set it in the environment, never in a file in the repo`); continue; }
     if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^['"]|['"]$/g, '');
   }
 }
@@ -36,6 +39,8 @@ export const config = {
     get evaluator() { return port('EVALUATOR', 7102); },
     get marketGateway() { return port('MARKET_GATEWAY', 7103); },
     get simulator() { return port('SIMULATOR', 7104); },
+    get signer() { return port('SIGNER', 7105); },
+    get chainGateway() { return port('CHAIN_GATEWAY', 7106); },
   },
   urls: {
     get orchestrator() { return url('ORCHESTRATOR', 7100); },
@@ -43,6 +48,8 @@ export const config = {
     get evaluator() { return url('EVALUATOR', 7102); },
     get marketGateway() { return url('MARKET_GATEWAY', 7103); },
     get simulator() { return url('SIMULATOR', 7104); },
+    get signer() { return url('SIGNER', 7105); },
+    get chainGateway() { return url('CHAIN_GATEWAY', 7106); },
   },
 
   get marketBase() { return env('MARKET_BASE_URL', 'https://market.near.ai'); },
@@ -51,4 +58,17 @@ export const config = {
   get paymentGraceS() { return num('ROOK_PAYMENT_GRACE_S', 600); },
   get maxRehires() { return num('ROOK_MAX_REHIRES', 2); },
   get ratePerMin() { return num('ROOK_RATE_PER_MIN', 60); },
+
+  // Phase 2 (docs/x402-payments-plan.md). `sim`: in-memory ledger; `chain`: signer + chain-gateway + budget contract.
+  get ledger() { return env('ROOK_LEDGER', 'sim') as 'sim' | 'chain'; },
+  get nearNetwork() { return env('NEAR_NETWORK', 'testnet') as 'testnet' | 'mainnet'; },
+  /** No default on purpose: nothing talks to a real NEAR RPC unless the human sets it. */
+  get nearRpcUrl() {
+    const u = process.env.NEAR_RPC_URL;
+    if (!u) throw new Error('NEAR_RPC_URL is not set');
+    return u;
+  },
+  get contractId() { return env('ROOK_CONTRACT_ID', ''); },
+  /** Longest payment validity Rook signs or accepts, in blocks (about seconds): a quote asking more is refused. */
+  get maxPaymentTimeoutS() { return num('ROOK_MAX_PAYMENT_TIMEOUT_S', 3600); },
 };

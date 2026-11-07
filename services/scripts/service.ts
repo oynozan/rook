@@ -1,5 +1,5 @@
 // Runs one service: `tsx scripts/service.ts <name>`. scripts/dev.ts spawns one of these per service.
-const NAMES = ['simulator', 'market-gateway', 'planner', 'evaluator', 'orchestrator'];
+const NAMES = ['simulator', 'market-gateway', 'planner', 'evaluator', 'signer', 'chain-gateway', 'orchestrator'];
 const name = process.argv[2];
 if (!NAMES.includes(name)) {
   console.error(`usage: service.ts <${NAMES.join('|')}>`);

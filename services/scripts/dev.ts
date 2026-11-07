@@ -10,6 +10,8 @@ const ORDER: [name: string, url: () => string][] = [
   ['market-gateway', () => config.urls.marketGateway],
   ['planner', () => config.urls.planner],
   ['evaluator', () => config.urls.evaluator],
+  // ROOK_LEDGER=chain only: they hold keys and send NEAR transactions (NEAR_RPC_URL, docs/x402-payments-plan.md).
+  ...(config.ledger === 'chain' ? [['signer', () => config.urls.signer], ['chain-gateway', () => config.urls.chainGateway]] as [string, () => string][] : []),
   ['orchestrator', () => config.urls.orchestrator],
 ];
 
@@ -25,14 +27,21 @@ process.env.ROOK_LLM = config.llm;
 process.env.ROOK_MARKET = config.market;
 
 const color = process.stdout.isTTY && !process.env.NO_COLOR;
-const COLORS = [36, 33, 35, 32, 34];
+const COLORS = [36, 33, 35, 32, 31, 90, 34];
 const width = Math.max(...ORDER.map(([n]) => n.length));
 const tag = (name: string, i: number) => {
   const t = name.padEnd(width);
   return color ? `\x1b[${COLORS[i]}m${t}\x1b[0m |` : `${t} |`;
 };
 
-console.log(`rook dev: market=${config.market} llm=${config.llm}`);
+console.log(`rook dev: market=${config.market} llm=${config.llm} ledger=${config.ledger}`);
+if (config.ledger === 'chain') {
+  // Origin only: commercial RPC URLs often carry an API key in the path or query.
+  const rpc = process.env.NEAR_RPC_URL ? (URL.canParse(process.env.NEAR_RPC_URL) ? new URL(process.env.NEAR_RPC_URL).origin : '(NEAR_RPC_URL is not a URL)') : '(NEAR_RPC_URL not set)';
+  console.log(`  chain: ${config.nearNetwork} via ${rpc}, contract ${config.contractId || '(ROOK_CONTRACT_ID not set)'}`);
+  // The chain services read the payment network the simulator should quote in.
+  if (config.market === 'sim') process.env.SIM_PAYMENT_NETWORK ??= `near:${config.nearNetwork}`;
+}
 if (config.llm === 'near') {
   console.log(`  models: planner=${config.plannerModel} evaluator=${config.evaluatorModel} sim-agent=${config.simAgentModel}; cost guard ${config.llmMaxUsd} USD per process`);
 } else {
@@ -54,6 +63,15 @@ process.on('SIGINT', () => stopAll(0));
 process.on('SIGTERM', () => stopAll(0));
 process.on('exit', () => { for (const c of children) if (c.exitCode === null) c.kill(); });
 
+/** Each role's NEAR key goes only to the service that uses it (design A key split, x402-payments-plan.md 4.6). */
+function childEnv(name: string) {
+  const env: NodeJS.ProcessEnv = { ...process.env, ROOK_DEV_CHILD: '1' };
+  for (const k of Object.keys(env)) {
+    if ((k.startsWith('ROOK_SIGNER_') && name !== 'signer') || (k.startsWith('ROOK_ORCHESTRATOR_') && name !== 'chain-gateway')) delete env[k];
+  }
+  return env;
+}
+
 const tsx = import.meta.resolve('tsx');
 const entry = new URL('./service.ts', import.meta.url);
 
@@ -70,7 +88,7 @@ for (const [i, [name, url]] of ORDER.entries()) {
   if (name === 'simulator' && config.market !== 'sim') continue;
   // node --import tsx directly (not npx), so killing the child kills the service on every OS.
   const child = spawn(process.execPath, ['--import', tsx, fileURLToPath(entry), name], {
-    env: { ...process.env, ROOK_DEV_CHILD: '1' }, stdio: ['pipe', 'pipe', 'pipe'], // stdin pipe: see service.ts
+    env: childEnv(name), stdio: ['pipe', 'pipe', 'pipe'], // stdin pipe: see service.ts
   });
   children.push(child);
   for (const stream of [child.stdout!, child.stderr!]) {

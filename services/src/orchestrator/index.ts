@@ -4,7 +4,8 @@ import { config } from '../shared/config.ts';
 import { bigintReplacer, call, HttpError, serve, type Ctx, type Running } from '../shared/http.ts';
 import { parseUsdc } from '../shared/money.ts';
 import type { Plan, RookEvent } from '../shared/types.ts';
-import { createLedger } from './ledger.ts';
+import { createChainLedger } from './chain-ledger.ts';
+import { createLedger, type Ledger } from './ledger.ts';
 import { kill, runTask } from './runner.ts';
 import { emit, isTerminal, newTask, setPlan, setStatus, snapshot, taskView, type Task } from './store.ts';
 
@@ -16,7 +17,9 @@ const CreateBody = z.object({
 
 export async function start(port = config.ports.orchestrator): Promise<Running> {
   const tasks = new Map<string, Task>();
-  const ledger = createLedger();
+  const chain = config.ledger === 'chain' ? createChainLedger() : null;
+  const ledger: Ledger = chain ?? createLedger();
+  const claims = new Set<string>(); // task ids and `cid:<contract task>` with a /funded check in flight
   const get = (id: string) => {
     const t = tasks.get(id);
     if (!t) throw new HttpError(404, `no task ${id}`);
@@ -56,17 +59,58 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
 
     'GET /tasks/:id': ({ params }) => snapshot(get(params.id), ledger),
 
-    'POST /tasks/:id/approve': ({ params, body }) => {
+    'POST /tasks/:id/approve': async ({ params, body }) => {
       const t = get(params.id);
-      if (t.status !== 'planned') throw new HttpError(409, `task is ${t.status}, approve needs planned`);
+      const reprint = chain && t.status === 'approved' && !chain.contractTaskOf(t.id); // funding instructions again
+      if (t.status !== 'planned' && !reprint) throw new HttpError(409, `task is ${t.status}, approve needs planned`);
       if (!t.subtasks.length) throw new HttpError(409, 'the plan has no subtasks');
-      if (config.market === 'live') {
-        throw new HttpError(409, 'live market: paying agents needs x402 signing, which is phase 2; see docs/x402-payments-plan.md');
+      if (config.market === 'live' && !chain) {
+        throw new HttpError(409, 'live market: paying agents needs ROOK_LEDGER=chain (signer, chain-gateway, budget contract); see docs/x402-payments-plan.md');
+      }
+      if (chain) {
+        // Rook never creates the task on chain: the human funds it with the caps they approve, then calls /funded.
+        const funding = await fundingInstructions(t);
+        setStatus(t, 'approved');
+        return { ...taskView(t), funding };
       }
       t.funder = typeof body?.funder_account === 'string' && body.funder_account ? body.funder_account : 'funder.sim';
       setStatus(t, 'approved');
       void runTask(ledger, t).catch((e) => console.error('[orchestrator] runTask', e));
       return taskView(t);
+    },
+
+    /** Chain mode: the human's ft_transfer_call created contract task `contract_task_id`; check it matches the plan, then run. */
+    'POST /tasks/:id/funded': async ({ params, body }) => {
+      const t = get(params.id);
+      if (!chain) throw new HttpError(409, 'only with ROOK_LEDGER=chain');
+      if (t.status !== 'approved') throw new HttpError(409, `task is ${t.status}, funded needs approved`);
+      const cid = typeof body?.contract_task_id === 'string' ? body.contract_task_id : '';
+      if (!/^[0-9a-z]+$/.test(cid)) throw new HttpError(400, 'contract_task_id is required');
+      const bound = chain.contractTaskOf(t.id);
+      if (bound !== null) throw new HttpError(409, `task is already funded by contract task ${bound}`);
+      for (const other of tasks.values()) if (chain.contractTaskOf(other.id) === cid) throw new HttpError(409, `contract task ${cid} already funds ${other.id}`);
+      // Claimed before the await, so two overlapping /funded calls cannot both bind and run.
+      if (claims.has(t.id) || claims.has(`cid:${cid}`)) throw new HttpError(409, `task ${t.id} or contract task ${cid} is already being checked`);
+      claims.add(t.id).add(`cid:${cid}`);
+      try {
+        const { task: ct, subtasks } = await call(`${config.urls.chainGateway}/task/${cid}`);
+        const want = expected(t);
+        const bad = [
+          ct.budget !== t.budget_atomic && `budget ${ct.budget} is not ${t.budget_atomic}`,
+          ct.reserve !== want.reserve && `reserve ${ct.reserve} is not ${want.reserve}`,
+          JSON.stringify(ct.caps) !== JSON.stringify(want.caps) && `caps ${JSON.stringify(ct.caps)} are not the plan's ${JSON.stringify(want.caps)}`,
+          (ct.status !== 'Open' || ct.killed) && `contract task is ${ct.killed ? 'killed' : ct.status}`,
+          subtasks.length > 0 && 'contract task already has funded subtasks',
+        ].filter(Boolean);
+        if (bad.length) throw new HttpError(409, `contract task ${cid} does not match the approved plan: ${bad.join('; ')}`);
+        if (t.status !== 'approved') throw new HttpError(409, `task is ${t.status}, funded needs approved`); // killed meanwhile
+        chain.bind(t.id, cid, want.nmap);
+        t.funder = ct.funder;
+        void runTask(ledger, t).catch((e) => console.error('[orchestrator] runTask', e));
+        return { ...taskView(t), contract_task_id: cid };
+      } finally {
+        claims.delete(t.id); claims.delete(`cid:${cid}`);
+      }
     },
 
     'POST /tasks/:id/cancel': ({ params }) => {
@@ -80,7 +124,9 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       const t = get(params.id);
       if (isTerminal(t.status)) throw new HttpError(409, `task is already ${t.status}`);
       kill(ledger, t);
-      return taskView(t);
+      if (!chain) return taskView(t);
+      const cid = chain.contractTaskOf(t.id);
+      return { ...taskView(t), human_action: cid ? `The signer refuses new payments. To stop funding on chain too, the contract owner calls kill_task: near contract call-function as-transaction ${config.contractId || '<contract>'} kill_task json-args '{"task_id":"${cid}"}' prepaid-gas '30 Tgas' attached-deposit '0 NEAR' sign-as <owner> network-config ${config.nearNetwork} sign-with-keychain send` : null };
     },
 
     'GET /tasks/:id/events': (ctx) => events(ctx, get(ctx.params.id)),
@@ -92,6 +138,30 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       for (const t of tasks.values()) if (!isTerminal(t.status)) t.abort.abort(new Error('orchestrator shutting down'));
       await running.close();
     },
+  };
+}
+
+/** Contract caps in plan order (self_do subtasks have none), Rook n -> contract n, and the reserve the contract will compute. */
+function expected(t: Task) {
+  const hired = t.subtasks.filter((s) => !s.self_do);
+  const reserve_bps = Math.round(t.reserve_share * 10_000);
+  return {
+    reserve_bps, caps: hired.map((s) => s.cap_atomic), nmap: new Map(hired.map((s, i) => [s.n, i + 1])),
+    reserve: ((BigInt(t.budget_atomic) * BigInt(reserve_bps)) / 10_000n).toString(),
+  };
+}
+
+/** What the human sends: USDC ft_transfer_call to the contract with the plan's caps in msg. */
+async function fundingInstructions(t: Task) {
+  const want = expected(t);
+  if (!want.caps.length) throw new HttpError(409, 'every subtask is self_do: nothing to fund on chain');
+  if (want.reserve !== t.plan?.budget.reserve_atomic) {
+    throw new HttpError(409, `reserve_share ${t.reserve_share} gives ${want.reserve} on chain but ${t.plan?.budget.reserve_atomic} in the plan; use a share with at most 4 decimals`);
+  }
+  const cfg = await call(`${config.urls.chainGateway}/config`);
+  return {
+    network: cfg.network, contract_id: cfg.contract_id, usdc: cfg.usdc, funder: cfg.owner, amount_atomic: t.budget_atomic,
+    msg: JSON.stringify({ create_task: { reserve_bps: want.reserve_bps, caps: want.caps } }),
   };
 }
 

@@ -117,4 +117,6 @@ export type Receipt = {
   id: string; task_id: string; subtask_id: string; hire_id: string; agent_handle: string; a2a_task_id: string | null;
   amount_atomic: string; verdict: 'pass' | 'fail' | null; attestation_hash: string | null; payment_hash: string;
   payment_tx: string | null; receipt_tx: string | null;
+  // ROOK_LEDGER=chain: the sub-account's USDC balance read right after the hire settled (no indexer yet).
+  evidence?: { account_id: string; ft_balance_atomic: string };
 };
