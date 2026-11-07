@@ -73,9 +73,10 @@ export function WalletProvider({ children }: { children: ReactNode }) {
     async disconnect() {
       try {
         await connector.current?.disconnect();
-      } finally {
-        setAccount(null);
+      } catch {
+        // The wallet may already be gone. Either way, this page should stop treating it as connected.
       }
+      setAccount(null);
     },
   }), [account, checking, connecting, failed]);
 

@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { AppShell } from './AppShell';
+import { Chat } from './Chat';
 import { listTasks } from './orchestrator';
 import { WalletProvider } from './wallet';
 
@@ -9,7 +10,10 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   const tasks = await listTasks().catch(() => null);
   return (
     <WalletProvider>
-      <AppShell tasks={tasks}>{children}</AppShell>
+      <AppShell tasks={tasks}>
+        <Chat tasks={tasks} />
+        {children}
+      </AppShell>
     </WalletProvider>
   );
 }

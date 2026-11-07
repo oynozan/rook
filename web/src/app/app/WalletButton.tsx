@@ -6,7 +6,7 @@ import { NETWORK, useWallet } from './wallet';
 /** Named accounts read as they are; 64-character implicit ones keep their ends. */
 const shortAccount = (id: string) => (id.length > 20 ? `${id.slice(0, 6)}…${id.slice(-6)}` : id);
 
-export function AccountMenu({ account, onDisconnect }: { account: string; onDisconnect: () => void }) {
+export function AccountMenu({ account, onDisconnect, inSidebar }: { account: string; onDisconnect: () => void; inSidebar?: boolean }) {
   const [open, setOpen] = useState(false);
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
@@ -31,14 +31,16 @@ export function AccountMenu({ account, onDisconnect }: { account: string; onDisc
         aria-expanded={open}
         aria-haspopup="true"
         onClick={() => setOpen((o) => !o)}
-        className="inline-flex min-h-13 max-w-[60vw] cursor-pointer items-center gap-2.5 rounded-full border border-ink/25 px-5 text-[1.0625rem] font-medium transition-colors duration-200 hover:border-ink hover:bg-ink/5 focus-visible:border-ink active:translate-y-px motion-reduce:transition-none md:min-h-14 md:px-6.5 md:text-lg"
+        className={`cursor-pointer items-center gap-2.5 font-medium transition-colors duration-200 hover:bg-ink/5 active:translate-y-px motion-reduce:transition-none ${inSidebar
+          ? 'flex min-h-11 w-full rounded-lg px-3 text-left'
+          : 'inline-flex min-h-13 max-w-[60vw] rounded-full border border-ink/25 px-5 text-[1.0625rem] hover:border-ink focus-visible:border-ink md:min-h-14 md:px-6.5 md:text-lg'}`}
       >
         <span className="size-2.5 shrink-0 bg-accent" aria-hidden="true" />
         <span className="sr-only">Connected wallet: </span>
-        <span className="truncate">{shortAccount(account)}</span>
+        <span className="min-w-0 truncate">{shortAccount(account)}</span>
       </button>
       {open && (
-        <div className="absolute top-full right-0 z-10 mt-2 w-72 max-w-[calc(100vw-2.5rem)] rounded-2xl border border-ink/15 bg-white p-4 shadow-lg shadow-ink/10">
+        <div className={`absolute z-10 rounded-2xl ${inSidebar ? 'inset-x-0 bottom-full mb-2' : 'top-full right-0 mt-2 w-72 max-w-[calc(100vw-2.5rem)]'} border border-ink/15 bg-white p-4 shadow-lg shadow-ink/10`}>
           <p className="text-sm text-ink/65">Connected on NEAR {NETWORK}</p>
           <p className="mt-1 font-mono text-sm break-all">{account}</p>
           <button
@@ -55,12 +57,10 @@ export function AccountMenu({ account, onDisconnect }: { account: string; onDisc
 }
 
 export function WalletButton() {
-  const { account, connecting, failed, connect, disconnect } = useWallet();
-
-  if (account) return <AccountMenu account={account} onDisconnect={disconnect} />;
+  const { connecting, failed, connect } = useWallet();
 
   return (
-    <div className="flex flex-col items-end">
+    <div className="relative flex flex-col items-end">
       <button
         type="button"
         onClick={connect}

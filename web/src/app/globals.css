@@ -11,7 +11,7 @@
 
 @layer base {
   :focus-visible {
-    outline: 2px solid var(--color-ink);
+    outline: 2px solid var(--color-accent);
     outline-offset: 3px;
   }
 }
@@ -21,4 +21,19 @@
   background-image: radial-gradient(currentColor 1.25px, transparent 1.5px);
   background-size: 11px 11px;
   mask-image: linear-gradient(to bottom, transparent, #000 25%, #000 75%, transparent);
+}
+
+/* Chat pacing: things arrive and settle; the three blocks show work in progress. */
+@media (prefers-reduced-motion: no-preference) {
+  @keyframes rook-in {
+    from { opacity: 0; transform: translateY(8px); }
+  }
+  @keyframes rook-block {
+    0%, 70%, 100% { opacity: 0.3; transform: translateY(0); }
+    35% { opacity: 1; transform: translateY(-4px); }
+  }
+  .rook-in { animation: rook-in 0.45s cubic-bezier(0.16, 1, 0.3, 1) both; }
+  .rook-blocks > span { animation: rook-block 1.1s ease-in-out infinite; }
+  .rook-blocks > span:nth-child(2) { animation-delay: 0.15s; }
+  .rook-blocks > span:nth-child(3) { animation-delay: 0.3s; }
 }

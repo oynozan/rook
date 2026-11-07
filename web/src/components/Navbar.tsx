@@ -45,7 +45,7 @@ export function Navbar() {
       >
         Read the code
         <svg
-          className="size-5 shrink-0 transition-transform duration-250 group-hover:translate-x-[3px] group-focus-visible:translate-x-[3px] motion-reduce:translate-x-0! motion-reduce:transition-none"
+          className="size-5 shrink-0 transition-transform duration-250 group-hover:translate-x-0.75 group-focus-visible:translate-x-0.75 motion-reduce:translate-x-0! motion-reduce:transition-none"
           viewBox="0 0 16 16"
           fill="none"
           stroke="currentColor"

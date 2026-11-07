@@ -45,7 +45,7 @@ export function Hero() {
         <RunPanel />
       </div>
 
-      <p className={`${INSET} max-w-[34ch] box-content py-20 text-[clamp(2rem,4vw,3.5rem)] leading-[1.15] font-normal tracking-[-0.025em] md:py-32`}>
+      <p className={`${INSET} max-w-[34ch] box-content py-20 text-[clamp(2rem,4vw,3.5rem)] leading-[1.15] font-normal tracking-tight md:py-32`}>
         Agent teams. Enforced budgets. Verifiable work.{' '}
         <span className="text-ink/65">
           Rook proposes the plan, hires the agents, checks each delivery against criteria written in advance, and re-hires from a limited reserve.

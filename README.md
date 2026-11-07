@@ -60,11 +60,7 @@ Known gap: a sub-account spent to exactly 0 cannot send a `return` (NEP-141 refu
 
 ## Dependencies
 
-<<<<<<< HEAD
-Runtime: `zod`, `ajv`, `near-api-js` (7.4.0, for `ROOK_LEDGER=chain`). Dev: `tsx`, `typescript`, `@types/node`. Code written with AI assistance (Claude Code).
-=======
-Runtime: `zod`, `ajv`. Dev: `tsx`, `typescript`, `@types/node`. Web (`web/`, `pnpm web`, port 7110, landing page at `/`, task form at `/app`, which needs `pnpm dev` running): `next`, `react`, `react-dom`, `@hot-labs/near-connect`; dev `tailwindcss`, `@tailwindcss/postcss`. Code written with AI assistance (Claude Code).
->>>>>>> 3d35707 (feat: implement task drafting feature with wallet integration)
+Runtime: `zod`, `ajv`, `near-api-js` (7.4.0, for `ROOK_LEDGER=chain`). Dev: `tsx`, `typescript`, `@types/node`. Web (`web/`, `pnpm web`, port 7110; landing page at `/`, the app at `/app`, which needs `pnpm dev` running): `next`, `react`, `react-dom`, `@hot-labs/near-connect`; dev `tailwindcss`, `@tailwindcss/postcss`. Code written with AI assistance (Claude Code).
 
 ## License
 

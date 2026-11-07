@@ -35,13 +35,13 @@ const MARKER_STYLE: Record<string, string> = {
 function HireCard({ card, slot }: { card: Card; slot: string }) {
   if (!card) {
     return (
-      <div className="flex min-h-[4.75rem] min-w-0 items-center rounded-md border border-dashed border-white/15 px-2.5 text-xs text-white/55 md:text-sm lg:h-full lg:px-3 xl:px-5 xl:text-base">
+      <div className="flex min-h-19 min-w-0 items-center rounded-md border border-dashed border-white/15 px-2.5 text-xs text-white/55 md:text-sm lg:h-full lg:px-3 xl:px-5 xl:text-base">
         {slot}
       </div>
     );
   }
   return (
-    <div className={`flex min-h-[4.75rem] min-w-0 flex-col justify-center gap-0.5 rounded-md border px-2.5 py-1.5 transition-colors duration-300 motion-reduce:transition-none lg:h-full lg:px-3 xl:gap-1 xl:px-5 ${CARD_STYLE[card.state]}`}>
+    <div className={`flex min-h-19 min-w-0 flex-col justify-center gap-0.5 rounded-md border px-2.5 py-1.5 transition-colors duration-300 motion-reduce:transition-none lg:h-full lg:px-3 xl:gap-1 xl:px-5 ${CARD_STYLE[card.state]}`}>
       <p className={`truncate font-mono text-[0.6875rem] md:text-sm lg:text-xs xl:text-base ${card.state === 'failed' || card.state === 'unpaid' ? 'line-through' : ''}`}>{card.agent}</p>
       <p className="flex items-center gap-1.5 text-sm leading-tight font-medium md:text-base xl:text-lg">
         <span className={`size-2 shrink-0 ${MARKER_STYLE[card.state]}`} aria-hidden="true" />
