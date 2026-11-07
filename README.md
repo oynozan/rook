@@ -34,3 +34,7 @@ CLI: `rook plan | run | approve <id> | status <id> | watch <id> | kill <id> | li
 ## Dependencies
 
 Runtime: `zod`, `ajv`. Dev: `tsx`, `typescript`, `@types/node`. Code written with AI assistance (Claude Code).
+
+## License
+
+MIT, see [LICENSE](LICENSE).
