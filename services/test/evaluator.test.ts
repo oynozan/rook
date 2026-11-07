@@ -157,3 +157,16 @@ test('a contains pattern with regex characters also matches its literal text', a
   const ev = await evaluate(req('s4', MARKET, [c('c1', 'contains', { pattern: 'Price (USD)' }), c('c2', 'contains', { pattern: 'gini' })]));
   assert.deepEqual(ev.failed_criteria, ['c2']);
 });
+
+test('contains: literal phrase matches ignoring punctuation and spacing', async () => {
+  const { start } = await import('../src/evaluator/index.ts');
+  const ev = await start(0);
+  try {
+    const r = await fetch(`${ev.url}/evaluate`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+      task_id: 't', subtask_id: 's1', brief: 'b',
+      criteria: [{ id: 'c1', kind: 'contains', description: 'd', spec: { pattern: 'Price USD' } }, { id: 'c2', kind: 'contains', description: 'd', spec: { pattern: 'Market cap USD' } }],
+      deliverable: { text: 'SIMULATED market snapshot.\nPrice (USD): 3.12\nMarket cap: 3,680,000,000', parts: [] }, peers: [] }) });
+    const e: any = await r.json();
+    assert.deepEqual(e.results.filter((x: any) => x.criterion_id.startsWith('c')).map((x: any) => x.passed), [true, false]);
+  } finally { await ev.close(); }
+});

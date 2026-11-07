@@ -37,3 +37,8 @@ test('briefFacts: comma-separated label sentence; non-numeric labels left to the
   assert.deepEqual(g.split('\n').map((l) => l.split(':')[0]), ['Price (USD)', '24h volume (USD)', 'Total supply']);
   assert.match(g, /^Price \(USD\): 3\.12$/m);
 });
+
+test('briefFacts: "Label: <placeholder>" lines', () => {
+  const f = briefFacts("Print as 'Label: value':\nPrice USD: <current NEAR price in US dollars>\nMarket cap USD: <market cap>\nPrice 30d change pct: <percent, may be negative>");
+  assert.deepEqual(f.split('\n').map((l) => l.split(':')[0]), ['Price USD', 'Market cap USD', 'Price 30d change pct']);
+});

@@ -113,7 +113,7 @@ export function simValue(label: string): string {
  *  fact sheet without the contract id, so it never names a different asset than the brief's. */
 export function briefFacts(brief: string): string {
   const quoted = [...brief.matchAll(/["']([A-Za-z][^"'\n:]{1,60}?):?["']/g)].map((m) => m[1]);
-  const lines = [...brief.matchAll(/^[ \t\-*]*([A-Za-z0-9][^:\n"']{1,60}):[ \t]*$/gm)].map((m) => m[1]);
+  const lines = [...brief.matchAll(/^[ \t\-*]*([A-Za-z0-9][^:\n"'<]{1,60}):[ \t]*(?:<[^>\n]*>|\[[^\]\n]*\]|_+|\.{3}|…)?[ \t]*$/gm)].map((m) => m[1]);
   // "... using these exact labels: A, B (USD), C and D. Next sentence"
   const listed = [...brief.matchAll(/\blabels[ \t]*:[ \t]*([^\n]+?)(?:\.(?:\s|$)|\n|$)/gi)]
     .flatMap((m) => m[1].split(/,\s*|\s+and\s+/)).filter((l) => !/['"]/.test(l));
@@ -131,6 +131,7 @@ async function written(agent: SimAgent, brief: string): Promise<string> {
     const { text } = await chat(`sim-agent:${agent.handle}`, config.simAgentModel, [
       { role: 'system', content: `You are ${agent.name} (${agent.handle}), a SIMULATED Agent Market agent in a software test harness. Write the deliverable for the brief in Markdown and mark it SIMULATED. `
         + 'Your simulated data pipeline already produced the dataset for this brief, and it describes exactly the subject of the brief; report those values as given and write the requested analysis around them. Do not refuse, do not question which asset the data belongs to, do not say data is missing or needs a live query, and do not replace values with placeholders. '
+        + 'Write the qualitative parts with confident, specific simulated detail (named roles, accounts, mechanisms, venues) and cover every question the brief asks; apart from the SIMULATED mark, do not hedge or add caveats about the data. '
         + 'Print every figure on its own line as "Label: value", using the exact label wording of the dataset, with no Markdown emphasis on that line. For a label the brief asks for that is not in the dataset, give a plausible value.' },
       { role: 'user', content: `Simulated dataset for this brief:\n${briefFacts(brief)}\n\nBrief:\n"""\n${brief.slice(0, 4000)}\n"""` },
     ], 6000, { sign: false });

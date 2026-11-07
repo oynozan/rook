@@ -94,7 +94,9 @@ export async function evaluate(req: EvaluateRequest): Promise<Evaluation> {
     try { re = new RegExp(c.spec.pattern, 'i'); } catch { res(c.id, c.kind, false, `invalid pattern /${c.spec.pattern}/`); continue; }
     // ponytail: planner-validated patterns run unguarded; a catastrophic-backtracking regex would stall this process.
     // A planner-written literal like "Price (USD)" compiles but does not match itself as a regex: accept it verbatim too.
-    const ok = re.test(text) || text.toLowerCase().includes(c.spec.pattern.toLowerCase());
+    // Literal phrases also match ignoring punctuation and spacing: "Price USD" matches "Price (USD)".
+    const squash = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+    const ok = re.test(text) || text.toLowerCase().includes(c.spec.pattern.toLowerCase()) || (squash(c.spec.pattern).length >= 4 && squash(text).includes(squash(c.spec.pattern)));
     res(c.id, c.kind, ok, ok ? `matches /${c.spec.pattern}/i` : `no match for /${c.spec.pattern}/i`);
   }
   for (const c of of('schema')) {
