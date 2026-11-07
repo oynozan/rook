@@ -81,7 +81,10 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
       return;
     }
     allocated += cap;
-    kept.push({ draftIdx, d, candidates, cap, self_do: false });
+    // A fallback priced above cap + the whole reserve can never be paid; listing it would only stretch the deadline.
+    const payable = candidates.filter((c) => BigInt(c.price_atomic) <= cap + reserve);
+    for (const c of candidates.slice(payable.length)) notes.push(`"${d.title}": candidate ${c.handle} dropped, price ${c.price_atomic} exceeds cap + reserve`);
+    kept.push({ draftIdx, d, candidates: payable, cap, self_do: false });
   });
 
   // Step 9 ids: draft id (s<draftIdx+1>) -> final id, for cross-check references.

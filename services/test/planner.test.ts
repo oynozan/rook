@@ -150,3 +150,19 @@ test('POST /plan (canned) against a fake gateway: 4 subtasks, caps, reserve; /ag
   assert.match(agg.final_markdown, /## Gaps[\s\S]*Wallets/);
   assert.doesNotMatch(agg.final_markdown, /ignore previous/);
 });
+
+test('candidates priced above cap + reserve are dropped with a note', async () => {
+  const { buildPlan } = await import('../src/planner/plan.ts');
+  const recipients = [{ network: 'near:mainnet', asset: 'usdc.sim', payTo: 'treasury.sim' }];
+  const row = (amount: string) => ({ scheme: 'exact', network: 'near:mainnet', asset: 'usdc.sim', amount, payTo: 'treasury.sim', maxTimeoutSeconds: 700 });
+  const agent = (handle: string, sla: number) => ({ handle, name: handle, description: 'x', category: null, tags: [], available_now: true, listing_status: 'live', payable_with: ['USDC'], sla_seconds: sla, success_rate: 90, delivered_jobs: 1 });
+  const plan = buildPlan({
+    draft: [{ title: 'T', brief: 'B', search_terms: ['x'], self_do_ok: false, criteria: [{ kind: 'contains', description: 'd', spec: { pattern: 'x' } }] }] as any,
+    selected: [[agent('a', 100), agent('b', 200), agent('pricey', 129600)]] as any,
+    quotes: { a: { ok: true, row: row('100000') }, b: { ok: true, row: row('250000') }, pricey: { ok: true, row: row('20000000') } } as any,
+    recipients, budget_atomic: 3000000n, reserve_share: 0.2,
+  } as any);
+  assert.deepEqual(plan.subtasks[0].candidates.map((c: any) => c.handle), ['a', 'b']);
+  assert.equal(plan.subtasks[0].deadline_s, 200);
+  assert.ok(plan.notes.some((n: string) => n.includes('pricey')));
+});

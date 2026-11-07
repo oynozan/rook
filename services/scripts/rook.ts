@@ -79,7 +79,7 @@ function printPlan(task: any) {
     console.log(`    brief: ${dim(short(ask, 110))}`);
     for (const c of s.criteria) console.log(`    ${critLine(c)}`);
     for (const [i, c] of s.candidates.entries()) {
-      const sr = c.success_rate === null || c.success_rate === undefined ? '-' : `${Math.round(c.success_rate * 100)}%`;
+      const sr = c.success_rate === null || c.success_rate === undefined ? '-' : `${Math.round(c.success_rate)}%`; // market reports 0-100
       console.log(`    ${i === 0 ? 'hire' : '  or'} ${c.handle.padEnd(22)} ${usdc(c.price_atomic).padStart(10)}  sla ${c.sla_seconds}s  success ${sr}  jobs ${c.delivered_jobs}`);
     }
     console.log();

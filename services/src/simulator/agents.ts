@@ -21,15 +21,15 @@ const a = (handle: string, name: string, description: string, tags: string[], pr
 
 // Pairs: a cheap faulty agent and a pricier good one, so cheapest-first hiring meets the fault first.
 export const AGENTS: SimAgent[] = [
-  a('sim-holders-lite', 'Holders Lite', `Fast and cheap. ${HOLDERS}`, ['holders', 'holder distribution'], '150000', 'wrong_numbers', 'holders', 0.81, 57),
-  a('sim-holders', 'Holders Pro', HOLDERS, ['holders', 'holder distribution'], '300000', 'good', 'holders', 0.97, 412),
-  a('sim-wallets-express', 'Wallets Express', `Express delivery. ${WALLETS}`, ['wallets', 'wallet activity'], '100000', 'injection', 'wallets', 0.88, 120),
-  a('sim-wallets', 'Wallets Pro', WALLETS, ['wallets', 'wallet activity'], '200000', 'good', 'wallets', 0.96, 305),
-  a('sim-tokencheck-fast', 'TokenCheck Fast', `Fast. ${TOKENCHECK}`, ['tokencheck', 'contract check'], '120000', 'fails', 'tokencheck', 0.7, 33),
-  a('sim-tokencheck', 'TokenCheck', TOKENCHECK, ['tokencheck', 'contract check'], '250000', 'good', 'tokencheck', 0.95, 268),
-  a('sim-price-slow', 'Price Slow', `Budget option. ${PRICE}`, ['price', 'market snapshot'], '80000', 'slow', 'price', 0.75, 41),
-  a('sim-price', 'Price Pro', PRICE, ['price', 'market snapshot'], '200000', 'good', 'price', 0.98, 530),
-  a('sim-research', 'Research Generalist', 'General web research on any topic, delivered as a short Markdown note.', ['research', 'general'], '250000', 'good', 'research', 0.9, 190),
+  a('sim-holders-lite', 'Holders Lite', `Fast and cheap. ${HOLDERS}`, ['holders', 'holder distribution'], '150000', 'wrong_numbers', 'holders', 81, 57),
+  a('sim-holders', 'Holders Pro', HOLDERS, ['holders', 'holder distribution'], '300000', 'good', 'holders', 97, 412),
+  a('sim-wallets-express', 'Wallets Express', `Express delivery. ${WALLETS}`, ['wallets', 'wallet activity'], '100000', 'injection', 'wallets', 88, 120),
+  a('sim-wallets', 'Wallets Pro', WALLETS, ['wallets', 'wallet activity'], '200000', 'good', 'wallets', 96, 305),
+  a('sim-tokencheck-fast', 'TokenCheck Fast', `Fast. ${TOKENCHECK}`, ['tokencheck', 'contract check'], '120000', 'fails', 'tokencheck', 70, 33),
+  a('sim-tokencheck', 'TokenCheck', TOKENCHECK, ['tokencheck', 'contract check'], '250000', 'good', 'tokencheck', 95, 268),
+  a('sim-price-slow', 'Price Slow', `Budget option. ${PRICE}`, ['price', 'market snapshot'], '80000', 'slow', 'price', 75, 41),
+  a('sim-price', 'Price Pro', PRICE, ['price', 'market snapshot'], '200000', 'good', 'price', 98, 530),
+  a('sim-research', 'Research Generalist', 'General web research on any topic, delivered as a short Markdown note.', ['research', 'general'], '250000', 'good', 'research', 90, 190),
 ];
 
 // The demo contract: planner criteria and the evaluator's canned extraction rely on these exact labels.
@@ -103,6 +103,8 @@ export function simValue(label: string): string {
   if (/risk|level|status/.test(l) && !/count|number/.test(l)) return ['low', 'medium', 'high'][h % 3];
   if (/share|percent|%|ratio|rate|change|apy|apr/.test(l)) return `${(5 + (h % 6000) / 100).toFixed(1)}%`;
   if (/issue|incident|audit|finding|exploit|venue|exchange|pair|check/.test(l)) return String(1 + (h % 6));
+  if (/rank|position/.test(l)) return String(1 + (h % 150));
+  if (/fee|gas|cost per/.test(l)) return (0.001 + (h % 50) / 1000).toFixed(3);
   if (/price/.test(l)) return (0.05 + (h % 2000) / 100).toFixed(2);
   if (/usd|cap|volume|liquidity|tvl|value/.test(l)) return (1_000_000 + (h % 900) * 1_000_000).toLocaleString('en-US');
   if (/supply/.test(l)) return (10_000_000 + (h % 990) * 1_000_000).toLocaleString('en-US');

@@ -42,3 +42,8 @@ test('briefFacts: "Label: <placeholder>" lines', () => {
   const f = briefFacts("Print as 'Label: value':\nPrice USD: <current NEAR price in US dollars>\nMarket cap USD: <market cap>\nPrice 30d change pct: <percent, may be negative>");
   assert.deepEqual(f.split('\n').map((l) => l.split(':')[0]), ['Price USD', 'Market cap USD', 'Price 30d change pct']);
 });
+
+test('simValue: ranks and fees stay in sane ranges', () => {
+  assert.ok(Number(simValue('Market cap rank')) <= 150);
+  assert.ok(Number(simValue('Average transaction fee in USD')) < 1);
+});
