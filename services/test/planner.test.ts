@@ -25,7 +25,7 @@ const sub = (title: string, o: Partial<DraftSubtask> = {}): DraftSubtask => ({
 const input = (o: Partial<PlanInput>): PlanInput =>
   ({ draft: [], selected: [], quotes: {}, recipients: [RECIPIENT], budget_atomic: 3_000_000n, reserve_share: 0.2, ...o });
 
-test('candidates sort cheapest first, then success rate, then delivered jobs; cap is the higher of the two cheapest', () => {
+test('candidates sort cheapest first, then success rate, then delivered jobs; cap is min(second cheapest, 2 x cheapest)', () => {
   const p = buildPlan(input({
     draft: [sub('a'), sub('b')],
     selected: [
@@ -134,10 +134,10 @@ test('POST /plan (canned) against a fake gateway: 4 subtasks, caps, reserve; /ag
 
   const plan = await call(`${planner.url}/plan`, { task_id: 't1', prompt: 'Due diligence on the NEAR token', budget_atomic: '3000000', reserve_share: 0.2 });
   assert.equal(plan.subtasks.length, 4);
-  assert.deepEqual(plan.subtasks.map((s: any) => s.cap_atomic), ['300000', '200000', '250000', '200000']);
+  assert.deepEqual(plan.subtasks.map((s: any) => s.cap_atomic), ['300000', '200000', '240000', '160000']);
   assert.deepEqual(plan.subtasks[0].candidates.map((c: any) => c.handle), ['sim-holders-lite', 'sim-holders']);
   assert.equal(plan.budget.reserve_atomic, '600000');
-  assert.equal(plan.budget.allocated_atomic, '950000');
+  assert.equal(plan.budget.allocated_atomic, '900000');
   assert.equal(plan.subtasks[2].criteria[2].spec.other_subtask, 's1');
   assert.deepEqual(plan.llm_calls, []);
 
@@ -165,4 +165,14 @@ test('candidates priced above cap + reserve are dropped with a note', async () =
   assert.deepEqual(plan.subtasks[0].candidates.map((c: any) => c.handle), ['a', 'b']);
   assert.equal(plan.subtasks[0].deadline_s, 200);
   assert.ok(plan.notes.some((n: string) => n.includes('pricey')));
+});
+
+test('a large price gap does not inflate the cap; an unpayable fallback is dropped', () => {
+  const p = buildPlan(input({
+    draft: [sub('a')],
+    selected: [[agent('cheap'), agent('dear')]],
+    quotes: { cheap: row('50000'), dear: row('1500000') },
+  }));
+  assert.equal(p.subtasks[0].cap_atomic, '100000'); // 2 x 0.05, not 1.50
+  assert.deepEqual(p.subtasks[0].candidates.map((c) => c.handle), ['cheap']); // 1.50 > cap 0.10 + reserve 0.60
 });

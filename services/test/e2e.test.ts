@@ -48,9 +48,9 @@ test('acceptance A: plan, faults caught, re-hires from the reserve, closed with 
   const task = await call(`${orch}/tasks`, { prompt: 'Due diligence on the NEAR token', budget_usdc: '3' });
   assert.equal(task.status, 'planned', task.error);
   const plan = task.plan;
-  assert.deepEqual(plan.subtasks.map((s: any) => s.cap_atomic), ['300000', '200000', '250000', '200000']);
+  assert.deepEqual(plan.subtasks.map((s: any) => s.cap_atomic), ['300000', '200000', '240000', '160000']);
   assert.equal(plan.budget.reserve_atomic, '600000');
-  assert.equal(plan.budget.allocated_atomic, '950000');
+  assert.equal(plan.budget.allocated_atomic, '900000');
   assert.deepEqual(plan.subtasks.map((s: any) => s.candidates.map((c: any) => c.handle)), [
     ['sim-holders-lite', 'sim-holders'], ['sim-wallets-express', 'sim-wallets'],
     ['sim-tokencheck-fast', 'sim-tokencheck'], ['sim-price-slow', 'sim-price'],
@@ -76,13 +76,13 @@ test('acceptance A: plan, faults caught, re-hires from the reserve, closed with 
   const alert = evs.find((e) => e.type === 'security_alert' && e.data.agent_handle === 'sim-wallets-express');
   assert.match(alert.data.flag, /evil-collector\.near|X-PAYMENT|ignore previous/i);
   const topUps = evs.filter((e) => e.type === 'ledger' && e.data.op === 'topUp').map((e) => [e.subtask_id, e.data.amount_atomic]);
-  assert.deepEqual(topUps.sort(), [['s1', '150000'], ['s2', '100000']]);
+  assert.deepEqual(topUps.sort(), [['s1', '150000'], ['s2', '100000'], ['s3', '10000'], ['s4', '40000']]);
   assert.equal(evs.at(-1).data.to, 'closed');
 
   const sum = snap.receipts.reduce((x: bigint, r: any) => x + BigInt(r.amount_atomic), 0n);
   assert.equal(sum, 1_200_000n);
   assert.equal(snap.ledger.spent_atomic, '1200000');
-  assert.equal(snap.ledger.reserve_used_atomic, '250000');
+  assert.equal(snap.ledger.reserve_used_atomic, '300000');
   assert.equal(snap.ledger.refunded_atomic, '1800000');
   assert.equal(snap.ledger.invariant_holds, true);
 

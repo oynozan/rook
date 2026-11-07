@@ -72,7 +72,12 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
       else dropped.push({ title: d.title, reason: 'no fitting agent' });
       return;
     }
-    const cap = BigInt(candidates[Math.min(1, candidates.length - 1)].price_atomic); // sorted: the higher of the two cheapest
+    // Sorted cheapest first. The cap covers one nearby fallback (a first agent that fails without charge) but never
+    // more than twice the cheapest price, so one expensive candidate cannot inflate what the user locks per subtask;
+    // a pricier fallback is paid by a reserve top-up, and one the reserve cannot cover is dropped below.
+    const cheapest = BigInt(candidates[0].price_atomic);
+    const second = BigInt(candidates[Math.min(1, candidates.length - 1)].price_atomic);
+    const cap = second < cheapest * 2n ? second : cheapest * 2n;
     if (allocated + cap > allocatable) {
       if (d.self_do_ok) {
         notes.push(`"${d.title}" is self_do: cap ${cap} would exceed the allocatable budget`);
