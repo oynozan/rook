@@ -342,3 +342,19 @@ These are the "do X, see Y" checks for real-time testing. Commands assume `pnpm 
 
 - `pnpm rook kill <task_id>` during a run: task `killed`, no further `hire_sent` events, in-flight authorizations released.
 - Unit tests cover: ledger refusals (over cap, second authorization, wrong `payTo`, after kill), the invariant, planner budget fitting and cross-check reference rules, extraction quote verification, the injection scanner, and cheapest-first ordering.
+
+## 13. Real-time test record (2026-11-07)
+
+Run on Windows 11, Node 22.14, with the repo's NEAR AI key. Planner `z-ai/glm-5.3`, evaluator `deepseek-ai/DeepSeek-V4.1-Flash-1017` (both TEE-hosted, `signature_kind` `provider_tee`), simulated agents `anthropic/claude-haiku-5-5`.
+
+| Check | Result |
+| --- | --- |
+| A, offline (`pnpm test`, 43 tests incl. end-to-end) | Pass: exact plan, receipts, top-ups, spent 1.20, refunded 1.80 |
+| B, NEAR demo prompt, budget 3 | Pass: all four faults caught (wrong numbers, injection, `FAILED`, timeout), re-hires from the reserve, attributed report, invariant holds; 0.08 to 0.11 USD of NEAR AI credit per run |
+| B, off-demo prompt (REF token), budget 2 | Pass after simulator fixes: all four subtasks delivered and attributed |
+| C, live market planning | Pass: real handles and 402 prices, approve refused with 409 |
+| D, kill mid-run | Pass: hires `KILLED`, no `hire_sent` after the kill, nothing spent, invariant holds |
+
+Found and fixed during the runs: TEE models sign `model:req:res` rather than `req:res`; reasoning models used up `max_tokens` on hidden thinking (truncated deliverables and reports), now handled with higher limits, `reasoning_effort`, and a warning on every cut-off reply; the simulator's agents refused to invent data about real assets, so the simulator now supplies a per-label simulated dataset parsed from the brief; label-only `contains` criteria were brittle; unpayable fallback candidates are dropped from plans.
+
+Known limits: in `sim` + `near` a good simulated agent occasionally still fails a check (a judge question about detail, or a simulated value outside a sanity bound); in each observed case the evaluator's verdict was correct for the text delivered. A large gap between the two cheapest quotes makes a large cap (for example 0.05 and 1.50 gives a cap of 1.50); the user sees it at approval.
