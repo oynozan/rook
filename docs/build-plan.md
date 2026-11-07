@@ -208,7 +208,7 @@ One Rust contract account holds each task's USDC, creates one sub-account per su
 
 - The human funds a task from their own wallet with USDC `ft_transfer_call` to the contract. That call carries 1 yoctoNEAR, so it is the human's signature, and it is the only one in the loop [R29] [R1].
 - `orchestrator` calls the contract through a function-call key limited to this contract and these methods. Such a key cannot attach NEAR [R21], so these methods take no deposit; the owner pre-funds the contract with NEAR for account creation, storage deposits and gas.
-- In design A, `signer` holds each sub-account's full-access key. After creation a parent account has no control over its sub-accounts, so the kill switch stops new funding but cannot pull back what is already funded. The worst case from a leaked key is one subtask's balance.
+- In design A, `signer` holds each sub-account's full-access key. After creation a parent account has no control over its sub-accounts, so the kill switch stops new funding but cannot pull back what is already funded. The worst case from one leaked sub-account key is that subtask's balance; a leaked `signer` service reaches every funded sub-account, bounded by the caps the human approved. (Updated 2026-11-07: the orchestrator no longer chooses sub-account keys; see [x402-payments-plan.md](x402-payments-plan.md) section 4.6.)
 
 **Design C: the contract signs through Chain Signatures**
 

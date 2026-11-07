@@ -8,8 +8,8 @@ The state machines call a ledger whose methods are named after the contract and 
 
 | Ledger method (phase 1) | Phase 2 call | Where |
 | --- | --- | --- |
-| `createTask` | Human's USDC `ft_transfer_call` to the contract, `msg` = `create_task`; `chain-gateway` waits for `ft_on_transfer` and reads `get_task` | Human wallet, contract |
-| `fundSubtask` | `chain-gateway` → `fund_subtask(task_id, n, cap, public_key)`; `signer` generates the key pair first and gives only the public key | Contract |
+| `createTask` | Human's USDC `ft_transfer_call` to the contract, `msg` = `{"create_task": {"reserve_bps": 2000, "caps": [...]}}` carrying the caps the human approved; `chain-gateway` waits for `ft_on_transfer` and reads `get_task` | Human wallet, contract |
+| `fundSubtask` | `signer` generates the key pair and calls `register_subtask_key(task_id, n, public_key)` from its own account; then `chain-gateway` → `fund_subtask(task_id, n)`, which funds exactly the approved cap into an account with that key | Signer, contract |
 | `topUp` | `chain-gateway` → `top_up(task_id, n, amount)` | Contract |
 | `authorize` | `signer` `POST /sign {task_id, n, accepts_row}` returns the `X-PAYMENT` header | Signer |
 | `settle` | `chain-gateway` sees the sub-account's `ft_transfer` to `payTo` on-chain after the A2A task is `COMPLETED` and fills `payment_tx` | Chain reads |
@@ -52,14 +52,14 @@ As specified in the build plan, design A. Additions found while planning:
 
 - `fund_subtask` gives each sub-account enough NEAR for the USDC `storage_deposit` (0.00125 NEAR, paid by the contract to the USDC contract on the sub-account's behalf), its own account storage, and one `ft_transfer_call` back to the contract (leftover return). Measure the total on testnet (step 2); start from 0.01 NEAR.
 - Sub-account ids: `t<task>-<n>.<contract>`, with `<task>` a short base-36 counter the contract assigns in `ft_on_transfer`. NEAR account ids are at most 64 characters, so keep the contract name short.
-- `ft_on_transfer` `msg` is JSON: `{"create_task": {"reserve_bps": 2000}}` or `{"return": {"task_id": "...", "n": 1}}`. The `return` branch accepts tokens only from the matching sub-account (`sender_id`).
+- `ft_on_transfer` `msg` is JSON: `{"create_task": {"reserve_bps": 2000, "caps": ["300000", ...]}}` (the plan's caps as approved by the human; the sum must fit within budget minus reserve, else the transfer is refunded) or `{"return": {"task_id": "...", "n": 1}}`. The `return` branch accepts tokens only from the matching sub-account (`sender_id`).
 - Every state change happens in callbacks that check promise results and roll back on failure (`fund_subtask` creates the account, then deposits storage, then transfers the cap).
 - Views: `get_task`, `get_subtasks`, `get_receipts`. Events (NEP-297 logs) for `task_created`, `subtask_funded`, `top_up`, `receipt`, `task_closed`, `killed`, so `chain-gateway` can index without polling every view.
 - Tests: `near-workspaces` sandbox with a mock FT: create task, fund, top up over reserve (refused), fund after kill (refused), return from an unknown account (refunded), close before all returns (refused), close refunds the right amount.
 
 ### 4.2 `signer` service
 
-- Generates one ed25519 key pair per subtask at `fund_subtask` time and keeps the private key in a key file outside the repo (`ROOK_SIGNER_KEY_DIR`, default `~/.rook/keys`), never in env dumps, logs or events.
+- Has its own NEAR account (the contract's `signer` role) with a function-call key limited to `register_subtask_key`. Generates one ed25519 key pair per subtask, registers the public key on the contract before funding, and keeps the private key in a key file outside the repo (`ROOK_SIGNER_KEY_DIR`, default `~/.rook/keys`), never in env dumps, logs or events.
 - `POST /sign {task_id, n, accepts_row}`: refuses unless `network` = `near:mainnet` (or `near:testnet` in testnet mode), `asset` and `payTo` match `/.well-known/x402`, `amount` ≤ the sub-account's `ft_balance_of` and ≤ the contract's remaining cap for the subtask, no unexpired authorization for this subtask, and the contract and the task are not killed. Builds the delegate exactly as the skill shows, with `blockHeightTtl` = `maxTimeoutSeconds`. Stores `{payment_hash, expires_at_block}`; returns the header once.
 - One authorization per sub-account at a time, so nonces never race (build plan, signer).
 - `POST /expire {task_id, n}`: called by the orchestrator when the A2A task ended unpaid (`REJECTED`, `FAILED`, `CANCELED`, timeout); the signer still refuses a new signature until the chain's block height passes `expires_at_block`, unless the marketplace has reported a terminal unpaid state for that task id. This is the one place a double payment could happen, so it errs on waiting.
@@ -81,6 +81,19 @@ Live `/send` with a real header already forwards to `https://<handle>.market.nea
 - `ROOK_LEDGER=chain`: `approve` returns the funding instructions (contract id, amount, `msg`) and waits for `chain-gateway` to report the task created, instead of creating it in memory.
 - Live mode confirmation: `approve` in live mode requires `{confirm_mainnet_spend_usdc: "<total>"}` equal to the plan's maximum spend (caps plus reserve), so a client cannot approve real spending by accident. The CLI prints the total and asks twice.
 - Lift the phase 1 refusal of `approve` in `live` mode only when `ROOK_LEDGER=chain`.
+
+## 4.6 Trust model
+
+Keys are split so that no single leaked key can send USDC anywhere except approved caps into Rook's own sub-accounts and refunds to the funder:
+
+| Leaked key | What it can do | Bound |
+| --- | --- | --- |
+| Orchestrator (function-call key on `fund_subtask`, `top_up`, `record_receipt`, `close_task`) | Fund approved caps into signer-keyed sub-accounts, top up from the reserve into them, write receipts, close (refunds go to the funder) | Cannot direct USDC to any account it controls |
+| Signer (function-call key on `register_subtask_key`, plus the sub-account keys it holds in design A) | Spend what is already in funded sub-accounts | Approved caps plus top-ups of funded subtasks |
+| Both | Fund every approved cap and the reserve into sub-accounts it can spend from | Approved caps plus reserves of open tasks |
+| Owner wallet sign-in key (no deposit) | `kill`, `kill_task`, owner `close_task` (refund to the funder) | `set_orchestrator`, `set_signer` and `resolve_stuck` need 1 yoctoNEAR, so a sign-in key cannot rotate roles |
+
+The caps are fixed by the human's own funding transfer, so the on-chain contract, not a service, enforces what the human approved. Design C (Chain Signatures) later removes the signer's custody of sub-account keys. This corrects the build plan's "worst case is one subtask's balance" for design A: a leaked signer key reaches every funded sub-account, bounded by the approved caps.
 
 ## 5. Order of work
 
