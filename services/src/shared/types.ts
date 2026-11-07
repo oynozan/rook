@@ -111,8 +111,10 @@ export type SubtaskStatus = 'pending' | 'funded' | 'quoting' | 'working' | 'eval
 export type EventType = 'task_status' | 'subtask_status' | 'plan' | 'quote' | 'quote_rejected' | 'hire_sent' | 'a2a_state'
   | 'evaluation' | 'security_alert' | 'ledger' | 'receipt' | 'final' | 'error';
 export type RookEvent = { seq: number; ts: string; task_id: string; subtask_id?: string; type: EventType; data: any };
+// verdict and attestation_hash are null when a paid hire was never judged (kill or evaluator outage during evaluation,
+// or a payment whose outcome is unknown); a2a_task_id is null when the agent's task id was never learned.
 export type Receipt = {
-  id: string; task_id: string; subtask_id: string; hire_id: string; agent_handle: string; a2a_task_id: string;
-  amount_atomic: string; verdict: 'pass' | 'fail'; attestation_hash: string; payment_hash: string;
+  id: string; task_id: string; subtask_id: string; hire_id: string; agent_handle: string; a2a_task_id: string | null;
+  amount_atomic: string; verdict: 'pass' | 'fail' | null; attestation_hash: string | null; payment_hash: string;
   payment_tx: string | null; receipt_tx: string | null;
 };

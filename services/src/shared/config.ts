@@ -23,8 +23,10 @@ export const config = {
   get llm() { return env('ROOK_LLM', process.env.NEARAI_API_KEY ? 'near' : 'canned') as 'near' | 'canned'; },
   get nearAiKey() { return process.env.NEARAI_API_KEY ?? ''; },
   get nearAiBase() { return env('NEARAI_BASE_URL', 'https://cloud-api.near.ai/v1'); },
-  get plannerModel() { return env('PLANNER_MODEL', 'anthropic/claude-sonnet-5-5'); },
-  get evaluatorModel() { return env('EVALUATOR_MODEL', 'anthropic/claude-haiku-5-5'); },
+  // Planner and evaluator calls are Rook's evidence, so their defaults are models NEAR AI Cloud marks verifiable
+  // (TEE-attested, signed); anthropic/*, openai/* and google/* are not. Simulated agents need no signature.
+  get plannerModel() { return env('PLANNER_MODEL', 'z-ai/glm-5.3'); },
+  get evaluatorModel() { return env('EVALUATOR_MODEL', 'deepseek-ai/DeepSeek-V4.1-Flash-1017'); },
   get simAgentModel() { return env('SIM_AGENT_MODEL', 'anthropic/claude-haiku-5-5'); },
   get llmMaxUsd() { return num('ROOK_LLM_MAX_USD', 1); },
 

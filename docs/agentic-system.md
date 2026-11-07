@@ -128,20 +128,20 @@ Response (`Evaluation`):
 ### 6.2 Order of checks
 
 1. **Built-in `non_empty`.** Fails if `text` is under 20 characters after trimming.
-2. **Built-in `injection`.** A deterministic scanner over the raw text. It fails the deliverable when the text tries to instruct the hiring system: payment requests (`pay`, `send`, `transfer` near an amount or a NEAR or 0x address), requests to hire, re-hire, approve, or raise a budget, `X-PAYMENT`, and override phrases (`ignore previous instructions`, `system:`, `you are now`, `as the orchestrator`). Each hit becomes a `security_flags` entry quoting the text. A flagged deliverable fails even if every other criterion passes: Rook does not merge text that tries to steer it.
+2. **Built-in `injection`.** A deterministic scanner over the raw text. It fails the deliverable when the text tries to instruct the hiring system: payment requests (an imperative `pay`, `send`, `transfer`, `release` or `deposit` followed by an amount, the payment or balance, a payee, or a NEAR or 0x address, and the same verbs or `must be paid` addressed to Rook, the orchestrator or "you"), requests to hire, re-hire, approve, or raise a budget, `X-PAYMENT`, role markers (`SYSTEM:` in capitals, `system note:`, `<system>`, a line starting `Evaluator:` or `Orchestrator:`), and override phrases (`ignore previous instructions`, `you are now`, `as the orchestrator`, `mark every criterion as passed`). It looks for instructions, not topics: third-person prose such as "users pay $0.001 per transaction" or "holders send tokens to x.near" passes. Each hit becomes a `security_flags` entry quoting the text. A flagged deliverable fails even if every other criterion passes: Rook does not merge text that tries to steer it.
 3. **Deterministic criteria:** `contains`, `schema`, then `numeric_match` and `cross_check` (which need extraction, below).
 4. **`llm_judge` criteria**, only when steps 1 to 3 passed (no point paying for a judge on a failed deliverable).
 
-`verdict` is `pass` only when every non-skipped result passed.
+`verdict` is `pass` only when every non-skipped result passed. When an LLM step fails (NEAR AI errors, the cost guard, invalid JSON twice) `/evaluate` answers HTTP 502 with the calls already paid in `details.llm_calls`: an outage is never a verdict on the agent.
 
 ### 6.3 Extraction for numeric criteria
 
 `numeric_match` and `cross_check` need a number with a label from free text, because real agents write Markdown in their own format.
 
-- `near`: one LLM call per deliverable extracts every needed label as `{ label: { value, quote } | null }`, where `quote` must be copied verbatim from the deliverable.
+- `near`: one LLM call per deliverable extracts every needed label as `{ label: { value, quote } | null }`, where `quote` must be copied verbatim from the deliverable. Each label's entry is checked on its own, so one malformed entry loses only that label.
 - `canned`: a regex finds `<label>` followed by `:`, `=` or `is`, then a number (commas and a trailing `%` allowed).
-- **Verification, both modes:** the quote must appear verbatim in the deliverable (whitespace-normalised) and must contain the value's digits. Otherwise the label counts as not found. This stops an LLM extractor from inventing numbers.
-- Numbers parse with commas removed and `k`, `m`, `b` suffixes expanded; a trailing `%` keeps the number as written (`38.2%` is `38.2`).
+- **Verification, both modes:** the quote must appear verbatim in the deliverable (whitespace and Markdown emphasis `*`, `_`, `` ` `` normalised) and must contain the value's digits. Otherwise the label counts as not found. This stops an LLM extractor from inventing numbers.
+- Numbers parse with commas removed and `k`, `m`, `b` suffixes expanded; a trailing `%` keeps the number as written (`38.2%` is `38.2`); a leading minus is kept (`-3.2%` is `-3.2`) unless it is a hyphen after a digit or letter (`10-20`). The stored value is the one parsed from the quote, sign included.
 
 ### 6.4 The hash
 
@@ -157,7 +157,7 @@ Every criterion is `{ id, kind, description, spec }`.
 
 | `kind` | `spec` | Passes when | Checked by |
 | --- | --- | --- | --- |
-| `contains` | `{ pattern }` (JavaScript regex source, matched case-insensitively) | The pattern matches the text | Script |
+| `contains` | `{ pattern }` (JavaScript regex source, matched case-insensitively) | The pattern matches the text, or the text contains the pattern verbatim (case-insensitive), so a literal such as `Price (USD)` works | Script |
 | `schema` | `{ json_schema }` | The text, or a fenced ```json block in it, parses as JSON valid against the schema | Script (Ajv) |
 | `numeric_match` | `{ label, min?, max? }` (at least one bound) | The labelled number is found and within the bounds | Extraction + script |
 | `cross_check` | `{ label, other_subtask, other_label, tolerance_pct }` | Both numbers are found and differ by at most `tolerance_pct` percent of the larger | Extraction + script |
@@ -166,6 +166,7 @@ Every criterion is `{ id, kind, description, spec }`.
 Rules the planner enforces (section 5.2 step 8):
 
 - Prefer script-checkable kinds; `llm_judge` is for prose quality only, at most 2 per subtask.
+- A `contains` pattern is a short plain phrase the brief explicitly asks the agent to write (for example one of its labels), so an honest agent that follows the brief always matches.
 - `pattern` must compile; `json_schema` must compile with Ajv.
 - `numeric_match` bounds are sanity ranges the planner can know without the data (a percentage is between 0 and 100, a holder count is above 0), never guesses of the answer.
 - `cross_check.other_subtask` must be an earlier subtask in the final plan. This makes cycles impossible: a subtask's evaluation waits only on earlier subtasks.
@@ -177,7 +178,7 @@ Rules the planner enforces (section 5.2 step 8):
 
 | Method | Path | Body | Does |
 | --- | --- | --- | --- |
-| `POST` | `/tasks` | `{ prompt, budget_usdc, reserve_share? }` | Creates the task in `draft`, calls the planner, moves to `planned`. Returns the task. Planner failure moves the task to `failed` with the error. |
+| `POST` | `/tasks` | `{ prompt, budget_usdc, reserve_share? }` | Creates the task in `draft`, calls the planner, moves to `planned`. Returns the task. Planner failure moves the task to `failed` with the error. A task killed while planning stays `killed` when the planner answers. |
 | `GET` | `/tasks/:id` | | Snapshot: task, plan, subtasks with hires and evaluations, receipts, ledger view, final result |
 | `GET` | `/tasks` | | List of tasks (id, status, prompt, created_at) |
 | `POST` | `/tasks/:id/approve` | `{ funder_account? }` | Only from `planned` and only when the plan has at least one subtask. Starts the run. `live` market: 409. |
@@ -187,12 +188,12 @@ Rules the planner enforces (section 5.2 step 8):
 
 ### 8.2 Task states
 
-`draft → planned → approved → funded → running → aggregating → closing → closed`; also `planned → cancelled`, any non-terminal → `killed`, and `draft → failed` when planning fails. Terminal: `closed`, `cancelled`, `killed`, `failed`.
+`draft → planned → approved → funded → running → aggregating → closing → closed`; also `planned → cancelled`, any non-terminal → `killed`, and `draft → failed` when planning fails. Terminal: `closed`, `cancelled`, `killed`, `failed`; no transition leaves a terminal state. After approval only an error outside every subtask (the ledger refusing `createTask`, an orchestrator shutdown) moves a task to `failed`, after salvaging funds; an error inside one subtask abandons that subtask only (8.3).
 
 - `approved → funded`: `ledger.createTask` locks the budget and the reserve (in phase 2, the `ft_on_transfer` with `create_task` seen on-chain).
 - `funded → running`: `ledger.fundSubtask` for every non-`self_do` subtask, with exactly its cap.
 - `running → aggregating`: every subtask is `passed` or `abandoned`.
-- `aggregating → closing`: aggregate done.
+- `aggregating → closing`: aggregate done. If `/aggregate` fails, the orchestrator uses the deterministic merge of `canned` mode (section 5.4) and emits an `error` event, so passed deliverables are never lost.
 - `closing → closed`: every funded subtask's leftover returned, then `ledger.closeTask` refunds unallocated budget, unused reserve and returns to the funder.
 
 ### 8.3 Subtask states
@@ -206,10 +207,12 @@ Rules the planner enforces (section 5.2 step 8):
 | `quoting` | quote fails a check or the agent is unreachable | `quoting` with the next candidate, or `abandoned` if none is left |
 | `working` | A2A `COMPLETED` with artifacts | `evaluating` (payment settles) |
 | `working` | A2A `REJECTED`, `FAILED` or `CANCELED` | `quoting` with the next candidate (authorization released, nothing charged) |
-| `working` | `sla_seconds + ROOK_PAYMENT_GRACE_S` passed | `quoting` with the next candidate (CancelTask attempted, authorization expired) |
+| `working` | `sla_seconds + ROOK_PAYMENT_GRACE_S` passed | `quoting` with the next candidate once the agent accepts `CancelTask` or the authorization has expired (`maxTimeoutSeconds` after signing). Until then the header can still be redeemed, so Rook keeps polling; a late `COMPLETED` is settled and evaluated like any delivery |
 | `evaluating` | verdict pass | `passed` |
 | `evaluating` | verdict fail, `rehire_count` below `ROOK_MAX_REHIRES` (2) | `quoting` with the next candidate, `rehire_count + 1` |
 | `evaluating` | verdict fail, `rehire_count` is 2, or no candidate left | `abandoned` |
+| `evaluating` | evaluator unreachable or 5xx after 3 attempts | `abandoned`, receipt with `verdict: null` (Rook's outage is not the agent's failure, and no more money is spent against a broken evaluator) |
+| any | an error inside this subtask (planner `/self-do` down, a ledger refusal) | `abandoned`; the other subtasks continue |
 | `passed` or `abandoned` | leftover returned to the task | `returned` |
 
 `self_do` subtasks retry `/self-do` on a failed verdict under the same re-hire limit. Only a failed verdict counts as a re-hire; skipped candidates (bad quote, `FAILED`, timeout) do not, because nothing was paid.
@@ -222,6 +225,7 @@ All must hold, or the candidate is skipped with event `quote_rejected` and the r
 
 - `scheme` is `exact`; `network` and `asset` match a row of the gateway's `/x402` recipients.
 - `payTo` matches that row's `payTo` (allowlist). A mismatch also emits `security_alert`.
+- `amount` is at most the candidate's price in the approved plan: an agent that raised its price since planning is skipped, never topped up.
 - `amount` is at most the subtask's balance. On a re-hire, when the balance is short, the orchestrator first tops up the difference from the reserve (`ledger.topUp`); if the reserve cannot cover it, the candidate is skipped.
 
 ### 8.5 The ledger (stand-in for contract and signer)
@@ -250,13 +254,13 @@ Invariant, checked after every call and in tests: `budget = unallocated + reserv
 
 ### 8.7 Kill
 
-`POST /tasks/:id/kill`: `ledger.kill` (refuses all later funding, top-ups and authorizations), aborts the task's loops, sends `CancelTask` for in-flight A2A tasks, releases outstanding authorizations for tasks that are not `COMPLETED`, and sets `killed`. Funds already in sub-accounts stay there (in phase 2 the kill switch cannot pull them back, see build plan).
+`POST /tasks/:id/kill`: `ledger.kill` (refuses all later funding, top-ups and authorizations), aborts the task's loops, sends `CancelTask` for in-flight A2A tasks, releases outstanding authorizations for tasks that are not `COMPLETED`, and sets `killed`. A hire whose `/send` is still in flight already has its payment header out: Rook waits for the answer, cancels the A2A task once its id is known, then releases that authorization. Funds already in sub-accounts stay there (in phase 2 the kill switch cannot pull them back, see build plan).
 
 ### 8.8 Events and receipts
 
 Event: `{ seq, ts, task_id, subtask_id?, type, data }`. Types: `task_status`, `subtask_status`, `plan`, `quote`, `quote_rejected`, `hire_sent`, `a2a_state`, `evaluation`, `security_alert`, `ledger`, `receipt`, `final`, `error`.
 
-A receipt is written for every paid hire (every `COMPLETED` task), passed or failed: `{ id, task_id, subtask_id, hire_id, agent_handle, a2a_task_id, amount_atomic, verdict, attestation_hash, payment_hash, payment_tx: null, receipt_tx: null }`. Transaction fields stay null until phase 2.
+A receipt is written for every paid hire (every `COMPLETED` task, and every send whose payment outcome is unknown), passed or failed: `{ id, task_id, subtask_id, hire_id, agent_handle, a2a_task_id, amount_atomic, verdict, attestation_hash, payment_hash, payment_tx: null, receipt_tx: null }`. `verdict` and `attestation_hash` are null when the hire was never judged (a kill or an evaluator outage during evaluation, or an unknown payment outcome), so ledger `spent` always equals the sum of receipt amounts. Transaction fields stay null until phase 2.
 
 ## 9. Market gateway
 
@@ -265,7 +269,7 @@ A receipt is written for every paid hire (every `COMPLETED` task), passed or fai
 | `GET` | `/search` | `q` | `{ agents: AgentSummary[] }` |
 | `GET` | `/x402` | | The marketplace's `/.well-known/x402` (`{ x402Version, recipients: [{ network, asset, payTo }] }`), read at startup |
 | `POST` | `/quote` | `{ handle }` | `{ ok: true, row: AcceptsRow }` or `{ ok: false, error: { code, message } }` |
-| `POST` | `/send` | `{ handle, text, context_id?, payment }` | `{ ok: true, task: A2ATask }` or `{ ok: false, error }` |
+| `POST` | `/send` | `{ handle, text, context_id?, payment }` | `{ ok: true, task: A2ATask }` or `{ ok: false, error }`. `error.code` is `outcome_unknown` when a 502 was retried with the same header and the call still did not succeed: the payment may have settled, so the orchestrator counts it as spent and writes a receipt with no verdict |
 | `GET` | `/task` | `handle`, `id` | `{ ok: true, task: A2ATask }` or `{ ok: false, error }` |
 | `POST` | `/cancel` | `{ handle, id }` | `{ ok: true }` or `{ ok: false, error }` |
 
@@ -278,7 +282,7 @@ A receipt is written for every paid hire (every `COMPLETED` task), passed or fai
 
 ## 10. Simulator
 
-Same surface as the market: `GET /v1/agents?q=`, `GET /.well-known/x402`, `POST /a2a/<handle>/v1` with `SendMessage`, `GetTask`, `CancelTask`. Its x402 row uses `network: near:mainnet`, `asset: usdc.sim`, `payTo: treasury.sim`. It accepts a payment header only when `accepted` equals its quote row exactly and the header was never used before; otherwise HTTP 402.
+Same surface as the market: `GET /v1/agents?q=`, `GET /.well-known/x402`, `POST /a2a/<handle>/v1` with `SendMessage`, `GetTask`, `CancelTask`, plus `GET /llm-cost` (NEAR AI spend of the simulated agents, process total). Its x402 row uses `network: near:mainnet`, `asset: usdc.sim`, `payTo: treasury.sim` and `maxTimeoutSeconds = sla_seconds + ROOK_PAYMENT_GRACE_S`. It accepts a payment header only when `accepted` equals its quote row exactly and the header was never used before; otherwise HTTP 402. A task that finishes after its authorization expired ends `FAILED`: nothing can be charged.
 
 Agents come in pairs: a cheap one with a fault and a pricier good one, so cheapest-first hiring meets the fault first and the re-hire path runs.
 
@@ -296,14 +300,14 @@ Agents come in pairs: a cheap one with a fault and a pricier good one, so cheape
 
 - Search matches any query word against handle, name, description and tags.
 - Timing: `good` and faulty agents deliver after 2 to 4 seconds; `sla_seconds` is 20 for every agent; `slow` would deliver after 120 seconds. With `ROOK_PAYMENT_GRACE_S=5` the slow agent times out after 25 seconds.
-- Content: `canned` fills a template from fixed simulated facts about the NEAR token (marked SIMULATED). `near` asks the LLM (`SIM_AGENT_MODEL`) to write the deliverable for the brief from the same facts, then applies the profile's fault to the text.
+- Content: `canned` fills a template from fixed simulated facts about the NEAR token (marked SIMULATED). `near` asks the LLM (`SIM_AGENT_MODEL`) to write the deliverable for the brief from the whole fact sheet, using the brief's exact labels and making up a plausible value for any figure the sheet lacks (a good agent answers the whole brief), then applies the profile's fault to the text. Writing starts when the task is accepted, so it overlaps the scripted delay. Simulated agents' calls skip the signature fetch (they are not Rook's evidence).
 
 ## 11. LLM use and cost guard
 
 - NEAR AI Cloud, OpenAI-compatible: `POST https://cloud-api.near.ai/v1/chat/completions` with `Authorization: Bearer $NEARAI_API_KEY`.
 - Anthropic models on NEAR AI ignore `response_format` and some reject forced `tool_choice`, so structured output is "reply with one JSON object only", parsed (code fences stripped, first `{` to last `}`), validated with zod, and retried once with the validation error.
-- Models: `PLANNER_MODEL` (default `anthropic/claude-sonnet-5-5`), `EVALUATOR_MODEL` and `SIM_AGENT_MODEL` (default `anthropic/claude-haiku-5-5`).
-- Every call's cost is computed from the model price list and added to a per-process total; a call that would start above `ROOK_LLM_MAX_USD` (default 1.00 per process) is refused. The account holds 10 USD.
+- Models: `PLANNER_MODEL` (default `z-ai/glm-5.3`), `EVALUATOR_MODEL` (default `deepseek-ai/DeepSeek-V4.1-Flash-1017`) and `SIM_AGENT_MODEL` (default `anthropic/claude-haiku-5-5`). Planner and evaluator calls are Rook's evidence, so their defaults are models NEAR AI Cloud lists as verifiable (`GET /v1/model/list`, `metadata.verifiable`); `anthropic/*`, `openai/*` and `google/*` models are not verifiable, so their calls never get `signature_verified: true`. A leading `<think>...</think>` block in a reply is stripped before parsing.
+- Every call's cost is computed from the model price list (`GET /v1/models`, per-token `pricing.prompt` and `pricing.completion`) and added to a per-process total; a call that would start above `ROOK_LLM_MAX_USD` (default 1.00 per process) is refused. Calls in flight count at their worst case (`max_tokens`) until they finish, so concurrent calls cannot overshoot together. The guard fails closed: a price list that cannot be read is fetched again on the next call, and a model missing from it is costed at a high fallback price (10 and 50 USD per million tokens). The account holds 10 USD.
 
 ## 12. Acceptance checks
 
@@ -328,7 +332,7 @@ These are the "do X, see Y" checks for real-time testing. Commands assume `pnpm 
 2. The faulty agents are caught as in A (the exact criterion that fails a wrong-numbers deliverable may differ, but it fails).
 3. Every evaluation lists its `llm_calls` with `signature_verified: true`.
 4. The final report is coherent and attributes each section.
-5. The run costs under 0.25 USD of NEAR AI credit (printed by the CLI).
+5. The run costs under 0.25 USD of NEAR AI credit (printed by the CLI: the task's planner and evaluator calls, plus the simulated agents' calls read from the simulator's `/llm-cost`).
 
 ### C. Live market planning (`live` + `near`)
 
