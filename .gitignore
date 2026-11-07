@@ -5,3 +5,6 @@ node_modules/
 dist/
 data/
 *.log
+.next/
+next-env.d.ts
+*.tsbuildinfo

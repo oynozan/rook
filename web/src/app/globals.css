@@ -1,0 +1,24 @@
+@import 'tailwindcss';
+
+@theme inline {
+  --color-ink: #0a0a0a;
+  --color-panel: #f6f7f9;
+  --color-accent: #0047ab;
+  --color-accent-hover: #003a8c;
+  --color-on-accent: #ffffff;
+  --font-sans: var(--font-text), system-ui, sans-serif;
+}
+
+@layer base {
+  :focus-visible {
+    outline: 2px solid var(--color-ink);
+    outline-offset: 3px;
+  }
+}
+
+/* The dot texture: columns behind the hero and the field inside the run panel. Set the color with text-*. */
+.dots {
+  background-image: radial-gradient(currentColor 1.25px, transparent 1.5px);
+  background-size: 11px 11px;
+  mask-image: linear-gradient(to bottom, transparent, #000 25%, #000 75%, transparent);
+}
