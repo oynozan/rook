@@ -29,6 +29,7 @@ CLI: `rook plan | run | approve <id> | status <id> | watch <id> | kill <id> | li
 - [docs/product.md](docs/product.md): what Rook is.
 - [docs/agentic-system.md](docs/agentic-system.md): spec of the services, criteria, state machines, acceptance checks and the real-time test record.
 - [docs/x402-payments-plan.md](docs/x402-payments-plan.md): plan for the signer, chain gateway and budget contract.
+- [docs/model-choice.md](docs/model-choice.md): which NEAR AI models the planner and evaluator use, and the benchmark behind it.
 - [docs/build-plan.md](docs/build-plan.md): the hackathon build plan.
 
 ## Dependencies

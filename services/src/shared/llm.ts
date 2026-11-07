@@ -41,7 +41,9 @@ export async function chat(purpose: string, model: string, messages: Msg[], maxT
   if (!config.nearAiKey) throw new Error('NEARAI_API_KEY is not set');
 
   // The exact bytes sent and received are hashed: the gateway signs sha256(request):sha256(response).
-  const body = JSON.stringify({ model, max_tokens: maxTokens, messages, ...(opts.effort ? { reasoning_effort: opts.effort } : {}) });
+  // reasoning_effort is a hint: Anthropic models reject the field and DeepSeek V4.1 rejects "medium", so a 400 that
+  // names it is retried once without it. The hashes below cover whichever body was actually sent.
+  let body = JSON.stringify({ model, max_tokens: maxTokens, messages, ...(opts.effort ? { reasoning_effort: opts.effort } : {}) });
   const price = await priceOf(model);
   // Calls in flight count at their worst case, so concurrent calls cannot all slip under the limit together.
   if (spentUsd + reservedUsd >= config.llmMaxUsd) {
@@ -54,6 +56,10 @@ export async function chat(purpose: string, model: string, messages: Msg[], maxT
     for (let attempt = 0; attempt < 3; attempt++) {
       const r = await fetch(`${config.nearAiBase}/chat/completions`, { method: 'POST', headers: { ...auth(), 'content-type': 'application/json' }, body });
       raw = await r.text(); status = r.status;
+      if (status === 400 && opts.effort && /reasoning_effort/.test(raw) && body.includes('"reasoning_effort"')) {
+        body = JSON.stringify({ model, max_tokens: maxTokens, messages });
+        attempt--; continue;
+      }
       if (status !== 429 && status < 500) break;
       await new Promise((ok) => setTimeout(ok, 1500 * (attempt + 1)));
     }
