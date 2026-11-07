@@ -48,7 +48,7 @@ export type LlmCall = {
   purpose: string; model: string; chat_id: string;
   request_sha256: string; response_sha256: string;
   input_tokens: number; output_tokens: number; cost_usd: number;
-  signature: string | null; signing_address: string | null; signing_algo: string | null;
+  signature: string | null; signing_address: string | null; signing_algo: string | null; signature_kind: string | null;
   signature_verified: boolean;
 };
 

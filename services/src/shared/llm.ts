@@ -27,18 +27,21 @@ async function priceOf(model: string): Promise<Price> {
 
 const auth = () => ({ authorization: `Bearer ${config.nearAiKey}` });
 
+/** reasoning_effort for reasoning models (NEAR AI honours it for z-ai/glm-5.3: "low" skips thinking). */
+export type Effort = 'low' | 'medium' | 'high';
+
 export type Msg = { role: 'system' | 'user' | 'assistant'; content: string };
 
 /**
  * One chat completion. `sign: false` skips the signature fetch (simulated agents: not Rook's evidence, and the
  * fetch retries for about 3 s when a model is not verifiable).
  */
-export async function chat(purpose: string, model: string, messages: Msg[], maxTokens = 4000, opts: { sign?: boolean } = {}): Promise<{ text: string; call: LlmCall }> {
+export async function chat(purpose: string, model: string, messages: Msg[], maxTokens = 4000, opts: { sign?: boolean; effort?: Effort } = {}): Promise<{ text: string; call: LlmCall }> {
   if (config.llm !== 'near') throw new Error(`LLM call "${purpose}" attempted in canned mode`);
   if (!config.nearAiKey) throw new Error('NEARAI_API_KEY is not set');
 
   // The exact bytes sent and received are hashed: the gateway signs sha256(request):sha256(response).
-  const body = JSON.stringify({ model, max_tokens: maxTokens, messages });
+  const body = JSON.stringify({ model, max_tokens: maxTokens, messages, ...(opts.effort ? { reasoning_effort: opts.effort } : {}) });
   const price = await priceOf(model);
   // Calls in flight count at their worst case, so concurrent calls cannot all slip under the limit together.
   if (spentUsd + reservedUsd >= config.llmMaxUsd) {
@@ -59,6 +62,8 @@ export async function chat(purpose: string, model: string, messages: Msg[], maxT
   const j = JSON.parse(raw);
   // Some open models put their reasoning in <think> tags ahead of the answer.
   const text: string = String(j.choices?.[0]?.message?.content ?? '').replace(/^\s*<think>[\s\S]*?<\/think>\s*/i, '');
+  // Reasoning models spend hidden tokens; a cut-off reply is otherwise silent (truncated deliverables, invalid JSON).
+  if (j.choices?.[0]?.finish_reason === 'length') console.warn(`[llm] ${purpose}: reply cut off at max_tokens=${maxTokens} (${model})`);
   const inTok = j.usage?.prompt_tokens ?? 0, outTok = j.usage?.completion_tokens ?? 0;
   const cost = inTok * price.prompt + outTok * price.completion;
   spentUsd += cost;
@@ -66,7 +71,7 @@ export async function chat(purpose: string, model: string, messages: Msg[], maxT
   const call: LlmCall = {
     purpose, model, chat_id: j.id, request_sha256: sha256(body), response_sha256: sha256(raw),
     input_tokens: inTok, output_tokens: outTok, cost_usd: Number(cost.toFixed(6)),
-    signature: null, signing_address: null, signing_algo: null, signature_verified: false,
+    signature: null, signing_address: null, signing_algo: null, signature_kind: null, signature_verified: false,
   };
   if (opts.sign !== false) await attachSignature(call);
   return { text, call };
@@ -81,7 +86,10 @@ async function attachSignature(call: LlmCall) {
         call.signature = s.signature ?? null;
         call.signing_address = s.signing_address ?? null;
         call.signing_algo = s.signing_algo ?? null;
-        call.signature_verified = s.text === `${call.request_sha256}:${call.response_sha256}`;
+        call.signature_kind = s.signature_kind ?? null;
+        // Gateway signatures cover "req:res"; provider_tee (model runs in a TEE) prefixes the model id: "model:req:res".
+        const hashes = `${call.request_sha256}:${call.response_sha256}`;
+        call.signature_verified = s.text === hashes || s.text === `${call.model}:${hashes}`;
         return;
       }
     } catch { /* retry */ }
@@ -99,7 +107,7 @@ export function parseJsonObject(text: string): unknown {
 }
 
 /** Ask for one JSON object, validate with zod, retry once with the error. */
-export async function json<T>(purpose: string, model: string, schema: z.ZodType<T>, system: string, user: string, maxTokens = 4000): Promise<{ data: T; calls: LlmCall[] }> {
+export async function json<T>(purpose: string, model: string, schema: z.ZodType<T>, system: string, user: string, maxTokens = 4000, effort?: Effort): Promise<{ data: T; calls: LlmCall[] }> {
   const sys = `${system}\n\nReply with one JSON object only: no prose, no code fences.`;
   const messages: Msg[] = [{ role: 'system', content: sys }, { role: 'user', content: user }];
   const calls: LlmCall[] = [];
@@ -107,7 +115,7 @@ export async function json<T>(purpose: string, model: string, schema: z.ZodType<
   for (let attempt = 0; attempt < 2; attempt++) {
     let text: string;
     try {
-      const r = await chat(attempt ? `${purpose}:repair` : purpose, model, messages, maxTokens);
+      const r = await chat(attempt ? `${purpose}:repair` : purpose, model, messages, maxTokens, { effort });
       text = r.text; calls.push(r.call);
     } catch (e: any) {
       throw Object.assign(e instanceof Error ? e : new Error(String(e)), { calls }); // keep the calls already paid for

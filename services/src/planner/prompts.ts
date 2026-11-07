@@ -44,7 +44,7 @@ ${prompt}
 """
 
 Budget: ${formatUsdc(budgetAtomic)} USDC in total, of which ${formatUsdc(allocatableAtomic)} USDC can be allocated to subtasks (the rest is a reserve for re-hires). Marketplace agents typically charge 0.05 to 0.50 USDC per job; scope the number and size of subtasks to fit.`;
-  const { data, calls } = await json('plan.draft', config.plannerModel, Draft, DRAFT_SYSTEM, user, 8000); // headroom: reasoning models count thinking tokens
+  const { data, calls } = await json('plan.draft', config.plannerModel, Draft, DRAFT_SYSTEM, user, 16000, 'medium'); // headroom: reasoning models count thinking tokens
   return { draft: data.subtasks, calls };
 }
 
@@ -69,7 +69,7 @@ export async function select(draft: DraftSubtask[], results: AgentSummary[][]): 
       : '  (no agents found)';
     return `Subtask ${i + 1}: ${d.title}\nBrief:\n${indent(d.brief)}\nAgents:\n${agents}`;
   }).join('\n\n');
-  const { data, calls } = await json('plan.select', config.plannerModel, Selection, SELECT_SYSTEM, user, 3000);
+  const { data, calls } = await json('plan.select', config.plannerModel, Selection, SELECT_SYSTEM, user, 4000, 'low');
   for (const s of data.selections) if (picked[s.subtask_index - 1]) picked[s.subtask_index - 1].push(...s.handles);
   return { handles: picked, calls };
 }
@@ -103,7 +103,7 @@ Rules:
     `<deliverable subtask="${s.id}" title="${attr(s.title)}" agent="${attr(agentOf(s))}">\n${escapeDelimiters(s.deliverable_text!)}\n</deliverable>`).join('\n\n');
   const gaps = req.subtasks.filter((s) => !isMerged(s)).map((s) => `- ${s.id}. ${s.title} (${s.status})`).join('\n') || '- none';
   const user = `User task:\n"""\n${req.prompt}\n"""\n\nDelivered subtasks:\n\n${delivered}\n\nSubtasks not delivered (gaps):\n${gaps}`;
-  const { text, call } = await chat('aggregate', config.plannerModel, [{ role: 'system', content: system }, { role: 'user', content: user }], 8000);
+  const { text, call } = await chat('aggregate', config.plannerModel, [{ role: 'system', content: system }, { role: 'user', content: user }], 8000, { effort: 'low' });
   return { final_markdown: text, calls: [call] };
 }
 

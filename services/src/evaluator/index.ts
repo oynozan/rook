@@ -47,7 +47,7 @@ async function extract(text: string, labels: string[], calls: LlmCall[]): Promis
     'For each requested label return { "value": number, "quote": string } or null when the report does not state it. ' +
     '"quote" must be copied verbatim from the report and include the number as written. "value" is that number with ' +
     'commas removed and k/m/b/million/billion expanded; a percentage stays as written (38.2% is 38.2); keep a minus sign.',
-    `Labels: ${JSON.stringify(labels)}\nReply as {"<label>": {"value": ..., "quote": "..."} | null} with every label as a key.\n\n${wrap(text)}`, 1500));
+    `Labels: ${JSON.stringify(labels)}\nReply as {"<label>": {"value": ..., "quote": "..."} | null} with every label as a key.\n\n${wrap(text)}`, 4000)); // reasoning model: hidden thinking counts toward max_tokens
   for (const l of labels) {
     const hit = ExtractHit.safeParse(data[l]);
     out[l] = hit.success ? verifyQuote(text, hit.data.quote, hit.data.value, l) : null;
@@ -64,7 +64,7 @@ async function judge(req: EvaluateRequest, crits: Extract<Criterion, { kind: 'll
     `You judge whether a deliverable meets quality questions for the brief it answers. ${UNTRUSTED} ` +
     'Only answer the questions asked, each with "yes" or "no" and a one-sentence reason.',
     `Brief:\n${req.brief}\n\nQuestions:\n${crits.map((c) => `- id ${c.id}: ${c.spec.question}`).join('\n')}\n\n` +
-    `Reply as {"answers": [{"id": "...", "answer": "yes" | "no", "reason": "..."}]}.\n\n${wrap(req.deliverable.text)}`, 1000));
+    `Reply as {"answers": [{"id": "...", "answer": "yes" | "no", "reason": "..."}]}.\n\n${wrap(req.deliverable.text)}`, 4000));
   return crits.map((c) => {
     const a = data.answers.find((x) => x.id === c.id);
     return a ? r(c, a.answer === 'yes', `judge: ${a.answer}: ${a.reason}`) : r(c, false, 'judge gave no answer');

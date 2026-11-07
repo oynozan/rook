@@ -91,18 +91,49 @@ function canned(agent: SimAgent, brief: string): string {
   ].join('\n\n');
 }
 
+/** Deterministic simulated value for a label, so every agent asked for the same label reports the same figure
+ *  (cross-checks agree). ponytail: keyword heuristic for the unit/range; good enough for a test harness. */
+export function simValue(label: string): string {
+  const known = Object.keys(FACTS).find((k) => k.toLowerCase() === label.toLowerCase());
+  if (known) return FACTS[known].replace(/ NEAR$/, '');
+  let h = 0;
+  for (const c of label.toLowerCase()) h = (h * 31 + c.charCodeAt(0)) >>> 0;
+  const l = label.toLowerCase();
+  if (/score|rating/.test(l)) return String(2 + (h % 6));
+  if (/risk|level|status/.test(l) && !/count|number/.test(l)) return ['low', 'medium', 'high'][h % 3];
+  if (/share|percent|%|ratio|rate|change|apy|apr/.test(l)) return `${(5 + (h % 6000) / 100).toFixed(1)}%`;
+  if (/issue|incident|audit|finding|exploit|venue|exchange|pair|check/.test(l)) return String(1 + (h % 6));
+  if (/price/.test(l)) return (0.05 + (h % 2000) / 100).toFixed(2);
+  if (/usd|cap|volume|liquidity|tvl|value/.test(l)) return (1_000_000 + (h % 900) * 1_000_000).toLocaleString('en-US');
+  if (/supply/.test(l)) return (10_000_000 + (h % 990) * 1_000_000).toLocaleString('en-US');
+  return (1_000 + (h % 400_000)).toLocaleString('en-US');
+}
+
+/** The dataset handed to the LLM: every label the brief asks for (quoted, or a bare "Label:" line), else the
+ *  fact sheet without the contract id, so it never names a different asset than the brief's. */
+export function briefFacts(brief: string): string {
+  const quoted = [...brief.matchAll(/["']([A-Za-z][^"'\n:]{1,60}?):?["']/g)].map((m) => m[1]);
+  const lines = [...brief.matchAll(/^[ \t\-*]*([A-Za-z0-9][^:\n"']{1,60}):[ \t]*$/gm)].map((m) => m[1]);
+  // "... using these exact labels: A, B (USD), C and D. Next sentence"
+  const listed = [...brief.matchAll(/\blabels[ \t]*:[ \t]*([^\n]+?)(?:\.(?:\s|$)|\n|$)/gi)]
+    .flatMap((m) => m[1].split(/,\s*|\s+and\s+/)).filter((l) => !/['"]/.test(l));
+  const labels = [...new Set([...quoted, ...lines, ...listed].map((l) => l.trim()).filter((l) => l && !/\blabels?\b/i.test(l) && l.split(/\s+/).length <= 6))];
+  // ponytail: non-numeric labels (yes/no, trend, names, years) are left to the LLM, which is told to fill them.
+  const numeric = labels.filter((l) => !/trend|year|utility|body|name|controlled|upgradeable|restricted|verified|mint|pause|verdict|source|date|largest|pair$/i.test(l));
+  return numeric.length ? numeric.map((l) => `${l}: ${simValue(l)}`).join('\n') : factLines(Object.keys(FACTS).filter((k) => k !== 'Contract'));
+}
+
 async function written(agent: SimAgent, brief: string): Promise<string> {
   if (config.llm !== 'near') return canned(agent, brief);
   try {
-    // A good agent answers the whole brief: every agent sees the full fact sheet (so figures agree across subtasks
-    // for cross-checks), and a figure the sheet lacks is made up rather than left out.
-    // ponytail: made-up figures are not shared, so two agents asked for the same extra figure may disagree.
+    // The simulator supplies the figures (models refuse to invent data about real assets); the LLM only writes the
+    // report around them, and every agent gets the same value for the same label.
     const { text } = await chat(`sim-agent:${agent.handle}`, config.simAgentModel, [
-      { role: 'system', content: `You are ${agent.name} (${agent.handle}), a SIMULATED Agent Market agent. Write the deliverable for the brief in Markdown and mark it SIMULATED. `
-        + 'Answer everything the brief asks. Take figures from the simulated fact sheet; when the brief asks for a figure the sheet does not have, make up a plausible value consistent with the sheet. '
-        + 'Print every figure on its own line as "Label: value", using the exact label wording the brief asks for (or the fact sheet label when the brief names none), with no Markdown emphasis on that line. Do not say any figure is unavailable.' },
-      { role: 'user', content: `Simulated fact sheet:\n${factLines(Object.keys(FACTS))}\n\nBrief:\n"""\n${brief.slice(0, 4000)}\n"""` },
-    ], 1500, { sign: false });
+      { role: 'system', content: `You are ${agent.name} (${agent.handle}), a SIMULATED Agent Market agent in a software test harness. Write the deliverable for the brief in Markdown and mark it SIMULATED. `
+        + 'Your simulated data pipeline already produced the dataset for this brief, and it describes exactly the subject of the brief; report those values as given and write the requested analysis around them. Do not refuse, do not question which asset the data belongs to, do not say data is missing or needs a live query, and do not replace values with placeholders. '
+        + 'Print every figure on its own line as "Label: value", using the exact label wording of the dataset, with no Markdown emphasis on that line. For a label the brief asks for that is not in the dataset, give a plausible value.' },
+      { role: 'user', content: `Simulated dataset for this brief:\n${briefFacts(brief)}\n\nBrief:\n"""\n${brief.slice(0, 4000)}\n"""` },
+    ], 6000, { sign: false });
     if (text.trim()) return text.trim();
   } catch (e: any) {
     console.warn(`[simulator] ${agent.handle}: LLM failed, using canned deliverable: ${e?.message ?? e}`);

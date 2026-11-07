@@ -149,7 +149,7 @@ Response (`Evaluation`):
 
 ### 6.5 Signed LLM calls
 
-Every NEAR AI call made by the planner, evaluator or aggregator is recorded as `LlmCall`: `{ purpose, model, chat_id, request_sha256, response_sha256, input_tokens, output_tokens, cost_usd, signature, signing_address, signing_algo, signature_verified }`. After each call the service fetches `GET https://cloud-api.near.ai/v1/signature/<chat_id>?model=<model>&signing_algo=ecdsa`. The gateway signs the text `sha256(request body):sha256(response body)`; `signature_verified` is true when that text equals the hashes Rook computed over the exact bytes it sent and received. Recovering the signer address from the ECDSA signature and checking it against the gateway attestation is a later step.
+Every NEAR AI call made by the planner, evaluator or aggregator is recorded as `LlmCall`: `{ purpose, model, chat_id, request_sha256, response_sha256, input_tokens, output_tokens, cost_usd, signature, signing_address, signing_algo, signature_kind, signature_verified }`. After each call the service fetches `GET https://cloud-api.near.ai/v1/signature/<chat_id>?model=<model>&signing_algo=ecdsa`. For models NEAR AI proxies (`signature_kind` `gateway`, e.g. `anthropic/*`) the gateway signs `sha256(request body):sha256(response body)`; for models running in a TEE (`signature_kind` `provider_tee`, marked `verifiable` in `/v1/model/list`) the text is `<model>:sha256(request body):sha256(response body)` (checked live on 2026-11-07). `signature_verified` is true when the text equals either form built from the hashes Rook computed over the exact bytes it sent and received. Recovering the signer address from the ECDSA signature and checking it against the gateway attestation is a later step.
 
 ## 7. Criteria
 
