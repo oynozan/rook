@@ -5,10 +5,11 @@ use near_sdk::{test_vm_config, testing_env, PromiseResult, RuntimeFeesConfig};
 
 const OWNER: &str = "owner.testnet";
 const ORCH: &str = "orch.testnet";
+const SIGNER: &str = "signer.testnet";
 const USDC: &str = "usdc.testnet";
 const ME: &str = "rook.testnet";
 const EVE: &str = "eve.testnet";
-const CREATE: &str = r#"{"create_task":{"reserve_bps":2000}}"#;
+const CREATE: &str = r#"{"create_task":{"reserve_bps":2000,"caps":["300","200","100"]}}"#;
 
 fn acc(s: &str) -> AccountId {
     s.parse().unwrap()
@@ -50,8 +51,20 @@ fn callback(ok: bool) {
     call_with(ME, vec![if ok { PromiseResult::Successful(vec![]) } else { PromiseResult::Failed }]);
 }
 
+const PK: &str = "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp";
+
 fn pk() -> PublicKey {
-    "ed25519:6E8sCci9badyRkXb3JoRpBj5p8C6Tw41ELDZoiihKEtp".parse().unwrap()
+    PK.parse().unwrap()
+}
+
+fn new_contract() -> Contract {
+    call(OWNER);
+    Contract::new(acc(OWNER), acc(ORCH), acc(SIGNER), acc(USDC))
+}
+
+fn register(c: &mut Contract, id: &str, n: u32) {
+    call(SIGNER);
+    c.register_subtask_key(id.into(), n, pk());
 }
 
 fn value<T>(v: PromiseOrValue<T>) -> T {
@@ -91,28 +104,29 @@ fn has_event(name: &str) -> bool {
     get_logs().iter().any(|l| l.starts_with("EVENT_JSON:") && l.contains(&format!(r#""event":"{name}""#)))
 }
 
-/// Contract with task "0": budget 1000, reserve 200, unallocated 800.
+/// Contract with task "0": budget 1000, reserve 200, unallocated 800, caps 300 / 200 / 100.
 fn setup() -> Contract {
-    call(OWNER);
-    let mut c = Contract::new(acc(OWNER), acc(ORCH), acc(USDC));
+    let mut c = new_contract();
     assert_eq!(deposit(&mut c, OWNER, 1000, CREATE), 0);
     check(&c, "0");
     c
 }
 
-fn start_fund(c: &mut Contract, id: &str, n: u32, cap: u128) {
+/// The signer registers the key, the orchestrator starts the funding.
+fn start_fund(c: &mut Contract, id: &str, n: u32) {
+    register(c, id, n);
     call(ORCH);
-    let _ = c.fund_subtask(id.into(), n, U128(cap), pk());
+    let _ = c.fund_subtask(id.into(), n);
     check(c, id);
 }
 
-fn fund(c: &mut Contract, id: &str, n: u32, cap: u128) {
-    start_fund(c, id, n, cap);
+fn fund(c: &mut Contract, id: &str, n: u32) {
+    start_fund(c, id, n);
     callback(true);
-    let _ = c.on_account_created(id.into(), n);
+    let _ = c.on_account_created(id.into(), n, 0);
     check(c, id);
     callback(true);
-    assert!(c.on_subtask_funded(id.into(), n));
+    assert!(c.on_subtask_funded(id.into(), n, 0));
     check(c, id);
 }
 
@@ -145,20 +159,51 @@ fn create_task_opens_task() {
     let t = task(&c, "0");
     assert_eq!((t.budget, t.reserve, t.unallocated, t.reserve_remaining), (1000, 200, 800, 200));
     assert_eq!((t.funder, t.status), (acc(OWNER), TaskStatus::Open));
-    assert_eq!(deposit(&mut c, OWNER, 10, CREATE), 0);
+    assert_eq!(t.caps, vec![U128(300), U128(200), U128(100)]);
+    assert_eq!(deposit(&mut c, OWNER, 750, CREATE), 0, "caps sum 600 = 750 - 150");
     assert!(c.get_task("1".into()).is_some());
     assert_eq!((base36(35).as_str(), base36(36).as_str()), ("z", "10"));
 }
 
 #[test]
 fn ft_on_transfer_refunds_bad_messages() {
-    call(OWNER);
-    let mut c = Contract::new(acc(OWNER), acc(ORCH), acc(USDC));
-    for msg in ["", "nope", r#"{"foo":{}}"#, r#"{"create_task":{"reserve_bps":9001}}"#, r#"{"create_task":{}}"#] {
+    let mut c = new_contract();
+    let bad = [
+        "",
+        "nope",
+        r#"{"foo":{}}"#,
+        r#"{"create_task":{"reserve_bps":9001,"caps":["1"]}}"#,
+        r#"{"create_task":{"caps":["1"]}}"#,
+        r#"{"create_task":{"reserve_bps":2000}}"#,
+        r#"{"create_task":{"reserve_bps":2000,"caps":[300]}}"#,
+    ];
+    for msg in bad {
         assert_eq!(deposit(&mut c, OWNER, 1000, msg), 1000, "msg {msg}");
     }
     assert_eq!(deposit(&mut c, EVE, 1000, CREATE), 1000, "only the owner funds tasks");
     assert_eq!(c.get_config().tasks, 0);
+}
+
+#[test]
+fn create_task_refunds_bad_caps() {
+    let mut c = new_contract();
+    let caps = |v: Vec<u128>| {
+        let v: Vec<String> = v.iter().map(|c| format!(r#""{c}""#)).collect();
+        format!(r#"{{"create_task":{{"reserve_bps":2000,"caps":[{}]}}}}"#, v.join(","))
+    };
+    for (v, why) in [
+        (vec![], "empty"),
+        (vec![300, 0], "zero cap"),
+        (vec![500, 301], "sum over budget - reserve (800)"),
+        (vec![u128::MAX, 2], "sum overflows"),
+        (vec![1; 33], "more than 32"),
+    ] {
+        assert_eq!(deposit(&mut c, OWNER, 1000, &caps(v)), 1000, "{why}");
+    }
+    assert_eq!(c.get_config().tasks, 0);
+    assert_eq!(deposit(&mut c, OWNER, 1000, &caps(vec![500, 300])), 0, "sum exactly budget - reserve");
+    assert_eq!(deposit(&mut c, OWNER, 1000, &caps(vec![1; 32])), 0, "32 caps");
+    assert_eq!(task(&c, "1").caps.len(), 32);
 }
 
 #[test]
@@ -181,32 +226,109 @@ fn ft_on_transfer_rejects_other_tokens() {
 // ---------- fund_subtask ----------
 
 #[test]
-#[should_panic(expected = "cap exceeds the unallocated budget")]
-fn fund_over_unallocated_refused() {
+#[should_panic(expected = "n is not an approved subtask")]
+fn fund_beyond_caps_refused() {
     let mut c = setup();
-    start_fund(&mut c, "0", 1, 801);
+    call(ORCH);
+    let _ = c.fund_subtask("0".into(), 4);
+}
+
+#[test]
+#[should_panic(expected = "n is not an approved subtask")]
+fn register_beyond_caps_refused() {
+    let mut c = setup();
+    register(&mut c, "0", 0);
+}
+
+#[test]
+#[should_panic(expected = "no key registered for this subtask")]
+fn fund_without_registered_key_refused() {
+    let mut c = setup();
+    call(ORCH);
+    let _ = c.fund_subtask("0".into(), 1);
+}
+
+#[test]
+#[should_panic(expected = "only the signer")]
+fn register_by_non_signer_refused() {
+    let mut c = setup();
+    call(ORCH);
+    c.register_subtask_key("0".into(), 1, pk());
+}
+
+#[test]
+#[should_panic(expected = "key already registered")]
+fn register_twice_refused() {
+    let mut c = setup();
+    register(&mut c, "0", 1);
+    register(&mut c, "0", 1);
+}
+
+#[test]
+#[should_panic(expected = "subtask already exists")]
+fn register_after_funding_refused() {
+    let mut c = setup();
+    fund(&mut c, "0", 1);
+    register(&mut c, "0", 1);
+}
+
+#[test]
+#[should_panic(expected = "task is killed")]
+fn register_on_killed_task_refused() {
+    let mut c = setup();
+    call(OWNER);
+    c.kill_task("0".into());
+    register(&mut c, "0", 1);
 }
 
 #[test]
 #[should_panic(expected = "only the orchestrator")]
 fn fund_by_non_orchestrator_refused() {
     let mut c = setup();
-    call(OWNER);
-    let _ = c.fund_subtask("0".into(), 1, U128(100), pk());
+    register(&mut c, "0", 1);
+    call(SIGNER);
+    let _ = c.fund_subtask("0".into(), 1);
+}
+
+/// A leaked orchestrator key: it can neither pick the sub-account key nor fund more than the caps.
+#[test]
+fn leaked_orchestrator_is_bounded_by_the_caps() {
+    let mut c = setup();
+    let attempt = |c: &mut Contract, pred: &str, f: &dyn Fn(&mut Contract)| {
+        call(pred);
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| f(c))).is_err()
+    };
+    // No way to register its own key, and no subtask without a signer key.
+    assert!(attempt(&mut c, ORCH, &|c| c.register_subtask_key("0".into(), 1, pk())));
+    assert!(attempt(&mut c, ORCH, &|c| drop(c.fund_subtask("0".into(), 1))));
+    // With signer keys registered, it funds each approved cap once, and nothing beyond them.
+    for n in 1..=3 {
+        fund(&mut c, "0", n);
+        assert_eq!(sub(&c, "0", n).public_key, pk());
+    }
+    assert!(attempt(&mut c, ORCH, &|c| drop(c.fund_subtask("0".into(), 1))));
+    assert!(attempt(&mut c, ORCH, &|c| drop(c.fund_subtask("0".into(), 4))));
+    let t = task(&c, "0");
+    assert_eq!((t.allocated, t.unallocated), (600, 200));
+    check(&c, "0");
 }
 
 #[test]
 fn fund_success() {
     let mut c = setup();
-    start_fund(&mut c, "0", 1, 300);
+    register(&mut c, "0", 1);
+    assert!(has_event("subtask_key_registered"));
+    call(ORCH);
+    let _ = c.fund_subtask("0".into(), 1);
     let r = get_created_receipts();
     assert_eq!(r[0].receiver_id, acc(&sub_account("0", 1)));
     assert!(matches!(r[0].actions[0], MockAction::CreateAccount { .. }));
+    assert!(r[0].actions.iter().any(|a| matches!(a, MockAction::AddKeyWithFullAccess { public_key, .. } if public_key.to_string() == PK)));
     assert_eq!(sub(&c, "0", 1).status, SubtaskStatus::Funding);
     assert_eq!((task(&c, "0").unallocated, task(&c, "0").allocated), (500, 300));
 
     callback(true);
-    let _ = c.on_account_created("0".into(), 1);
+    let _ = c.on_account_created("0".into(), 1, 0);
     let usdc = get_created_receipts().into_iter().find(|r| r.receiver_id == acc(USDC)).unwrap();
     let calls: Vec<_> = usdc
         .actions
@@ -221,35 +343,39 @@ fn fund_success() {
     assert_eq!(calls, vec![("storage_deposit".into(), STORAGE_DEPOSIT), ("ft_transfer".into(), ONE_YOCTO)]);
 
     callback(true);
-    assert!(c.on_subtask_funded("0".into(), 1));
+    assert!(c.on_subtask_funded("0".into(), 1, 0));
     assert!(has_event("subtask_funded"));
     let s = sub(&c, "0", 1);
     assert_eq!((s.status, s.cap, s.account_exists), (SubtaskStatus::Funded, 300, true));
     check(&c, "0");
+    fund(&mut c, "0", 3);
+    assert_eq!(sub(&c, "0", 3).cap, 100, "exactly the approved cap");
+    assert_eq!((task(&c, "0").unallocated, task(&c, "0").allocated), (400, 400));
 }
 
 #[test]
 fn fund_create_failure_rolls_back() {
     let mut c = setup();
-    start_fund(&mut c, "0", 1, 300);
+    start_fund(&mut c, "0", 1);
     callback(false);
-    assert!(!value(c.on_account_created("0".into(), 1)));
+    assert!(!value(c.on_account_created("0".into(), 1, 0)));
     assert!(has_event("subtask_funding_failed"));
     let s = sub(&c, "0", 1);
     assert_eq!((s.status, s.account_exists), (SubtaskStatus::Failed, false));
     assert_eq!((task(&c, "0").unallocated, task(&c, "0").allocated), (800, 0));
     check(&c, "0");
-    fund(&mut c, "0", 2, 800); // the full allocation is available again
+    fund(&mut c, "0", 2); // the cap went back to the pool; n = 1 stays Failed
+    assert_eq!((task(&c, "0").unallocated, task(&c, "0").allocated), (600, 200));
 }
 
 #[test]
 fn fund_transfer_failure_rolls_back() {
     let mut c = setup();
-    start_fund(&mut c, "0", 1, 300);
+    start_fund(&mut c, "0", 1);
     callback(true);
-    let _ = c.on_account_created("0".into(), 1);
+    let _ = c.on_account_created("0".into(), 1, 0);
     callback(false);
-    assert!(!c.on_subtask_funded("0".into(), 1));
+    assert!(!c.on_subtask_funded("0".into(), 1, 0));
     let s = sub(&c, "0", 1);
     assert_eq!((s.status, s.account_exists), (SubtaskStatus::Failed, true));
     assert_eq!(task(&c, "0").unallocated, 800);
@@ -260,20 +386,63 @@ fn fund_transfer_failure_rolls_back() {
 #[should_panic(expected = "subtask already exists")]
 fn fund_same_subtask_twice_refused() {
     let mut c = setup();
-    start_fund(&mut c, "0", 1, 300);
+    start_fund(&mut c, "0", 1); // still Funding: not retryable
+    call(ORCH);
+    let _ = c.fund_subtask("0".into(), 1);
+}
+
+/// Review finding 2: a Failed n is retried with a fresh key and account; a stale callback is refused.
+#[test]
+fn failed_subtask_can_be_retried() {
+    let mut c = setup();
+    start_fund(&mut c, "0", 1);
+    callback(true);
+    let _ = c.on_account_created("0".into(), 1, 0);
     callback(false);
-    let _ = c.on_account_created("0".into(), 1);
-    start_fund(&mut c, "0", 1, 300);
+    assert!(!c.on_subtask_funded("0".into(), 1, 0)); // t0-1 exists, holds no USDC
+    // The key was used up: a retry needs a new registration.
+    call(ORCH);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(c.fund_subtask("0".into(), 1))));
+    assert!(r.is_err());
+    start_fund(&mut c, "0", 1);
+    assert_eq!(get_created_receipts()[0].receiver_id, acc(&format!("t0-1-1.{ME}")), "new account name");
+    let s = sub(&c, "0", 1);
+    assert_eq!((s.attempt, s.status, s.cap, s.account_exists), (1, SubtaskStatus::Funding, 300, false));
+    callback(true);
+    let stale = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.on_subtask_funded("0".into(), 1, 0)));
+    assert!(stale.is_err(), "a callback of attempt 0 must not touch attempt 1");
+    callback(true);
+    let _ = c.on_account_created("0".into(), 1, 1);
+    callback(true);
+    assert!(c.on_subtask_funded("0".into(), 1, 1));
+    assert_eq!(task(&c, "0").subtasks, vec![1]);
+    assert_eq!((task(&c, "0").allocated, task(&c, "0").unallocated), (300, 500));
+    check(&c, "0");
+    assert_eq!(give_back(&mut c, &format!("t0-1-1.{ME}"), "0", 1, 100), 0);
+    check(&c, "0");
+}
+
+#[test]
+#[should_panic(expected = "no funding attempts left")]
+fn retries_are_bounded() {
+    let mut c = setup();
+    for attempt in 0..MAX_ATTEMPTS {
+        start_fund(&mut c, "0", 1);
+        callback(false);
+        let _ = c.on_account_created("0".into(), 1, attempt);
+    }
+    check(&c, "0");
+    register(&mut c, "0", 1);
 }
 
 #[test]
 fn kill_between_create_and_transfer_stops_transfer() {
     let mut c = setup();
-    start_fund(&mut c, "0", 1, 300);
+    start_fund(&mut c, "0", 1);
     call(OWNER);
     c.kill_task("0".into());
     callback(true);
-    assert!(!value(c.on_account_created("0".into(), 1)));
+    assert!(!value(c.on_account_created("0".into(), 1, 0)));
     let s = sub(&c, "0", 1);
     assert_eq!((s.status, s.account_exists), (SubtaskStatus::Failed, true));
     check(&c, "0");
@@ -284,7 +453,7 @@ fn kill_between_create_and_transfer_stops_transfer() {
 fn fund_rejects_long_account_id() {
     let mut c = setup();
     call(ORCH);
-    let _ = c.fund_subtask("x".repeat(60), 1, U128(1), pk());
+    let _ = c.fund_subtask("x".repeat(60), 1);
 }
 
 // ---------- top_up ----------
@@ -293,14 +462,14 @@ fn fund_rejects_long_account_id() {
 #[should_panic(expected = "amount exceeds the remaining reserve")]
 fn top_up_over_reserve_refused() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
+    fund(&mut c, "0", 1);
     top_up(&mut c, "0", 1, 201, true);
 }
 
 #[test]
 fn top_up_failure_restores_reserve() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
+    fund(&mut c, "0", 1);
     call(ORCH);
     let _ = c.top_up("0".into(), 1, U128(50));
     assert_eq!((task(&c, "0").reserve_remaining, sub(&c, "0", 1).status), (150, SubtaskStatus::ToppingUp));
@@ -318,7 +487,7 @@ fn top_up_failure_restores_reserve() {
 #[should_panic(expected = "subtask is not funded")]
 fn top_up_requires_funded_subtask() {
     let mut c = setup();
-    start_fund(&mut c, "0", 1, 300);
+    start_fund(&mut c, "0", 1);
     top_up(&mut c, "0", 1, 10, true);
 }
 
@@ -327,8 +496,8 @@ fn top_up_requires_funded_subtask() {
 #[test]
 fn return_from_wrong_account_refunded() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
-    start_fund(&mut c, "0", 2, 100);
+    fund(&mut c, "0", 1);
+    start_fund(&mut c, "0", 2);
     assert_eq!(give_back(&mut c, EVE, "0", 1, 50), 50);
     assert_eq!(give_back(&mut c, &sub_account("0", 2), "0", 1, 50), 50, "another subtask's account");
     assert_eq!(give_back(&mut c, &sub_account("0", 2), "0", 2, 50), 50, "subtask still funding");
@@ -339,7 +508,7 @@ fn return_from_wrong_account_refunded() {
 #[test]
 fn return_from_right_account_credited() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
+    fund(&mut c, "0", 1);
     assert_eq!(give_back(&mut c, &sub_account("0", 1), "0", 1, 120), 0);
     assert!(has_event("returned"));
     let (t, s) = (task(&c, "0"), sub(&c, "0", 1));
@@ -353,7 +522,7 @@ fn return_from_right_account_credited() {
 #[should_panic(expected = "subtask 1 has not returned its leftover")]
 fn close_refused_before_returns() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
+    fund(&mut c, "0", 1);
     call(ORCH);
     let _ = c.close_task("0".into());
 }
@@ -369,8 +538,8 @@ fn close_by_stranger_refused() {
 #[test]
 fn close_refunds_the_right_amount() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
-    fund(&mut c, "0", 2, 200);
+    fund(&mut c, "0", 1);
+    fund(&mut c, "0", 2);
     top_up(&mut c, "0", 1, 50, true);
     assert_eq!(give_back(&mut c, &sub_account("0", 1), "0", 1, 120), 0);
     assert_eq!(give_back(&mut c, &sub_account("0", 2), "0", 2, 30), 0);
@@ -419,14 +588,14 @@ fn kill_blocks_funding() {
     call(OWNER);
     c.kill();
     assert!(has_event("killed"));
-    start_fund(&mut c, "0", 1, 100);
+    start_fund(&mut c, "0", 1);
 }
 
 #[test]
 #[should_panic(expected = "task is killed")]
 fn kill_task_blocks_top_up() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
+    fund(&mut c, "0", 1);
     call(OWNER);
     c.kill_task("0".into());
     top_up(&mut c, "0", 1, 10, true);
@@ -443,8 +612,8 @@ fn kill_by_orchestrator_refused() {
 #[test]
 fn killed_task_returns_and_owner_close_still_work() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
-    fund(&mut c, "0", 2, 200);
+    fund(&mut c, "0", 1);
+    fund(&mut c, "0", 2);
     call(OWNER);
     c.kill();
     assert_eq!(give_back(&mut c, &sub_account("0", 1), "0", 1, 100), 0);
@@ -471,8 +640,8 @@ fn killed_task_returns_and_owner_close_still_work() {
 #[should_panic(expected = "subtask 2 has not returned its leftover")]
 fn killed_task_orchestrator_close_still_needs_returns() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
-    fund(&mut c, "0", 2, 200);
+    fund(&mut c, "0", 1);
+    fund(&mut c, "0", 2);
     call(OWNER);
     c.kill_task("0".into());
     assert_eq!(give_back(&mut c, &sub_account("0", 1), "0", 1, 100), 0);
@@ -487,7 +656,7 @@ fn set_orchestrator_rotates_key() {
     owner_yocto(0);
     c.set_orchestrator(acc("orch2.testnet"));
     assert_eq!(c.get_config().orchestrator, acc("orch2.testnet"));
-    start_fund(&mut c, "0", 1, 100);
+    start_fund(&mut c, "0", 1);
 }
 
 // ---------- receipts ----------
@@ -495,7 +664,7 @@ fn set_orchestrator_rotates_key() {
 #[test]
 fn record_receipt_appends_and_pages() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
+    fund(&mut c, "0", 1);
     call(ORCH);
     assert_eq!(c.record_receipt("0".into(), 1, receipt(Some("pass"))), 0);
     assert_eq!(c.record_receipt("0".into(), 1, receipt(None)), 1);
@@ -511,7 +680,7 @@ fn record_receipt_appends_and_pages() {
 #[should_panic(expected = "agent_handle longer than 128 bytes")]
 fn record_receipt_bounds_strings() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
+    fund(&mut c, "0", 1);
     call(ORCH);
     c.record_receipt("0".into(), 1, Receipt { agent_handle: "a".repeat(129), ..receipt(None) });
 }
@@ -520,7 +689,7 @@ fn record_receipt_bounds_strings() {
 #[should_panic(expected = "verdict must be pass, fail or null")]
 fn record_receipt_checks_verdict() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
+    fund(&mut c, "0", 1);
     call(ORCH);
     c.record_receipt("0".into(), 1, receipt(Some("maybe")));
 }
@@ -536,12 +705,14 @@ fn record_receipt_needs_subtask() {
 #[test]
 fn views_serialize_amounts_as_strings() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
+    fund(&mut c, "0", 1);
     let t = serde_json::to_value(task(&c, "0")).unwrap();
     assert_eq!((t["budget"].as_str(), t["status"].as_str()), (Some("1000"), Some("Open")));
     let s = serde_json::to_value(c.get_subtasks("0".into())).unwrap();
     assert_eq!(s[0]["cap"], "300");
     assert_eq!(s[0]["account_id"], sub_account("0", 1));
+    assert_eq!(s[0]["public_key"], PK);
+    assert_eq!(t["caps"], serde_json::json!(["300", "200", "100"]));
 }
 
 // ---------- NEAR balance ----------
@@ -550,22 +721,23 @@ fn views_serialize_amounts_as_strings() {
 #[should_panic(expected = "not enough free NEAR")]
 fn fund_refused_without_free_near() {
     let mut c = setup();
+    register(&mut c, "0", 1);
     // Free NEAR covers the sub-account but not the storage deposit and margin.
     call_ctx(ORCH, vec![], |b| {
         b.account_balance(NearToken::from_yoctonear(STAKED + SUBACCOUNT_NEAR.as_yoctonear()));
     });
-    let _ = c.fund_subtask("0".into(), 1, U128(100), pk());
+    let _ = c.fund_subtask("0".into(), 1);
 }
 
 #[test]
 fn account_created_without_near_fails_funding() {
     let mut c = setup();
-    start_fund(&mut c, "0", 1, 300);
+    start_fund(&mut c, "0", 1);
     // By the callback the free NEAR is below the storage deposit: fail the funding, do not panic.
     call_ctx(ME, vec![PromiseResult::Successful(vec![])], |b| {
         b.account_balance(NearToken::from_yoctonear(STAKED + STORAGE_DEPOSIT.as_yoctonear()));
     });
-    assert!(!value(c.on_account_created("0".into(), 1)));
+    assert!(!value(c.on_account_created("0".into(), 1, 0)));
     assert!(get_created_receipts().iter().all(|r| r.receiver_id != acc(USDC)), "no USDC call");
     let s = sub(&c, "0", 1);
     assert_eq!((s.status, s.account_exists), (SubtaskStatus::Failed, true));
@@ -580,7 +752,7 @@ fn account_created_without_near_fails_funding() {
 #[test]
 fn failed_reclose_keeps_task_closed() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
+    fund(&mut c, "0", 1);
     assert_eq!(give_back(&mut c, &sub_account("0", 1), "0", 1, 100), 0);
     call(ORCH);
     let _ = c.close_task("0".into());
@@ -596,7 +768,7 @@ fn failed_reclose_keeps_task_closed() {
     assert_eq!((t.status, t.unallocated, t.refunded), (TaskStatus::Closed, 50, 800));
     assert!(t.closing.is_none());
     check(&c, "0");
-    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| start_fund(&mut c, "0", 2, 50)));
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| start_fund(&mut c, "0", 2)));
     assert!(r.is_err(), "fund_subtask on a closed task must be refused");
 }
 
@@ -615,7 +787,7 @@ fn set_orchestrator_needs_one_yocto() {
 #[test]
 fn resolve_funding_before_usdc_call() {
     let mut c = setup();
-    start_fund(&mut c, "0", 1, 300); // on_account_created never completes
+    start_fund(&mut c, "0", 1); // on_account_created never completes
     owner_yocto(RESOLVE_AFTER_BLOCKS);
     c.resolve_stuck("0".into(), Some(1), false);
     assert_eq!(sub(&c, "0", 1).status, SubtaskStatus::Failed);
@@ -630,7 +802,7 @@ fn resolve_funding_before_usdc_call() {
 #[should_panic(expected = "too early")]
 fn resolve_too_early_refused() {
     let mut c = setup();
-    start_fund(&mut c, "0", 1, 300);
+    start_fund(&mut c, "0", 1);
     owner_yocto(RESOLVE_AFTER_BLOCKS - 1);
     c.resolve_stuck("0".into(), Some(1), false);
 }
@@ -639,7 +811,7 @@ fn resolve_too_early_refused() {
 #[should_panic(expected = "no USDC was sent")]
 fn resolve_arrived_before_usdc_call_refused() {
     let mut c = setup();
-    start_fund(&mut c, "0", 1, 300);
+    start_fund(&mut c, "0", 1);
     owner_yocto(RESOLVE_AFTER_BLOCKS);
     c.resolve_stuck("0".into(), Some(1), true);
 }
@@ -648,7 +820,7 @@ fn resolve_arrived_before_usdc_call_refused() {
 #[should_panic(expected = "only the owner")]
 fn resolve_by_orchestrator_refused() {
     let mut c = setup();
-    start_fund(&mut c, "0", 1, 300);
+    start_fund(&mut c, "0", 1);
     call_ctx(ORCH, vec![], |b| {
         b.attached_deposit(ONE_YOCTO).block_height(RESOLVE_AFTER_BLOCKS);
     });
@@ -658,17 +830,17 @@ fn resolve_by_orchestrator_refused() {
 #[test]
 fn resolve_funding_after_usdc_call() {
     let mut c = setup();
-    start_fund(&mut c, "0", 1, 300);
+    start_fund(&mut c, "0", 1);
     callback(true);
-    let _ = c.on_account_created("0".into(), 1); // on_subtask_funded never completes
+    let _ = c.on_account_created("0".into(), 1, 0); // on_subtask_funded never completes
     owner_yocto(RESOLVE_AFTER_BLOCKS);
     c.resolve_stuck("0".into(), Some(1), true);
     assert_eq!(sub(&c, "0", 1).status, SubtaskStatus::Funded);
     check(&c, "0");
 
-    start_fund(&mut c, "0", 2, 100);
+    start_fund(&mut c, "0", 2);
     callback(true);
-    let _ = c.on_account_created("0".into(), 2);
+    let _ = c.on_account_created("0".into(), 2, 0);
     owner_yocto(RESOLVE_AFTER_BLOCKS);
     c.resolve_stuck("0".into(), Some(2), false);
     let s = sub(&c, "0", 2);
@@ -680,7 +852,7 @@ fn resolve_funding_after_usdc_call() {
 #[test]
 fn resolve_top_up_and_close() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
+    fund(&mut c, "0", 1);
     call(ORCH);
     let _ = c.top_up("0".into(), 1, U128(50)); // on_top_up never completes
     owner_yocto(RESOLVE_AFTER_BLOCKS);
@@ -709,7 +881,7 @@ fn resolve_top_up_and_close() {
 #[should_panic(expected = "nothing in flight")]
 fn resolve_settled_subtask_refused() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
+    fund(&mut c, "0", 1);
     owner_yocto(RESOLVE_AFTER_BLOCKS);
     c.resolve_stuck("0".into(), Some(1), false);
 }
@@ -720,7 +892,7 @@ fn resolve_settled_subtask_refused() {
 #[should_panic(expected = "task is closed and this subtask holds no funds")]
 fn record_receipt_refused_on_closed_task() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
+    fund(&mut c, "0", 1);
     assert_eq!(give_back(&mut c, &sub_account("0", 1), "0", 1, 100), 0);
     call(ORCH);
     let _ = c.close_task("0".into());
@@ -733,7 +905,7 @@ fn record_receipt_refused_on_closed_task() {
 #[test]
 fn record_receipt_on_closed_task_for_funded_subtask() {
     let mut c = setup();
-    fund(&mut c, "0", 1, 300);
+    fund(&mut c, "0", 1);
     call(OWNER);
     c.kill_task("0".into());
     let _ = c.close_task("0".into());
@@ -742,4 +914,64 @@ fn record_receipt_on_closed_task_for_funded_subtask() {
     // Subtask 1 still holds funds: a payment authorized before the kill can settle and be recorded.
     call(ORCH);
     assert_eq!(c.record_receipt("0".into(), 1, receipt(Some("pass"))), 0);
+}
+
+// ---------- signer ----------
+
+#[test]
+#[should_panic(expected = "Requires attached deposit of exactly 1 yoctoNEAR")]
+fn set_signer_needs_one_yocto() {
+    let mut c = setup();
+    call(OWNER);
+    c.set_signer(acc(EVE));
+}
+
+#[test]
+fn set_signer_rotates_key() {
+    let mut c = setup();
+    owner_yocto(0);
+    c.set_signer(acc("signer2.testnet"));
+    assert_eq!(c.get_config().signer, acc("signer2.testnet"));
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| register(&mut c, "0", 1))).is_err());
+    call("signer2.testnet");
+    c.register_subtask_key("0".into(), 1, pk());
+    call(ORCH);
+    let _ = c.fund_subtask("0".into(), 1);
+    assert_eq!(sub(&c, "0", 1).public_key, pk());
+}
+
+/// Review finding 1: keys a leaked signer registered stop working once the owner rotates the signer.
+#[test]
+fn set_signer_voids_pending_keys() {
+    let mut c = setup();
+    const EVIL_PK: &str = "ed25519:H9k5eiU4xXS3M4z8HzKJSLaZdqGdGwBG49o7orNC4eZW";
+    for n in 1..=3 {
+        call(SIGNER); // the leaked signer key
+        c.register_subtask_key("0".into(), n, EVIL_PK.parse().unwrap());
+    }
+    owner_yocto(0);
+    c.set_signer(acc("signer2.testnet"));
+    call(ORCH);
+    let err = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(c.fund_subtask("0".into(), 1))));
+    let msg = err.unwrap_err().downcast::<String>().unwrap();
+    assert!(msg.contains("key was registered by a previous signer"), "{msg}");
+    // The new signer overwrites the stale keys, once each, and funding uses its key.
+    for n in 2..=3 {
+        call("signer2.testnet");
+        c.register_subtask_key("0".into(), n, pk());
+        let again = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.register_subtask_key("0".into(), n, pk())));
+        assert!(again.is_err(), "only once per signer");
+        call(ORCH);
+        let _ = c.fund_subtask("0".into(), n);
+        assert_eq!(sub(&c, "0", n).public_key, pk());
+    }
+    check(&c, "0");
+}
+
+#[test]
+#[should_panic(expected = "orchestrator and signer must be different accounts")]
+fn signer_cannot_be_orchestrator() {
+    let mut c = setup();
+    owner_yocto(0);
+    c.set_signer(acc(ORCH));
 }
