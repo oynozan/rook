@@ -23,9 +23,14 @@ export function Composer({ onSend, errors, sending, compact }: {
   const locked = !wallet.account;
   const invalid = !!(errors?.prompt || errors?.budget);
   const form = useRef<HTMLFormElement>(null);
+  const [focused, setFocused] = useState(false);
+  // Phones: just a line to type in, until it's being used. The budget comes back as soon as it is.
+  const folded = !focused && !prompt && !errors?.budget;
 
   async function submit() {
     if (locked || sending) return;
+    // Phones: put the keyboard away, or it covers the plan this is about to bring up.
+    if (window.matchMedia('(max-width: 639px)').matches) (document.activeElement as HTMLElement | null)?.blur();
     if (await onSend(prompt, budget)) setPrompt('');
   }
 
@@ -35,7 +40,9 @@ export function Composer({ onSend, errors, sending, compact }: {
         ref={form}
         noValidate
         onSubmit={(e) => { e.preventDefault(); void submit(); }}
-        className={`rounded-[1.75rem] border bg-white p-3 shadow-sm shadow-ink/5 transition-[border-color,box-shadow] duration-200 focus-within:ring-4 motion-reduce:transition-none ${invalid ? 'border-red-700/50 focus-within:ring-red-700/10' : 'border-ink/15 not-focus-within:hover:border-ink/25 focus-within:border-accent/50 focus-within:ring-accent/10'}`}
+        onFocus={() => setFocused(true)}
+        onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setFocused(false); }}
+        className={`relative rounded-[1.75rem] border bg-surface p-2 sm:p-3 shadow-sm shadow-ink/5 transition-[border-color,box-shadow] duration-200 focus-within:ring-4 motion-reduce:transition-none ${invalid ? 'border-red-700/50 focus-within:ring-red-700/10' : 'border-ink/15 not-focus-within:hover:border-ink/25 focus-within:border-accent/50 focus-within:ring-accent/10'}`}
       >
         <textarea
           name="prompt"
@@ -51,12 +58,12 @@ export function Composer({ onSend, errors, sending, compact }: {
           }}
           rows={2}
           placeholder={compact ? 'Start a new task' : 'Due diligence on the NEAR token'}
-          className={`field-sizing-content block max-h-64 w-full ${compact ? 'min-h-11' : 'min-h-20'} resize-none overflow-y-auto bg-transparent px-3 pt-2 pb-2 ${compact ? 'text-lg' : 'text-xl'} leading-snug outline-none placeholder:text-ink/55 ${compact ? '' : 'md:text-2xl'}`}
+          className={`field-sizing-content block max-h-64 w-full ${compact ? 'min-h-11' : 'min-h-11 sm:min-h-20'} resize-none overflow-y-auto bg-transparent px-3 pt-2.5 pb-2 sm:pt-2 ${compact ? 'text-base sm:text-lg' : 'text-base sm:text-xl md:text-2xl'} ${folded ? 'max-sm:pr-12' : ''} leading-snug outline-none placeholder:text-ink/55`}
         />
 
-        <div className="mt-2 flex items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-3">
-            <label className={`inline-flex h-11 cursor-text items-center gap-1.5 rounded-full px-4 whitespace-nowrap text-ink/65 ring-inset transition-colors duration-200 focus-within:ring-2 motion-reduce:transition-none ${errors?.budget ? 'bg-red-50 ring-1 ring-red-700/50 focus-within:ring-red-700/50' : 'bg-ink/5 hover:bg-ink/10 focus-within:bg-white focus-within:ring-accent/50'}`}>
+        <div className={`grid transition-[grid-template-rows] duration-300 ease-out motion-reduce:transition-none ${folded ? 'grid-rows-[1fr] max-sm:grid-rows-[0fr]' : 'grid-rows-[1fr]'}`}>
+          <div className="flex min-h-0 min-w-0 items-center gap-3 overflow-hidden pr-14">
+            <label className={`mt-2 inline-flex h-11 cursor-text items-center gap-1.5 rounded-full px-4 whitespace-nowrap text-ink/65 ring-inset transition-colors duration-200 focus-within:ring-2 motion-reduce:transition-none ${errors?.budget ? 'bg-red-50 ring-1 ring-red-700/50 focus-within:ring-red-700/50' : 'bg-ink/5 hover:bg-ink/10 focus-within:bg-surface focus-within:ring-accent/50'}`}>
               Budget
               <input
                 name="budget"
@@ -70,14 +77,15 @@ export function Composer({ onSend, errors, sending, compact }: {
               />
               USDC
             </label>
-            <span className="hidden text-sm whitespace-nowrap text-ink/55 sm:inline">{reserveLabel(budget)}</span>
+            <span className="mt-2 hidden text-sm whitespace-nowrap text-ink/55 sm:inline">{reserveLabel(budget)}</span>
           </div>
-          <button
+        </div>
+        <button
             type="submit"
             aria-label="Send task"
             disabled={sending || locked}
             title={locked ? 'Connect your wallet first' : undefined}
-            className={`group grid size-11 shrink-0 place-items-center rounded-full transition-colors duration-200 motion-reduce:transition-none ${locked ? 'cursor-not-allowed bg-ink/10 text-ink/55'
+            className={`group absolute right-2 bottom-2 grid size-11 place-items-center rounded-full sm:right-3 sm:bottom-3 transition-colors duration-200 motion-reduce:transition-none ${locked ? 'cursor-not-allowed bg-ink/10 text-ink/55'
                 : sending ? 'cursor-wait bg-accent-hover text-on-accent'
                   : 'cursor-pointer bg-accent text-on-accent hover:bg-accent-hover focus-visible:bg-accent-hover active:translate-y-px'
               }`}
@@ -85,12 +93,11 @@ export function Composer({ onSend, errors, sending, compact }: {
             <svg className="size-5 shrink-0 transition-transform duration-250 group-enabled:group-hover:translate-x-0.75 group-focus-visible:translate-x-0.75 motion-reduce:translate-x-0! motion-reduce:transition-none" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true">
               <path d="M2 8h11M9 3.5 13.5 8 9 12.5" />
             </svg>
-          </button>
-        </div>
+        </button>
       </form>
-      {errors?.prompt && <p id="prompt-error" className="mt-2 px-4 text-sm text-red-700">{errors.prompt}</p>}
-      {errors?.budget && <p id="budget-error" className="mt-2 px-4 text-sm text-red-700">{errors.budget}</p>}
-      {errors?.message && <p role="alert" className="mt-3 rounded-2xl border border-red-700/40 bg-red-50 p-4 text-red-800">{errors.message}</p>}
+      {errors?.prompt && <p id="prompt-error" className="mt-2 px-4 text-sm text-alert">{errors.prompt}</p>}
+      {errors?.budget && <p id="budget-error" className="mt-2 px-4 text-sm text-alert">{errors.budget}</p>}
+      {errors?.message && <p role="alert" className="mt-3 rounded-2xl border border-alert/40 bg-alert/10 p-4 text-alert">{errors.message}</p>}
     </>
   );
 }

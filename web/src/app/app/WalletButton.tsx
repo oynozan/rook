@@ -1,25 +1,30 @@
 'use client';
 
+import { AnimatePresence, motion } from 'motion/react';
 import { useEffect, useRef, useState } from 'react';
+import { useEase } from './useEase';
+import { UserAvatar } from './UserAvatar';
 import { NETWORK, useWallet } from './wallet';
 
 /** Named accounts read as they are; 64-character implicit ones keep their ends. */
 const shortAccount = (id: string) => (id.length > 20 ? `${id.slice(0, 6)}…${id.slice(-6)}` : id);
 
-export function AccountMenu({ account, onDisconnect, inSidebar }: { account: string; onDisconnect: () => void; inSidebar?: boolean }) {
+export function AccountMenu({ account, onDisconnect }: { account: string; onDisconnect: () => void }) {
   const [open, setOpen] = useState(false);
+  const ease = useEase();
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
     if (!open) return;
     const onPointer = (e: PointerEvent) => { if (!root.current?.contains(e.target as Node)) setOpen(false); };
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { setOpen(false); trigger.current?.focus(); } };
+    // Escape closes one thing at a time: this runs first and stops it reaching the sidebar around the menu.
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') { e.stopPropagation(); setOpen(false); trigger.current?.focus(); } };
     document.addEventListener('pointerdown', onPointer);
-    document.addEventListener('keydown', onKey);
+    document.addEventListener('keydown', onKey, true);
     return () => {
       document.removeEventListener('pointerdown', onPointer);
-      document.removeEventListener('keydown', onKey);
+      document.removeEventListener('keydown', onKey, true);
     };
   }, [open]);
 
@@ -31,16 +36,20 @@ export function AccountMenu({ account, onDisconnect, inSidebar }: { account: str
         aria-expanded={open}
         aria-haspopup="true"
         onClick={() => setOpen((o) => !o)}
-        className={`cursor-pointer items-center gap-2.5 font-medium transition-colors duration-200 hover:bg-ink/5 active:translate-y-px motion-reduce:transition-none ${inSidebar
-          ? 'flex min-h-11 w-full rounded-lg px-3 text-left'
-          : 'inline-flex min-h-13 max-w-[60vw] rounded-full border border-ink/25 px-5 text-[1.0625rem] hover:border-ink focus-visible:border-ink md:min-h-14 md:px-6.5 md:text-lg'}`}
+        className="flex min-h-11 w-full cursor-pointer items-center gap-2.5 rounded-lg px-2.25 text-left font-medium transition-colors duration-200 hover:bg-ink/5 active:translate-y-px motion-reduce:transition-none"
       >
-        <span className="size-2.5 shrink-0 bg-accent" aria-hidden="true" />
+        <UserAvatar account={account} size={26} />
         <span className="sr-only">Connected wallet: </span>
         <span className="min-w-0 truncate">{shortAccount(account)}</span>
       </button>
+      <AnimatePresence>
       {open && (
-        <div className={`absolute z-10 rounded-2xl ${inSidebar ? 'inset-x-0 bottom-full mb-2' : 'top-full right-0 mt-2 w-72 max-w-[calc(100vw-2.5rem)]'} border border-ink/15 bg-white p-4 shadow-lg shadow-ink/10`}>
+        <motion.div
+          initial={{ opacity: 0, y: 6 }}
+          animate={{ opacity: 1, y: 0 }}
+          exit={{ opacity: 0, y: 6 }}
+          transition={ease}
+          className="absolute inset-x-0 bottom-full z-10 mb-2 rounded-2xl border border-ink/15 bg-surface p-4 shadow-lg shadow-ink/10">
           <p className="text-sm text-ink/65">Connected on NEAR {NETWORK}</p>
           <p className="mt-1 font-mono text-sm break-all">{account}</p>
           <button
@@ -50,8 +59,9 @@ export function AccountMenu({ account, onDisconnect, inSidebar }: { account: str
           >
             Disconnect
           </button>
-        </div>
+        </motion.div>
       )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -65,11 +75,11 @@ export function WalletButton() {
         type="button"
         onClick={connect}
         disabled={connecting}
-        className="inline-flex min-h-13 cursor-pointer items-center gap-[0.25em] rounded-full bg-accent px-5 text-[1.0625rem] max-[399px]:px-4 font-medium whitespace-nowrap text-on-accent transition-colors duration-200 hover:bg-accent-hover focus-visible:bg-accent-hover active:translate-y-px disabled:cursor-wait disabled:bg-accent-hover motion-reduce:transition-none md:min-h-14 md:px-6.5 md:text-lg"
+        className="inline-flex min-h-11 cursor-pointer items-center gap-[0.25em] rounded-full bg-accent px-4 text-base font-medium sm:min-h-13 sm:px-5 sm:text-[1.0625rem] whitespace-nowrap text-on-accent transition-colors duration-200 hover:bg-accent-hover focus-visible:bg-accent-hover active:translate-y-px disabled:cursor-wait disabled:bg-accent-hover motion-reduce:transition-none md:min-h-14 md:px-6.5 md:text-lg"
       >
         {connecting ? 'Connecting…' : <>Connect <span className="max-[399px]:sr-only">NEAR</span> wallet</>}
       </button>
-      {failed && <p role="alert" className="absolute top-full mt-1 text-sm text-red-700">Couldn&apos;t load wallets. Try again.</p>}
+      {failed && <p role="alert" className="absolute top-full mt-1 text-sm text-alert">Couldn&apos;t load wallets. Try again.</p>}
     </div>
   );
 }

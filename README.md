@@ -60,7 +60,9 @@ Known gap: a sub-account spent to exactly 0 cannot send a `return` (NEP-141 refu
 
 ## Dependencies
 
-Runtime: `zod`, `ajv`, `near-api-js` (7.4.0, for `ROOK_LEDGER=chain`). Dev: `tsx`, `typescript`, `@types/node`. Web (`web/`, `pnpm web`, port 7110; landing page at `/`, the app at `/app`, which needs `pnpm dev` running): `next`, `react`, `react-dom`, `@hot-labs/near-connect`; dev `tailwindcss`, `@tailwindcss/postcss`. Code written with AI assistance (Claude Code).
+Runtime: `zod`, `ajv`, `near-api-js` (7.4.0, for `ROOK_LEDGER=chain`). Dev: `tsx`, `typescript`, `@types/node`. Web (`web/`, `pnpm web`, port 7110; landing page at `/`, the app at `/app`, which needs `pnpm dev` running): `next`, `react`, `react-dom`, `@hot-labs/near-connect`, `lenis`, `motion`, `next-themes`, `blobatar`, `@blobatar/react`; dev `tailwindcss`, `@tailwindcss/postcss`. Code written with AI assistance (Claude Code).
+
+UI credits: the agent search and run status are adapted from [Rare UI](https://rareui.com) ([licence](web/src/components/ui/RARE-UI-LICENSE)); the theme toggle is adapted from [Skiper UI](https://skiper-ui.com).
 
 ## License
 

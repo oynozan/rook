@@ -1,12 +1,17 @@
 'use client';
 
+import { AnimatePresence, motion } from 'motion/react';
 import { usePathname, useRouter } from 'next/navigation';
 import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Mark } from '@/components/Navbar';
+import { useSmoothScroll } from '@/components/SmoothScroll';
+import { AiStatus } from '@/components/ui/ai-status';
+import { WebSearch, type WebSource } from '@/components/ui/web-search';
 import { approve, cancel, draftTask, stop } from './actions';
 import { go } from './AppShell';
 import { Composer, type ComposerErrors } from './Composer';
 import type { PlanView, RookEvent, TaskSnapshot, TaskSummary } from './orchestrator';
+import { useEase } from './useEase';
 import { useWallet } from './wallet';
 
 const TERMINAL = new Set(['closed', 'cancelled', 'killed', 'failed']);
@@ -15,6 +20,10 @@ const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)'
 const MIN_DRAFT_MS = 1100; // an instant plan reads as canned; real LLM drafts take longer than this anyway
 const LINE_MS = 420;
 const CATCH_UP_MS = 70; // a refresh mid-run replays history quickly, then returns to the live pace
+const AGENT_MS = 320; // agents land one at a time, then the plan they make up
+const AGENTS_MAX_MS = 2400;
+const CARDS_OPEN_MS = 550; // how long the agent cards take to open, so following waits for their full height
+const FOLLOW_HOLD_MS = 150; // after the reader scrolls up, how long scroll events can't resume following
 
 // ---- loading one task ----
 
@@ -67,18 +76,19 @@ function useTask(id: string | null): Loaded {
 function UserMessage({ prompt, budget, animate }: { prompt: string; budget: string; animate?: boolean }) {
   return (
     <div className={`flex justify-end ${animate ? 'rook-in' : ''}`}>
-      <div className="max-w-[85%] rounded-3xl rounded-br-md bg-ink/5 px-5 py-3">
-        <p className="text-lg leading-snug whitespace-pre-wrap">{prompt}</p>
+      <div className="max-w-[85%] rounded-3xl rounded-br-md bg-ink/5 px-4 py-2.5 sm:px-5 sm:py-3">
+        <p className="leading-snug whitespace-pre-wrap sm:text-lg">{prompt}</p>
         <p className="mt-1 text-right text-sm text-ink/65">Budget {budget} USDC</p>
       </div>
     </div>
   );
 }
 
-function RookMessage({ children }: { children: ReactNode }) {
+function RookMessage({ children, still }: { children: ReactNode; still?: boolean }) {
   return (
-    <div className="rook-in flex gap-3">
-      <span className="mt-0.5 flex h-7 shrink-0 items-center [&>svg]:size-5" aria-hidden="true"><Mark /></span>
+    <div className={`flex gap-3 ${still ? '' : 'rook-in'}`}>
+      {/* On a phone the width matters more than the logo: Rook is already everything that isn't in a bubble. */}
+      <span className="mt-0.5 flex h-7 shrink-0 items-center max-sm:hidden [&>svg]:size-5" aria-hidden="true"><Mark /></span>
       <div className="min-w-0 flex-1">{children}</div>
     </div>
   );
@@ -104,7 +114,7 @@ function ActionButton({ onClick, busy, disabled, title, primary, children }: { o
       onClick={onClick}
       disabled={off}
       title={title}
-      className={`inline-flex min-h-11 items-center rounded-full px-5 font-medium whitespace-nowrap transition-colors duration-200 motion-reduce:transition-none ${
+      className={`inline-flex min-h-11 items-center justify-center rounded-full px-4 font-medium whitespace-nowrap transition-colors max-sm:grow sm:px-5 duration-200 motion-reduce:transition-none ${
         primary
           ? disabled ? 'cursor-not-allowed bg-ink/10 text-ink/55' : `bg-accent text-on-accent ${busy ? 'cursor-wait' : 'cursor-pointer hover:bg-accent-hover active:translate-y-px'}`
           : `border border-ink/25 ${off ? 'cursor-wait text-ink/55' : 'cursor-pointer hover:border-ink hover:bg-ink/5 active:translate-y-px'}`
@@ -115,37 +125,115 @@ function ActionButton({ onClick, busy, disabled, title, primary, children }: { o
   );
 }
 
+/** Opens and closes by height. */
+function Reveal({ open, children }: { open: boolean; children: ReactNode }) {
+  const ease = useEase();
+  return (
+    <AnimatePresence initial={false}>
+      {open && (
+        <motion.div
+          initial={{ height: 0, opacity: 0 }}
+          animate={{ height: 'auto', opacity: 1 }}
+          exit={{ height: 0, opacity: 0 }}
+          transition={ease}
+          className="overflow-hidden"
+        >
+          {children}
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
+function PlanRow({ subtask: s }: { subtask: PlanView['subtasks'][number] }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full cursor-pointer flex-col justify-between gap-x-4 gap-y-0.5 rounded-2xl px-4 py-3 text-left hover:bg-ink/5 sm:flex-row sm:items-baseline"
+      >
+        <span className="flex min-w-0 items-baseline gap-2">
+          <span className={`text-ink/55 transition-transform duration-200 motion-reduce:transition-none ${open ? 'rotate-90' : ''}`} aria-hidden="true">›</span>
+          <span className="font-medium">{s.title}</span>
+        </span>
+        <span className="shrink-0 pl-3 font-mono text-sm text-ink/65 sm:pl-0">{s.self_do ? 'No hire' : `Cap ${usdc(s.cap_atomic)}`}</span>
+      </button>
+      <Reveal open={open}>
+        <div className="px-4 pt-1 pb-4 pl-8 text-ink/80">
+          <p className="text-sm text-ink/65">Must pass</p>
+          <ul className="mt-1 space-y-0.5">{s.criteria.map((c) => <li key={c.id}>{c.description}</li>)}</ul>
+          {s.candidates.length > 0 && (
+            <>
+              <p className="mt-3 text-sm text-ink/65">Candidates, cheapest first</p>
+              <ul className="mt-1 space-y-0.5 font-mono text-sm">{s.candidates.map((c) => <li key={c.handle}>{c.handle} {usdc(c.price_atomic)}</li>)}</ul>
+            </>
+          )}
+        </div>
+      </Reveal>
+    </>
+  );
+}
+
 function PlanCard({ plan }: { plan: PlanView }) {
   return (
     <ol className="mt-3 rounded-2xl border border-ink/15">
       {plan.subtasks.map((s, i) => (
         <li key={s.id} className="rook-in border-b border-ink/10 last:border-b-0" style={{ animationDelay: `${150 + i * 90}ms` }}>
-          <details className="group">
-            <summary className="flex cursor-pointer list-none items-baseline justify-between gap-4 rounded-2xl px-4 py-3 hover:bg-ink/5 [&::-webkit-details-marker]:hidden">
-              <span className="flex min-w-0 items-baseline gap-2">
-                <span className="text-ink/55 transition-transform duration-200 group-open:rotate-90 motion-reduce:transition-none" aria-hidden="true">›</span>
-                <span className="font-medium">{s.title}</span>
-              </span>
-              <span className="shrink-0 font-mono text-sm text-ink/65">{s.self_do ? 'No hire' : `Cap ${usdc(s.cap_atomic)}`}</span>
-            </summary>
-            <div className="px-4 pt-1 pb-4 pl-8 text-ink/80">
-              <p className="text-sm text-ink/65">Must pass</p>
-              <ul className="mt-1 space-y-0.5">{s.criteria.map((c) => <li key={c.id}>{c.description}</li>)}</ul>
-              {s.candidates.length > 0 && (
-                <>
-                  <p className="mt-3 text-sm text-ink/65">Candidates, cheapest first</p>
-                  <ul className="mt-1 space-y-0.5 font-mono text-sm">{s.candidates.map((c) => <li key={c.handle}>{c.handle} {usdc(c.price_atomic)}</li>)}</ul>
-                </>
-              )}
-            </div>
-          </details>
+          <PlanRow subtask={s} />
         </li>
       ))}
     </ol>
   );
 }
 
-type FeedLine = { key: number; text: string; tone: 'normal' | 'muted' | 'alert'; paid?: number; fromReserve?: number; started?: string; ended?: string };
+/**
+ * Rook choosing agents. The planner reports nothing until the plan is done, so this searches with empty cards until then,
+ * and every card that lands is a real candidate from that plan. Handles and titles are plain text, with no links or images.
+ */
+function AgentSearch({ plan, animate, onGrow, onDone }: { plan: PlanView | null; animate: boolean; onGrow?: () => void; onDone?: () => void }) {
+  const sources: WebSource[] = (plan?.subtasks ?? []).flatMap((s) => s.candidates.map((c) => ({ id: `${s.id}/${c.handle}`, title: s.title, url: c.handle })));
+  const total = sources.length;
+  const [landed, setLanded] = useState(0);
+  const count = animate ? landed : total;
+  const searching = !plan || count < total;
+
+  useEffect(() => {
+    if (!plan || !animate || landed >= total) return;
+    if (reducedMotion()) { setLanded(total); return; }
+    const t = setTimeout(() => setLanded((n) => n + 1), Math.min(AGENT_MS, AGENTS_MAX_MS / total));
+    return () => clearTimeout(t);
+  }, [plan, animate, landed, total]);
+
+  useEffect(() => {
+    onGrow?.();
+    const t = setTimeout(() => onGrow?.(), CARDS_OPEN_MS);
+    return () => clearTimeout(t);
+  }, [count, onGrow]);
+
+  const finished = !!plan && count >= total;
+  useEffect(() => { if (finished) onDone?.(); }, [finished, onDone]);
+
+  // On a phone the cards fold away once they've landed, so the plan they led to starts at the top of the screen.
+  const [open, setOpen] = useState(animate || !plan);
+  useEffect(() => { if (finished && window.matchMedia('(max-width: 639px)').matches) setOpen(false); }, [finished]);
+
+  return (
+    <WebSearch
+      status={searching ? 'searching' : 'done'}
+      label={searching ? 'Looking for agents' : `Found ${total} agent${total === 1 ? '' : 's'}`}
+      sources={sources.slice(0, count)}
+      linked={false}
+      open={open}
+      onOpenChange={setOpen}
+    />
+  );
+}
+
+type Now = { state: string; label: string; detail?: string };
+type FeedLine = { key: number; text: string; tone: 'normal' | 'muted' | 'alert'; now: Now; paid?: number; fromReserve?: number; started?: string; ended?: string };
 
 /** Turns the run's events into plain lines. Agent text is never shown as instructions: only handles and Rook's verdicts. */
 function feedFrom(events: RookEvent[]): FeedLine[] {
@@ -153,26 +241,31 @@ function feedFrom(events: RookEvent[]): FeedLine[] {
   let receipt = 0;
   for (const { seq: key, type, data } of events) {
     const agent = data?.agent_handle;
-    if (type === 'hire_sent') lines.push({ key, text: `Hired ${agent}, quoted ${usdc(data.amount_atomic)} USDC.`, tone: 'normal', started: agent });
-    else if (type === 'a2a_state' && ['FAILED', 'REJECTED'].includes(data.state)) lines.push({ key, text: `${agent} didn't deliver. No charge.`, tone: 'normal', ended: agent });
-    else if (type === 'a2a_state' && data.state === 'TIMEOUT') lines.push({ key, text: `${agent} timed out. No charge.`, tone: 'normal', ended: agent });
+    if (type === 'hire_sent') lines.push({ key, text: `Hired ${agent}, quoted ${usdc(data.amount_atomic)} USDC.`, tone: 'normal', started: agent, now: { state: 'researching', label: 'Hired', detail: agent } });
+    else if (type === 'a2a_state' && ['FAILED', 'REJECTED'].includes(data.state)) lines.push({ key, text: `${agent} didn't deliver. No charge.`, tone: 'normal', ended: agent, now: { state: 'analyzing', label: 'No delivery', detail: agent } });
+    else if (type === 'a2a_state' && data.state === 'TIMEOUT') lines.push({ key, text: `${agent} timed out. No charge.`, tone: 'normal', ended: agent, now: { state: 'analyzing', label: 'Timed out', detail: agent } });
     else if (type === 'evaluation') {
-      if (data.verdict === 'pass') lines.push({ key, text: `${agent} passed every check.`, tone: 'normal', ended: agent });
-      else if (data.failed_criteria?.includes('injection')) lines.push({ key, text: `${agent}'s delivery tried to give Rook instructions. Flagged and rejected.`, tone: 'alert', ended: agent });
-      else lines.push({ key, text: `${agent} failed a check.`, tone: 'alert', ended: agent });
-    } else if (type === 'security_alert' && data.source === 'quote') lines.push({ key, text: `Security alert: ${data.flag}`, tone: 'alert' });
-    else if (type === 'quote_rejected') lines.push({ key, text: `Skipped ${agent}: ${data.reason}`, tone: 'muted' });
-    else if (type === 'ledger' && data.op === 'topUp') lines.push({ key, text: `Topped up ${usdc(data.amount_atomic)} USDC from the reserve.`, tone: 'muted', fromReserve: Number(data.amount_atomic) });
-    else if (type === 'receipt') lines.push({ key, text: `Receipt ${++receipt}: paid ${usdc(data.amount_atomic)} USDC to ${agent}.`, tone: 'muted', paid: Number(data.amount_atomic) });
-    else if (type === 'error') lines.push({ key, text: `Problem: ${data.message}`, tone: 'alert' });
+      if (data.verdict === 'pass') lines.push({ key, text: `${agent} passed every check.`, tone: 'normal', ended: agent, now: { state: 'analyzing', label: 'Passed', detail: agent } });
+      else if (data.failed_criteria?.includes('injection')) lines.push({ key, text: `${agent}'s delivery tried to give Rook instructions. Flagged and rejected.`, tone: 'alert', ended: agent, now: { state: 'analyzing', label: 'Flagged', detail: agent } });
+      else lines.push({ key, text: `${agent} failed a check.`, tone: 'alert', ended: agent, now: { state: 'analyzing', label: 'Failed a check', detail: agent } });
+    } else if (type === 'security_alert' && data.source === 'quote') lines.push({ key, text: `Security alert: ${data.flag}`, tone: 'alert', now: { state: 'analyzing', label: 'Security alert' } });
+    else if (type === 'quote_rejected') lines.push({ key, text: `Skipped ${agent}: ${data.reason}`, tone: 'muted', now: { state: 'researching', label: 'Skipped', detail: agent } });
+    else if (type === 'ledger' && data.op === 'topUp') lines.push({ key, text: `Topped up ${usdc(data.amount_atomic)} USDC from the reserve.`, tone: 'muted', fromReserve: Number(data.amount_atomic), now: { state: 'analyzing', label: 'Topped up', detail: `${usdc(data.amount_atomic)} USDC` } });
+    else if (type === 'receipt') lines.push({ key, text: `Receipt ${++receipt}: paid ${usdc(data.amount_atomic)} USDC to ${agent}.`, tone: 'muted', paid: Number(data.amount_atomic), now: { state: 'analyzing', label: 'Paid', detail: agent } });
+    else if (type === 'error') lines.push({ key, text: `Problem: ${data.message}`, tone: 'alert', now: { state: 'analyzing', label: 'Problem' } });
   }
   return lines;
 }
 
-const TONE = { normal: '', muted: 'text-ink/65 text-sm', alert: 'text-red-700' };
+const TONE = { normal: '', muted: 'text-ink/65 text-sm', alert: 'text-alert' };
+
+const STOPPED = (
+  <svg viewBox="0 0 24 24" width={18} height={18} className="text-ink/65" aria-hidden="true"><rect x="7" y="7" width="10" height="10" rx="1.5" fill="currentColor" /></svg>
+);
+const RUN_STATES = { stopped: { label: 'Stopped', active: false, icon: STOPPED } };
 
 /** Collapsed to one line that says what is happening now; the full list is one click away. */
-function Activity({ lines, live, caughtUp, closing }: { lines: FeedLine[]; live: boolean; caughtUp: boolean; closing: boolean }) {
+function Activity({ lines, live, caughtUp, closing, outcome, timed }: { lines: FeedLine[]; live: boolean; caughtUp: boolean; closing: boolean; outcome: string; timed: boolean }) {
   const [open, setOpen] = useState(false);
   const latest = lines[lines.length - 1];
   const working = new Set<string>();
@@ -182,16 +275,13 @@ function Activity({ lines, live, caughtUp, closing }: { lines: FeedLine[]; live:
   }
   const rejected = lines.filter((l) => l.tone === 'alert').length;
 
-  let label: string;
-  let keyed: string | number = 'summary';
-  let tone = '';
-  if (!live) label = `${lines.length} step${lines.length === 1 ? '' : 's'}${rejected ? `, ${rejected} flagged` : ''}`;
-  else if (!latest) label = 'Starting the run';
-  else if (!caughtUp) { label = latest.text; keyed = latest.key; tone = latest.tone === 'alert' ? 'text-red-700' : ''; }
-  else if (closing) label = 'Combining the report';
-  else if (working.size) label = `Waiting on ${[...working].join(', ')}`;
-  else label = 'Lining up the next hire';
-  if (live && caughtUp) keyed = label;
+  let now: Now;
+  if (!live) now = { state: outcome === 'killed' ? 'stopped' : outcome === 'failed' ? 'error' : 'done', label: '', detail: `${lines.length} step${lines.length === 1 ? '' : 's'}${rejected ? `, ${rejected} flagged` : ''}` };
+  else if (!latest) now = { state: 'thinking', label: 'Starting the run' };
+  else if (!caughtUp) now = latest.now;
+  else if (closing) now = { state: 'writing', label: 'Combining the report' };
+  else if (working.size) now = { state: 'analyzing', label: 'Waiting on', detail: [...working].join(', ') };
+  else now = { state: 'researching', label: 'Lining up the next hire' };
 
   return (
     <div className="mt-2">
@@ -199,22 +289,17 @@ function Activity({ lines, live, caughtUp, closing }: { lines: FeedLine[]; live:
         type="button"
         aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
-        className="group -mx-2 flex max-w-full cursor-pointer items-center gap-2.5 rounded-lg px-2 py-1 text-left text-ink/65 transition-colors hover:bg-ink/5 hover:text-ink motion-reduce:transition-none"
+        className="group -mx-2 flex max-w-full cursor-pointer items-center gap-2 rounded-lg px-2 py-0.5 text-left text-ink/65 transition-colors hover:bg-ink/5 hover:text-ink motion-reduce:transition-none"
       >
-        {live && (
-          <span className="rook-blocks flex shrink-0 items-center gap-1" aria-hidden="true">
-            <span className="size-2 bg-accent" /><span className="size-2 bg-accent" /><span className="size-2 bg-accent" />
-          </span>
-        )}
-        <span key={keyed} role="status" className={`rook-in min-w-0 truncate ${tone}`}>{label}</span>
-        {live && rejected > 0 && <span className="shrink-0 text-sm text-red-700">{rejected} flagged</span>}
+        <AiStatus className="min-w-0" state={now.state} states={RUN_STATES} label={now.label || undefined} detail={now.detail} timer={timed} />
+        {live && rejected > 0 && <span className="shrink-0 text-sm text-alert">{rejected} flagged</span>}
         <span className={`shrink-0 transition-transform duration-200 motion-reduce:transition-none ${open ? 'rotate-90' : ''}`} aria-hidden="true">›</span>
       </button>
-      {open && lines.length > 0 && (
+      <Reveal open={open && lines.length > 0}>
         <ul className="mt-2 space-y-1.5 border-l-2 border-ink/10 pl-4">
-          {lines.map((l) => <li key={l.key} className={`rook-in ${TONE[l.tone]}`}>{l.text}</li>)}
+          {lines.map((l) => <li key={l.key} className={TONE[l.tone]}>{l.text}</li>)}
         </ul>
-      )}
+      </Reveal>
     </div>
   );
 }
@@ -247,7 +332,7 @@ function Report({ markdown }: { markdown: string }) {
 
 // ---- one conversation ----
 
-function Thread({ id, loaded, tasks, onGrow }: { id: string; loaded: Loaded; tasks: TaskSummary[] | null; onGrow: () => void }) {
+function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; loaded: Loaded; tasks: TaskSummary[] | null; onGrow: () => void; fresh: boolean; onRevealed: (id: string) => void }) {
   const { snap, events, problem, refetch } = loaded;
   const router = useRouter();
   const wallet = useWallet();
@@ -256,12 +341,17 @@ function Thread({ id, loaded, tasks, onGrow }: { id: string; loaded: Loaded; tas
   const [needsFunding, setNeedsFunding] = useState(false);
   const status = snap?.task.status;
   const known = tasks?.find((t) => t.id === id)?.status;
+  const [revealing, setRevealing] = useState(fresh); // a plan just drafted here: agents land first, then the plan
+  const onAgentsDone = useCallback(() => { setRevealing(false); onRevealed(id); }, [id, onRevealed]);
 
   // Run updates roll in one at a time. A task that had already ended when opened is history, so it shows at once.
   const feed = feedFrom(events);
   const [shown, setShown] = useState(0);
   const instant = useRef<boolean | null>(null);
   if (status && instant.current === null) instant.current = TERMINAL.has(status);
+  // The run's clock starts when this page sees it start. Joining mid-run, it would show a time that's too short.
+  const timed = useRef<boolean | null>(null);
+  if (status && timed.current === null) timed.current = status === 'draft' || status === 'planned';
   const hasSnap = !!snap;
   useEffect(() => {
     if (!hasSnap || shown >= feed.length) return;
@@ -304,17 +394,21 @@ function Thread({ id, loaded, tasks, onGrow }: { id: string; loaded: Loaded; tas
     <>
       <UserMessage prompt={task.prompt} budget={usdc(task.budget_atomic)} />
 
-      {task.status === 'draft' && <RookMessage><Working label="Drafting your plan" /></RookMessage>}
+      {(task.status === 'draft' || (plan && (revealing || plan.subtasks.some((s) => s.candidates.length > 0)))) && (
+        <RookMessage still={fresh}>
+          <AgentSearch plan={plan} animate={fresh} onGrow={onGrow} onDone={revealing ? onAgentsDone : undefined} />
+        </RookMessage>
+      )}
       {task.status === 'failed' && !plan && <RookMessage><p>Rook couldn&apos;t draft a plan for this task. Try sending it again.</p></RookMessage>}
 
-      {plan && plan.subtasks.length === 0 && (
+      {plan && !revealing && plan.subtasks.length === 0 && (
         <RookMessage>
           <p>I couldn&apos;t find anything to hire for at this budget. Try a larger budget or a different task.</p>
           {plan.dropped.length > 0 && <ul className="mt-2 text-sm text-ink/65">{plan.dropped.map((d) => <li key={d.title}>{d.title}: {d.reason}</li>)}</ul>}
         </RookMessage>
       )}
 
-      {plan && plan.subtasks.length > 0 && (
+      {plan && !revealing && plan.subtasks.length > 0 && (
         <RookMessage>
           <p>Here&apos;s the plan, up to <span className="font-medium">{usdc(max)} USDC</span>. {started ? 'You approved it.' : task.status === 'cancelled' ? 'You cancelled it, so nothing was spent.' : 'Nothing has been spent.'}</p>
           <PlanCard plan={plan} />
@@ -334,22 +428,22 @@ function Thread({ id, loaded, tasks, onGrow }: { id: string; loaded: Loaded; tas
 
       {started && !needsFunding && (
         <RookMessage>
-          <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-2">
-            <p className="tabular-nums">
+          <div className="flex items-start justify-between gap-x-3 gap-y-2 sm:flex-wrap sm:items-center sm:gap-x-6">
+            <p className="min-w-0 tabular-nums max-sm:pt-2.5">
               <span className="font-medium">{live ? 'Running.' : task.status === 'killed' ? 'Stopped.' : task.status === 'failed' ? 'This run hit a problem.' : 'Finished.'}</span>
               {' '}Spent {usdc(spent)} of {usdc(task.budget_atomic)} USDC
               {reserveUsed > 0 && <span className="text-ink/65">, {usdc(reserveUsed)} from the reserve</span>}
             </p>
             {!TERMINAL.has(task.status) && <ActionButton onClick={() => act('stop')} busy={busy === 'stop'}>{busy === 'stop' ? 'Stopping…' : 'Stop'}</ActionButton>}
           </div>
-          <Activity lines={visible} live={live} caughtUp={caughtUp} closing={task.status === 'aggregating' || task.status === 'closing' || task.status === 'closed'} />
+          <Activity lines={visible} live={live} caughtUp={caughtUp} closing={task.status === 'aggregating' || task.status === 'closing' || task.status === 'closed'} outcome={task.status} timed={!!timed.current} />
         </RookMessage>
       )}
 
       {final_result && settled && (
         <RookMessage>
           <p className="font-medium">Here&apos;s your report.</p>
-          {final_result.abandoned.length > 0 && <p className="mt-1 text-red-700">{final_result.abandoned.length} subtask{final_result.abandoned.length > 1 ? 's' : ''} couldn&apos;t be completed.</p>}
+          {final_result.abandoned.length > 0 && <p className="mt-1 text-alert">{final_result.abandoned.length} subtask{final_result.abandoned.length > 1 ? 's' : ''} couldn&apos;t be completed.</p>}
           <Report markdown={final_result.final_markdown} />
 
           <div className="rook-in mt-6 rounded-2xl border border-ink/15 p-4" style={{ animationDelay: '500ms' }}>
@@ -360,7 +454,7 @@ function Thread({ id, loaded, tasks, onGrow }: { id: string; loaded: Loaded; tas
                   <span className="font-mono text-ink/55">{n + 1}</span>
                   <span className="truncate font-mono">{r.agent_handle}</span>
                   <span className="font-mono tabular-nums">{usdc(r.amount_atomic)}</span>
-                  <span className={r.verdict === 'fail' ? 'text-red-700' : r.verdict === 'pass' ? '' : 'text-ink/65'}>{r.verdict === 'fail' ? 'Fail' : r.verdict === 'pass' ? 'Pass' : 'N/A'}</span>
+                  <span className={r.verdict === 'fail' ? 'text-alert' : r.verdict === 'pass' ? '' : 'text-ink/65'}>{r.verdict === 'fail' ? 'Fail' : r.verdict === 'pass' ? 'Pass' : 'N/A'}</span>
                 </li>
               ))}
             </ol>
@@ -368,7 +462,7 @@ function Thread({ id, loaded, tasks, onGrow }: { id: string; loaded: Loaded; tas
         </RookMessage>
       )}
 
-      {actError && <p role="alert" className="rounded-2xl border border-red-700/40 bg-red-50 p-4 text-red-800">{actError}</p>}
+      {actError && <p role="alert" className="rounded-2xl border border-alert/40 bg-alert/10 p-4 text-alert">{actError}</p>}
     </>
   );
 }
@@ -385,9 +479,12 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
   const [sending, setSending] = useState<{ prompt: string; budget: string; id?: string } | null>(null);
   const [errors, setErrors] = useState<ComposerErrors | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
+  const ease = useEase();
+  const justDrafted = useRef(new Set<string>());
+  const onRevealed = useCallback((task: string) => { justDrafted.current.delete(task); }, []);
 
-  const status = loaded.snap?.task.status;
   const home = !id && !sending;
+  const lenis = useSmoothScroll(scroller, !home);
 
   async function send(prompt: string, budget: string) {
     setErrors(null);
@@ -398,6 +495,7 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
     ]);
     if (out.kind === 'planned') {
       // Keep showing this message until the task has loaded, so the thread takes over with no gap.
+      justDrafted.current.add(out.id);
       setSending((s) => s && { ...s, id: out.id });
       go(`/app/${out.id}`);
       return true;
@@ -411,42 +509,69 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
     if (sending?.id && sending.id === id && (loaded.snap?.task.id === id || loaded.problem)) setSending(null);
   }, [sending, id, loaded.snap, loaded.problem]);
 
-  // Follow the conversation as it grows, unless the reader has scrolled up.
+  // Follow the conversation as it grows, until the reader scrolls up. Only their input can stop it: a smooth scroll on
+  // its way down is also far from the bottom for a moment, and must not count. Moving down to the bottom resumes following;
+  // moving up must not, since the first frames of scrolling up are still close to the bottom. Neither must the last frame
+  // of a follow already under way, which can arrive just after the reader's input: that is what the hold is for.
   const pinned = useRef(true);
+  const lastTop = useRef(0);
+  const lastTouchY = useRef(0);
+  const holdUntil = useRef(0);
+  const letGo = (at: number) => { pinned.current = false; holdUntil.current = at + FOLLOW_HOLD_MS; };
   useEffect(() => { pinned.current = true; }, [id]);
+  const nearBottom = (el: HTMLElement) => el.scrollHeight - el.scrollTop - el.clientHeight < 80;
   const follow = useCallback(() => {
     const el = scroller.current;
-    if (el && pinned.current) el.scrollTo({ top: el.scrollHeight, behavior: reducedMotion() ? 'auto' : 'smooth' });
-  }, []);
+    if (!el || !pinned.current) return;
+    if (!lenis.current) { el.scrollTop = el.scrollHeight; return; }
+    lenis.current.resize();
+    lenis.current.scrollTo(el.scrollHeight - el.clientHeight, { duration: 0.7 });
+  }, [lenis]);
   useEffect(follow, [sending, id, follow]);
 
   return (
-    <div className={`flex h-full flex-col ${home ? 'justify-center' : ''}`}>
+    <div className={`flex h-full flex-col ${home ? 'sm:justify-center' : ''}`}>
       {home ? (
-        <h1 className="mx-auto w-full max-w-208 px-5 text-center text-[clamp(2.25rem,4.5vw,4rem)] leading-[1.05] font-normal tracking-[-0.035em] md:px-8">
-          What do you want done?
-        </h1>
+        <div className="mx-auto flex w-full max-w-208 flex-col items-center justify-center px-5 max-sm:flex-1 md:px-8">
+          <span className="mb-4 sm:hidden [&>svg]:size-9" aria-hidden="true"><Mark /></span>
+          <h1 className="text-center text-[1.75rem] leading-[1.05] font-normal tracking-[-0.035em] sm:text-[clamp(2.25rem,4.5vw,4rem)]">
+            What do you want done?
+          </h1>
+        </div>
       ) : (
         <div
           ref={scroller}
-          onScroll={(e) => { const el = e.currentTarget; pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80; }}
-          className="min-h-0 flex-1 overflow-y-auto"
+          onScroll={(e) => {
+            const el = e.currentTarget;
+            if (e.timeStamp > holdUntil.current && el.scrollTop > lastTop.current && nearBottom(el)) pinned.current = true;
+            lastTop.current = el.scrollTop;
+          }}
+          onWheel={(e) => { if (e.deltaY < 0) letGo(e.timeStamp); }}
+          onTouchStart={(e) => { lastTouchY.current = e.touches[0].clientY; }}
+          onTouchMove={(e) => {
+            const y = e.touches[0].clientY;
+            if (y > lastTouchY.current) letGo(e.timeStamp); // a finger moving down scrolls up
+            lastTouchY.current = y;
+          }}
+          onKeyDown={(e) => { if (['ArrowUp', 'PageUp', 'Home'].includes(e.key)) letGo(e.timeStamp); }}
+          className="min-h-0 flex-1 overflow-y-auto max-sm:mask-[linear-gradient(to_bottom,transparent,#000_12px,#000_calc(100%-12px),transparent)]"
         >
-          <div className="mx-auto w-full max-w-208 space-y-6 px-5 pt-4 pb-8 md:px-8">
+          <div className="mx-auto w-full max-w-208 space-y-6 px-4 pt-3 pb-6 sm:px-5 sm:pt-4 sm:pb-8 md:px-8">
             <h1 className="sr-only">{sending?.prompt ?? loaded.snap?.task.prompt ?? 'Task'}</h1>
             {sending ? (
               <>
                 <UserMessage animate prompt={sending.prompt} budget={Number(sending.budget).toFixed(2)} />
-                <RookMessage><Working label="Drafting your plan" /></RookMessage>
+                <RookMessage><AgentSearch plan={null} animate={false} onGrow={follow} /></RookMessage>
               </>
-            ) : id && <Thread key={id} id={id} loaded={loaded} tasks={tasks} onGrow={follow} />}
+            ) : id && <Thread key={id} id={id} loaded={loaded} tasks={tasks} onGrow={follow} fresh={justDrafted.current.has(id)} onRevealed={onRevealed} />}
           </div>
         </div>
       )}
 
-      <div className={`mx-auto w-full max-w-208 px-5 md:px-8 ${home ? 'mt-8 pb-16' : 'pb-5'}`}>
+      {/* Glides between the centre of the home screen and the bottom of a conversation. */}
+      <motion.div layout="position" transition={ease} className={`mx-auto w-full max-w-208 md:px-8 px-2.5 pb-2.5 sm:px-5 ${home ? 'sm:mt-8 sm:pb-16' : 'sm:pb-5'}`}>
         <Composer onSend={send} errors={errors} sending={!!sending} compact={!home} />
-      </div>
+      </motion.div>
     </div>
   );
 }
