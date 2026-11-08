@@ -3,7 +3,8 @@
 !.env.example
 node_modules/
 dist/
-data/
+/data/
+/services/data/
 *.log
 .next/
 next-env.d.ts
