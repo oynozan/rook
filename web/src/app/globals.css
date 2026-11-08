@@ -34,6 +34,11 @@
   --color-accent-ink: var(--accent-ink);
   --color-alert: var(--alert);
   --color-on-accent: #ffffff;
+  /* Cobalt on dark grounds (landing hero, demo panel, footer; same as the app's dark accent). */
+  --color-cobalt: #2f6fe0;
+  --color-cobalt-hover: #2560c8;
+  --color-cobalt-soft: #7aa2ff; /* lines and markers */
+  --color-cobalt-pale: #a9c3ff; /* small labels */
   --font-sans: var(--font-text), system-ui, sans-serif;
 }
 
@@ -51,6 +56,14 @@
 /* The app's background: a little cobalt rising from the bottom. */
 .rook-glow {
   background-image: radial-gradient(130% 55% at 50% 100%, color-mix(in oklab, var(--accent) var(--glow), transparent), transparent);
+}
+
+/* The logo's three crown blocks lift off the base, one after another. */
+@media (hover: hover) and (prefers-reduced-motion: no-preference) {
+  .mark-lift .crown { transition: translate 0.35s cubic-bezier(0.16, 1, 0.3, 1); }
+  .mark-lift:hover .crown, .mark-lift:focus-visible .crown { translate: 0 -8px; }
+  .mark-lift .crown:nth-child(2) { transition-delay: 40ms; }
+  .mark-lift .crown:nth-child(3) { transition-delay: 80ms; }
 }
 
 /* The dot texture: columns behind the hero and the field inside the run panel. Set the color with text-*. */

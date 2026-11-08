@@ -223,7 +223,7 @@ function AgentSearch({ plan, animate, onGrow, onDone }: { plan: PlanView | null;
   return (
     <WebSearch
       status={searching ? 'searching' : 'done'}
-      label={searching ? 'Looking for agents' : `Found ${total} agent${total === 1 ? '' : 's'}`}
+      label={searching ? 'Searching the NEAR AI market' : `Found ${total} agent${total === 1 ? '' : 's'}`}
       sources={sources.slice(0, count)}
       linked={false}
       open={open}

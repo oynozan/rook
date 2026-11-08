@@ -91,7 +91,7 @@ export function Composer({ onSend, errors, sending, compact }: {
               }`}
           >
             <svg className="size-5 shrink-0 transition-transform duration-250 group-enabled:group-hover:translate-x-0.75 group-focus-visible:translate-x-0.75 motion-reduce:translate-x-0! motion-reduce:transition-none" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true">
-              <path d="M2 8h11M9 3.5 13.5 8 9 12.5" />
+                <path d="M2 8h11M9 3.5 13.5 8 9 12.5" />
             </svg>
         </button>
       </form>
