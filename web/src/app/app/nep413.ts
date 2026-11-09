@@ -61,8 +61,6 @@ export function signatureValid(input: { publicKey: string; signature: string; me
   }
 }
 
-export const DEFAULT_RPC = { mainnet: 'https://rpc.mainnet.fastnear.com', testnet: 'https://rpc.testnet.fastnear.com' } as const;
-
 /**
  * Asks NEAR whether `publicKey` is a full-access key of `accountId`. A valid signature alone only proves someone holds
  * some key; this is what proves it is this account's key. Function-call keys can't sign in (NEP-413 requires full access).
