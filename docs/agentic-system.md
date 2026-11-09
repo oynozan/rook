@@ -375,7 +375,7 @@ These are the "do X, see Y" checks for real-time testing. Commands assume `pnpm 
 ### D. Kill and limits
 
 - `pnpm rook kill <task_id>` during a run: task `killed`, no further `hire_sent` events, in-flight authorizations released.
-- Unit tests cover: ledger refusals (over cap, second authorization, wrong `payTo`, after kill), the invariant, planner budget fitting and cross-check reference rules, extraction quote verification, the injection scanner, ranking by expected cost (market record and Rook's own verdicts), caps that never fall below the first-ranked price, and hiring in the plan's order.
+- Unit tests cover: ledger refusals (over cap, second authorization, wrong `payTo`, after kill), the invariant, planner budget fitting and cross-check reference rules, extraction quote verification, the injection scanner, ranking by expected cost (market record and Rook's own verdicts), caps that never fall below the first hire's price, agents ranked above the first hire kept as fallbacks when the reserve can pay them, and hiring in the plan's order.
 
 ### E. Attack demo (`rook attack`)
 
