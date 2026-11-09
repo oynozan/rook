@@ -47,8 +47,11 @@ export type Task = {
   unwinding?: Promise<void>; // returning what is still on chain after a kill, a failure or a failed close
   salvaging?: boolean; // events still record after the terminal status while money moves back
   shutdown: AbortController; // aborted when the orchestrator stops: the unwind stops retrying, and the next start resumes it
+  // Chain mode, after a restart: rebuilding its books from contract task `chain.contract_task_id` failed and is being
+  // tried again, so it is not bound yet, though that contract task still holds its money.
+  restoring?: boolean;
 };
-type Runtime = 'listeners' | 'abort' | 'inflight' | 'allow' | 'running' | 'unwinding' | 'salvaging' | 'shutdown';
+type Runtime = 'listeners' | 'abort' | 'inflight' | 'allow' | 'running' | 'unwinding' | 'salvaging' | 'shutdown' | 'restoring';
 /** A task without its runtime parts: what SQLite stores. Tasks stored before conversations have no parent_id. */
 export type TaskDoc = Omit<Task, Runtime | 'parent_id'> & { parent_id?: string | null };
 
@@ -65,7 +68,7 @@ export const saveTask = (t: Task) => persist?.(t);
 
 /** The task without its runtime parts, ready to store. */
 export function toDoc(t: Task): TaskDoc {
-  const { listeners: _l, abort: _a, inflight: _i, allow: _w, running: _r, unwinding: _u, salvaging: _s, shutdown: _d, ...doc } = t;
+  const { listeners: _l, abort: _a, inflight: _i, allow: _w, running: _r, unwinding: _u, salvaging: _s, shutdown: _d, restoring: _o, ...doc } = t;
   return doc;
 }
 

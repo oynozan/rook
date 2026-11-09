@@ -480,19 +480,27 @@ test('a task restarted while closing with its report, whose contract task the fu
   } finally { await orch.close(); }
 });
 
-test('a task stopped while its restore is being tried again: once the books are rebuilt, what it holds comes back', async () => {
+test('a task stopped while its restore is being tried again: the signer hears it, the page follows, and once the books are rebuilt what it holds comes back', async () => {
   process.env.ROOK_DB = join(dir, 'restore-kill.sqlite');
   openContractTask('rk', ['300000']);
   contract.get('rk')!.subs.push(fundedSub('rk', 1, '300000'));
   bal.set(acct('rk', 1), 100_000n); // 200 000 was paid before the restart
   storeTask('t_again_kill', 'running', 'rk', { cap_atomic: '300000' }, {}, '100000', { contract_id: 'rook.test', network: 'testnet' });
-  failing.set('task', 3); // the try at start fails
+  failing.set('task', 6); // the try at start fails, and so does the first try after the API listens
   const orch = await start(0);
   try {
-    assert.equal((await call(`${orch.url}/tasks/t_again_kill/kill`, {})).status, 'killed');
+    const killed = await call(`${orch.url}/tasks/t_again_kill/kill`, {});
+    assert.equal(killed.status, 'killed');
+    assert.match(killed.human_action, /kill_task json-args '\{"task_id":"rk"\}'/); // its contract task, though not bound yet
+    const live = events(orch, 't_again_kill'); // opened before the books are back: it stays open until the money is
     const s = await until(async () => { const x = await snap(orch, 't_again_kill'); return x.ledger?.closed ? x : false; });
     assert.deepEqual([s.task.status, s.ledger.killed, s.ledger.spent_atomic, s.ledger.refunded_atomic], ['killed', true, '200000', '800000']);
     assert.ok(calls.includes(`return ${acct('rk', 1)} 100000`) && calls.includes('close rk'));
+    assert.ok(calls.includes('signer-kill rk')); // sent once the books were rebuilt
+    const evs = await live;
+    assert.deepEqual(evs.find((e) => e.type === 'ledger' && e.data.op === 'kill').data, { op: 'kill', returning: true });
+    assert.ok(evs.some((e) => e.type === 'ledger' && e.data.op === 'restored' && e.data.contract_task_id === 'rk'));
+    assert.equal(evs.at(-1).data.op, 'closeTask');
   } finally { await orch.close(); failing.clear(); }
 });
 

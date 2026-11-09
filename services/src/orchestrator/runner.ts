@@ -310,7 +310,7 @@ export async function unwind(ledger: Ledger, t: Task, why: string, afterRun = fa
  */
 export function kill(ledger: Ledger, t: Task) {
   ledger.kill(t.id);
-  const chain = onChain(ledger) && ledger.contractTaskOf(t.id) !== null;
+  const chain = onChain(ledger) && contractTaskOf(ledger, t) !== null;
   // `returning`: money is on chain for this task, and the unwind sends it back to the funder.
   emit(t, 'ledger', { op: 'kill', ...(chain ? { returning: true } : {}) });
   t.abort.abort();
@@ -333,6 +333,14 @@ export function kill(ledger: Ledger, t: Task) {
   void unwind(ledger, t, 'after kill', true).catch((e) => console.error('[orchestrator] unwind after kill', e));
 }
 
+/**
+ * The contract task that holds `t`'s money: the one it is bound to, or, while a restart's rebuild of its books is
+ * being tried again (t.restoring), the one it was bound to before the restart. Null: none.
+ */
+export function contractTaskOf(ledger: ChainLedger, t: Task): string | null {
+  return ledger.contractTaskOf(t.id) ?? (t.restoring && t.chain ? t.chain.contract_task_id : null);
+}
+
 type Step2 = (() => Promise<void>) | null;
 
 /**
@@ -340,21 +348,25 @@ type Step2 = (() => Promise<void>) | null;
  * which finishes it: resume the run, or unwind what a killed or failed task still holds. Null: nothing left to do, or
  * the task is another contract's. A rebuild that fails (the chain gateway or NEAR not answering, a transfer still in
  * flight) is tried again in step 2, once the API listens, waiting longer each time as the unwind does, until it works;
- * only a shutdown stops it, and the next start tries again. Each problem is reported once.
+ * only a shutdown stops it, and the next start tries again. Each problem is reported once. Meanwhile the task is
+ * `restoring`: a Stop says its money comes back, and its event stream stays open until it has.
  */
 export async function restoreTask(ledger: ChainLedger, t: Task): Promise<Step2> {
   const said = { last: '' };
   const first = await rebuild(ledger, t, said);
   if (first !== 'again') return first;
+  t.restoring = true;
   return async () => {
     const stop = t.shutdown.signal;
-    for (let round = 1; ; round++) {
-      await sleep(backoff(round), undefined, { signal: stop }).catch(() => {});
-      if (stop.aborted) return;
-      const next = await rebuild(ledger, t, said);
-      if (stop.aborted) return; // rebuilt as the services stop: the next start resumes it
-      if (next !== 'again') return next?.();
-    }
+    try {
+      for (let round = 1; ; round++) {
+        await sleep(backoff(round), undefined, { signal: stop }).catch(() => {});
+        if (stop.aborted) return;
+        const next = await rebuild(ledger, t, said);
+        if (stop.aborted) return; // rebuilt as the services stop: the next start resumes it
+        if (next !== 'again') return next?.();
+      }
+    } finally { t.restoring = false; }
   };
 }
 
@@ -366,16 +378,24 @@ async function rebuild(ledger: ChainLedger, t: Task, said: { last: string }): Pr
     r = await ledger.restore(t.id, t.chain!, { funder: t.funder ?? '', budget: BigInt(t.budget_atomic), reserve_share: t.reserve_share, saved: t.ledger_saved });
   } catch (e) {
     const other = e instanceof OtherContract;
+    if (other) t.restoring = false; // never bound here, so nothing of it moves: before the event, which ends its stream
     const next = other ? 'It is left as it is, for a Rook that runs that contract.' : 'Rook tries again, waiting longer each time.';
     const message = `after a restart Rook could not rebuild contract task ${cid}: ${msg(e)}. ${next}`;
     if (message !== said.last) emit(t, 'error', { kind: 'restore', message }, undefined, true);
     said.last = message;
     return other ? null : 'again';
   }
+  // Rebuilt and bound: from here its books say whether money moves. A rebuild tried again ran while the API listened,
+  // so a page may be following the task (stopped meanwhile, say): it hears the books are back.
+  const followed = t.restoring === true;
+  t.restoring = false;
   for (const note of r.notes) emit(t, 'error', { kind: 'restore_note', message: `restore: ${note}` }, undefined, true);
-  // Closed on chain with Rook's books still open: the funder or the owner closed a killed task while sub-accounts
-  // were still Funded. Returns still reach a Closed task and Rook's close_task refunds them, so it is unwound like any other.
-  if (isTerminal(t.status)) return r.status === 'Closed' && ledger.view(t.id)?.closed ? null : () => unwind(ledger, t, 'after restart');
+  if (isTerminal(t.status)) {
+    if (followed) emit(t, 'ledger', { op: 'restored', contract_task_id: cid, contract_status: r.status }, undefined, true);
+    // Closed on chain with Rook's books still open: the funder or the owner closed a killed task while sub-accounts
+    // were still Funded. Returns still reach a Closed task and Rook's close_task refunds them, so it is unwound like any other.
+    return r.status === 'Closed' && ledger.view(t.id)?.closed ? null : () => unwind(ledger, t, 'after restart');
+  }
   emit(t, 'ledger', { op: 'restored', contract_task_id: cid, contract_status: r.status });
   if (r.deleted) {
     // The funder took the whole budget back before Rook funded any subtask: there is nothing to run or to return.

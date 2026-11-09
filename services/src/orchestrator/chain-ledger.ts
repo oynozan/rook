@@ -60,8 +60,8 @@ export type ChainLedger = Ledger & {
    * `index`: how many of the sub-account's payments to pay_to came before this one.
    */
   paymentTx(task_id: string, n: number, p: { amount_atomic: string; pay_to: string; after: string; index?: number }): Promise<{ payment_tx: string; payment_explorer_url: string } | null>;
-  /** The near-cli call that stops the task on the contract; its funder (or the contract owner) signs it. */
-  killCommand(task_id: string, funder: string | null): string | null;
+  /** The near-cli call that stops contract task `contract_task_id`; its funder (or the contract owner) signs it. */
+  killCommand(contract_task_id: string, funder: string | null): string;
   recordReceipt(task_id: string, n: number, receipt: Receipt): Promise<ReceiptEvidence & { receipt_explorer_url: string | null }>;
 };
 
@@ -266,11 +266,8 @@ export function createChainLedger(): ChainLedger {
       if (cid !== undefined) signer('/kill', { task_id: cid }).catch((e) => console.error('[orchestrator] signer /kill failed:', e?.message ?? e));
     },
 
-    killCommand(task_id, funder) {
-      const cid = bound.get(task_id)?.cid;
-      return cid === undefined ? null
-        : `near contract call-function as-transaction ${config.contractId || '<contract>'} kill_task json-args '{"task_id":"${cid}"}' prepaid-gas '30 Tgas' attached-deposit '0 NEAR' sign-as ${funder || '<funder>'} network-config ${config.nearNetwork} sign-with-keychain send`;
-    },
+    killCommand: (cid, funder) =>
+      `near contract call-function as-transaction ${config.contractId || '<contract>'} kill_task json-args '{"task_id":"${cid}"}' prepaid-gas '30 Tgas' attached-deposit '0 NEAR' sign-as ${funder || '<funder>'} network-config ${config.nearNetwork} sign-with-keychain send`,
 
     holds: (task_id) => m.holds(task_id),
 
@@ -381,7 +378,10 @@ export function createChainLedger(): ChainLedger {
       // A return that reached the task after its close sits in it until another close_task: Rook's books stay open for it.
       if (ct.status === 'Closed' && owed(ct) > 0n) notes.push(`closed on chain, but ${owed(ct)} returned after the close is still in the contract task; Rook's close_task refunds it`);
       else if (ct.status === 'Closed') { try { m.closeTask(task_id); } catch (e: any) { notes.push(`closed on chain, not in Rook's books: ${e.message}`); } }
-      if (killed.has(task_id)) m.kill(task_id); // killed while this restore was being tried again
+      if (killed.has(task_id)) { // killed while this restore was being tried again: kill() could not tell the signer then
+        m.kill(task_id);
+        signer('/kill', { task_id: x.cid }).catch((e) => console.error('[orchestrator] signer /kill failed:', e?.message ?? e));
+      }
       bound.set(task_id, x);
       return { status: ct.status, killed: ct.killed === true, notes };
     },

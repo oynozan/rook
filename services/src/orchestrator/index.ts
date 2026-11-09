@@ -8,7 +8,7 @@ import { CONVERSATION_MESSAGES, CONVERSATION_REPORT_CHARS, type AgentHistory, ty
 import { attack } from './attack.ts';
 import { createChainLedger } from './chain-ledger.ts';
 import { createLedger, type Ledger } from './ledger.ts';
-import { kill, restoreTask, runTask, SHUTDOWN } from './runner.ts';
+import { contractTaskOf, kill, restoreTask, runTask, SHUTDOWN } from './runner.ts';
 import { openStore } from './db.ts';
 import {
   ancestors, emit, fromDoc, headOf, isFree, isTerminal, newTask, openPlan, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task,
@@ -168,9 +168,11 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
   }
 
   // A killed or failed task returns its money after the terminal status; its stream stays open until then. In chain
-  // mode only a task bound to a contract task holds money (a plan that hires no agent has books of 0, never on chain).
+  // mode only a task bound to a contract task holds money (a plan that hires no agent has books of 0, never on chain),
+  // and so does one whose rebuild after a restart is being tried again: its books come back, then its money.
   // The unwind retries until the books close, so a stream can stay open for minutes; each problem streams once.
-  const moving = (t: Task) => ledger.view(t.id)?.closed === false && (chain === null || chain.contractTaskOf(t.id) !== null);
+  const moving = (t: Task) => t.restoring === true
+    || (ledger.view(t.id)?.closed === false && (chain === null || chain.contractTaskOf(t.id) !== null));
   /** The contract's settings, read once from the chain-gateway (null until it answers). */
   let chainCfg: ChainCfg | null = null;
   const contractCfg = async (): Promise<ChainCfg | null> => {
@@ -371,7 +373,8 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       if (t.final_result) throw new HttpError(409, 'the report is written; Rook is only returning the unspent USDC now, so there is nothing left to stop');
       kill(ledger, t);
       if (!chain) return taskView(t);
-      const cmd = chain.killCommand(t.id, t.funder);
+      const cid = contractTaskOf(chain, t); // also while a restart's rebuild of its books is being tried again
+      const cmd = cid === null ? null : chain.killCommand(cid, t.funder);
       return { ...taskView(t), human_action: cmd ? `The signer refuses new payments and Rook returns what the sub-accounts hold. To stop the task on the contract too, its funder (or the contract owner) calls kill_task: ${cmd}` : null };
     },
 
