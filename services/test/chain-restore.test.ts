@@ -30,6 +30,7 @@ const sub = (cid: string, n: number) => contract.get(cid)!.subs.find((s) => s.n 
 const fundedSub = (cid: string, n: number, cap: string): CSub => ({ n, account_id: acct(cid, n), cap, topped_up: '0', returned: '0', status: 'Funded', attempt: 0, pending_top_up: '0', account_exists: true });
 let authTtlMs = 60_000;
 let openTasks = 0; // the funder's open tasks on the contract (its limit is 1 below)
+let openTasksGate: Promise<void> = Promise.resolve(); // holds the open-task read, as a slow NEAR RPC does
 const failing = new Map<string, number>(); // gateway route -> how many more calls fail, as a NEAR RPC hiccup does
 const hiccup = (route: string) => {
   const n = failing.get(route) ?? 0;
@@ -91,7 +92,7 @@ before(async () => {
   }, 0));
   servers.push(await serve('mock-chain-gateway', {
     'GET /config': () => ({ network: 'testnet', contract_id: 'rook.test', owner: 'owner.test', usdc: 'usdc.test', max_open_tasks: 1 }),
-    'GET /open-tasks': () => ({ open: openTasks }),
+    'GET /open-tasks': async ({ query }) => { calls.push(`open-tasks ${query.get('account')}`); await openTasksGate; return { open: openTasks }; },
     'GET /task/:id': ({ params }) => {
       hiccup('task');
       const x = contract.get(params.id);
@@ -676,6 +677,24 @@ test('approving again to reprint the funding instructions skips the open-task li
     const next = await call(`${orch.url}/tasks`, { prompt: 'beta', budget_usdc: '1', owner: 'alice.test' });
     await assert.rejects(call(`${orch.url}/tasks/${next.id}/approve`, { owner: 'alice.test' }), /alice\.test already has 1 open tasks/);
   } finally { await orch.close(); openTasks = 0; }
+});
+
+test('a revision whose plan is ready while the funding is being read: approve answers 409, never a transfer for the replaced plan', async () => {
+  process.env.ROOK_DB = join(dir, 'approve-revised.sqlite');
+  const orch = await start(0);
+  let open!: () => void;
+  try {
+    const t = await call(`${orch.url}/tasks`, { prompt: 'alpha', budget_usdc: '1', owner: 'robin.test' });
+    openTasksGate = new Promise((ok) => (open = ok));
+    const approving = call(`${orch.url}/tasks/${t.id}/approve`, { owner: 'robin.test' }).then(() => null, (e) => e);
+    await until(async () => calls.includes('open-tasks robin.test'));
+    const revised = await call(`${orch.url}/tasks`, { prompt: 'beta', budget_usdc: '1', owner: 'robin.test', parent_id: t.id });
+    assert.equal(revised.status, 'planned');
+    open();
+    const refused = await approving;
+    assert.deepEqual([refused?.status, refused?.message], [409, 'task is cancelled, approve needs planned']);
+    assert.deepEqual([(await snap(orch, t.id)).task.status, (await snap(orch, t.id)).task.replaced_by], ['cancelled', revised.id]);
+  } finally { open?.(); openTasksGate = Promise.resolve(); await orch.close(); }
 });
 
 test('a plan with a 0 USDC cap is refused before the wallet opens, and the task stays planned', async () => {

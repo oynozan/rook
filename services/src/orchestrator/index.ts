@@ -302,7 +302,9 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       if (chain && !isFree(t)) {
         // Rook never creates the task on chain: the human funds it with the caps they approve, then calls /funded.
         const funding = await fundingInstructions(t, await contractCfg(), !!reprint);
-        revising(); // sent while the funding was being read
+        // Sent while the funding was being read; or the plan moved on meanwhile (replaced by a revision, or stopped).
+        revising();
+        if (t.status !== (reprint ? 'approved' : 'planned')) throw new HttpError(409, `task is ${t.status}, approve needs planned`);
         setStatus(t, 'approved');
         return { ...taskView(t), funding };
       }
