@@ -3,7 +3,7 @@
 import { Ajv } from 'ajv';
 import { z } from 'zod';
 import { config } from '../shared/config.ts';
-import { AcceptsRow, Criterion, type AgentHistory, type AgentSummary, type Candidate, type Plan, type PlanSubtask, type X402Config } from '../shared/types.ts';
+import { AcceptsRow, Criterion, type AgentHistory, type AgentSummary, type Candidate, type Plan, type PlanSubtask, type SelfDoReason, type X402Config } from '../shared/types.ts';
 import { formatUsdc, share } from '../shared/money.ts';
 
 // Draft as the LLM writes it. Criteria are loose here on purpose: an invalid one is removed with a note
@@ -68,49 +68,60 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
   const allocatable = input.budget_atomic - share(input.budget_atomic, input.reserve_share);
 
   // Steps 4 to 7, in priority order. `draftIdx` keeps the draft position for cross-check rewriting.
-  type Kept = { draftIdx: number; d: DraftSubtask; candidates: Candidate[]; cap: bigint; self_do: boolean };
+  type Kept = { draftIdx: number; d: DraftSubtask; candidates: Candidate[]; cap: bigint; self_do: boolean; self_do_reason?: SelfDoReason };
   const kept: Kept[] = [];
   let allocated = 0n;
+  // First pass: a subtask is hired when one of its agents fits what is left to allocate, at that agent's price. The
+  // first hire must fit the cap, so agents ranked above the first one that fits are dropped. Fallback cover comes in
+  // the second pass, so it never costs a later subtask its agent.
   input.draft.forEach((d, draftIdx) => {
-    const candidates = quotedCandidates(input.selected[draftIdx] ?? [], input.quotes, input.recipients, input.history ?? {}, d.title, notes);
-    if (candidates.length === 0) {
-      if (d.self_do_ok) kept.push({ draftIdx, d, candidates: [], cap: 0n, self_do: true });
-      else dropped.push({ title: d.title, reason: 'no fitting agent' });
+    const quoted = quotedCandidates(input.selected[draftIdx] ?? [], input.quotes, input.recipients, input.history ?? {}, d.title, notes);
+    const left = allocatable - allocated;
+    const fits = quoted.findIndex((c) => price(c) <= left);
+    if (fits >= 0) {
+      for (const c of quoted.slice(0, fits)) notes.push(`"${d.title}": candidate ${c.handle} dropped, price ${c.price_atomic} exceeds the ${left} left to allocate`);
+      const candidates = quoted.slice(fits);
+      allocated += price(candidates[0]);
+      kept.push({ draftIdx, d, candidates, cap: price(candidates[0]), self_do: false });
       return;
     }
-    // Ranked by expected cost, so the first hire is not always the cheapest. Over the first two ranked prices,
-    // cap = min(max(first, second), 2 x first): never below the first hire's price, it also covers the second-ranked
-    // fallback (when the first fails without charge) unless that one costs more than twice the first, so one expensive
-    // candidate cannot inflate what the user locks per subtask; a pricier fallback is paid by a reserve top-up, and one
-    // the reserve cannot cover is dropped below. With candidates cheapest first it is min(second, 2 x first) as before.
-    const first = BigInt(candidates[0].price_atomic);
-    const second = BigInt(candidates[Math.min(1, candidates.length - 1)].price_atomic);
-    const both = second > first ? second : first;
-    const cap = both < first * 2n ? both : first * 2n;
-    if (allocated + cap > allocatable) {
-      if (d.self_do_ok) {
-        notes.push(`"${d.title}" is self_do: cap ${cap} would exceed the allocatable budget`);
-        kept.push({ draftIdx, d, candidates: [], cap: 0n, self_do: true });
-      } else dropped.push({ title: d.title, reason: 'over budget' });
-      return;
-    }
-    allocated += cap;
-    kept.push({ draftIdx, d, candidates, cap, self_do: false });
+    const self_do_reason: SelfDoReason = quoted.length ? 'over_budget' : 'no_agent';
+    if (!d.self_do_ok) { dropped.push({ title: d.title, reason: quoted.length ? 'over budget' : 'no fitting agent' }); return; }
+    if (quoted.length) notes.push(`"${d.title}" is self_do: no candidate's price fits the ${left} left to allocate`);
+    kept.push({ draftIdx, d, candidates: [], cap: 0n, self_do: true, self_do_reason });
   });
+
+  // Second pass, same order: raise each cap toward fallbackCap, as far as the allocatable budget allows.
+  for (const k of kept) {
+    if (k.self_do) continue;
+    const want = fallbackCap(k.candidates), most = k.cap + allocatable - allocated;
+    const cap = want < most ? want : most;
+    if (cap > k.cap) { allocated += cap - k.cap; k.cap = cap; }
+  }
 
   // Whatever the caps leave of the budget becomes the reserve for re-hires and top-ups, up to the contract's 90%: the
   // user's budget is what Rook may spend, so it must not sit idle while a subtask is abandoned for want of a top-up
   // (seen on mainnet: 0.90 USDC unallocated, a 0.50 re-hire refused). Whole percents, so the numbers read cleanly.
-  const idle = input.budget_atomic - allocated;
-  const reserve_bps = input.budget_atomic > 0n ? Math.min(MAX_RESERVE_BPS, Math.floor(Number((idle * 10_000n) / input.budget_atomic) / 100) * 100) : 0;
-  const reserve = (input.budget_atomic * BigInt(reserve_bps)) / 10_000n;
-  // A fallback priced above cap + the whole reserve can never be paid; listing it would only stretch the deadline.
-  // Any rank can be dropped (the order is not by price) except the first, whose price the cap always covers.
+  // A fallback priced above cap + the whole reserve can never be paid. A cap raised to cover one shrinks back, which
+  // grows the reserve, until no cap changes (caps only shrink, so this ends).
+  const payable = (k: Kept, reserve: bigint) => k.candidates.filter((c) => price(c) <= k.cap + reserve);
+  let { reserve_bps, reserve } = reserveOf(input.budget_atomic, allocated);
+  for (let shrunk = true; shrunk;) {
+    shrunk = false;
+    for (const k of kept) {
+      if (k.self_do) continue;
+      const cap = fallbackCap(payable(k, reserve));
+      if (cap < k.cap) { allocated -= k.cap - cap; k.cap = cap; shrunk = true; }
+    }
+    ({ reserve_bps, reserve } = reserveOf(input.budget_atomic, allocated));
+  }
+  // Listing an unpayable fallback would only stretch the deadline. Any rank can be dropped (the order is not by
+  // price) except the first, whose price the cap always covers.
   for (const k of kept) {
     if (k.self_do) continue;
-    const payable = k.candidates.filter((c) => BigInt(c.price_atomic) <= k.cap + reserve);
-    for (const c of k.candidates) if (!payable.includes(c)) notes.push(`"${k.d.title}": candidate ${c.handle} dropped, price ${c.price_atomic} exceeds cap + reserve`);
-    k.candidates = payable;
+    const ok = payable(k, reserve);
+    for (const c of k.candidates) if (!ok.includes(c)) notes.push(`"${k.d.title}": candidate ${c.handle} dropped, price ${c.price_atomic} exceeds cap + reserve`);
+    k.candidates = ok;
   }
 
   // Step 9 ids: draft id (s<draftIdx+1>) -> final id, for cross-check references.
@@ -128,6 +139,7 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
       // Rook waits for a hire at most ROOK_HIRE_PATIENCE_S, whatever SLA the agent advertises.
       deadline_s: k.self_do ? 0 : Math.min(Math.max(...k.candidates.map((c) => c.sla_seconds)), config.hirePatienceS),
       self_do: k.self_do,
+      ...(k.self_do ? { self_do_reason: k.self_do_reason } : {}),
       candidates: k.candidates,
     };
   });
@@ -144,6 +156,27 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
     },
     notes,
   };
+}
+
+const price = (c: Candidate) => BigInt(c.price_atomic);
+
+/**
+ * The cap that covers a subtask's fallback, over its first two ranked prices: min(max(first, second), 2 x first).
+ * Ranked by expected cost, so the first hire is not always the cheapest: never below the first hire's price, it also
+ * covers the second-ranked fallback (when the first fails without charge) unless that one costs more than twice the
+ * first, so one expensive candidate cannot inflate what the user locks per subtask; a pricier fallback is paid by a
+ * reserve top-up. With candidates cheapest first it is min(second, 2 x first).
+ */
+function fallbackCap(candidates: Candidate[]): bigint {
+  const first = price(candidates[0]), second = price(candidates[Math.min(1, candidates.length - 1)]);
+  const both = second > first ? second : first;
+  return both < first * 2n ? both : first * 2n;
+}
+
+/** The reserve: every budget unit no cap takes, in whole percents of the budget, at most MAX_RESERVE_BPS. */
+function reserveOf(budget: bigint, allocated: bigint): { reserve_bps: number; reserve: bigint } {
+  const reserve_bps = budget > 0n ? Math.min(MAX_RESERVE_BPS, Math.floor(Number(((budget - allocated) * 10_000n) / budget) / 100) * 100) : 0;
+  return { reserve_bps, reserve: (budget * BigInt(reserve_bps)) / 10_000n };
 }
 
 /**

@@ -65,6 +65,7 @@ test('a 0 USDC quote is dropped like any unpayable quote, so a hired subtask nev
   assert.deepEqual(p.subtasks.map((s) => [s.title, s.self_do, s.cap_atomic, s.candidates.map((c) => c.handle)]), [
     ['compare', false, '250000', ['kaminari']], ['only-free', true, '0', []],
   ]);
+  assert.equal(p.subtasks[1].self_do_reason, 'no_agent');
   assert.deepEqual(p.dropped, [{ title: 'only-free-no', reason: 'no fitting agent' }]);
   assert.ok(p.notes.includes('"compare": quote from free dropped: amount 0 is not a payable price'), p.notes.join('\n'));
   assert.ok(p.subtasks.every((s) => s.self_do || BigInt(s.cap_atomic) > 0n));
@@ -110,8 +111,8 @@ test('budget fitting walks priority order: over budget becomes self_do when allo
     quotes: { a1: row('500000'), a2: row('400000'), a3: row('400000') },
   }));
   assert.deepEqual([p.budget.reserve_atomic, p.budget.reserve_bps, p.budget.allocatable_atomic], ['500000', 5000, '500000']);
-  assert.deepEqual(p.subtasks.map((s) => [s.id, s.title, s.self_do, s.cap_atomic]), [
-    ['s1', 'first', false, '500000'], ['s2', 'big-ok', true, '0'], ['s3', 'nobody-ok', true, '0'],
+  assert.deepEqual(p.subtasks.map((s) => [s.id, s.title, s.self_do, s.cap_atomic, s.self_do_reason]), [
+    ['s1', 'first', false, '500000', undefined], ['s2', 'big-ok', true, '0', 'over_budget'], ['s3', 'nobody-ok', true, '0', 'no_agent'],
   ]);
   assert.equal(p.subtasks[1].deadline_s, 0);
   assert.deepEqual(p.dropped, [{ title: 'big-no', reason: 'over budget' }, { title: 'nobody', reason: 'no fitting agent' }]);
@@ -216,15 +217,55 @@ test('candidates priced above cap + reserve are dropped with a note', async () =
   assert.ok(plan.notes.some((n: string) => n.includes('pricey')));
 });
 
-test('a large price gap does not inflate the cap; an unpayable fallback is dropped', () => {
+test('a large price gap does not inflate the cap; an unpayable fallback is dropped and the cap sized for it shrinks', () => {
   const p = buildPlan(input({
     draft: [sub('a')],
     selected: [[agent('cheap'), agent('dear')]],
     quotes: { cheap: row('50000'), dear: row('5000000') },
   }));
-  assert.equal(p.subtasks[0].cap_atomic, '100000'); // 2 x 0.05, not 5.00
+  // 2 x 0.05 = 0.10 at most, never 5.00; and 5.00 > 0.10 + reserve 2.70 can never be paid, so only 0.05 is locked
+  assert.equal(p.subtasks[0].cap_atomic, '50000');
   assert.equal(p.budget.reserve_atomic, '2700000'); // what the cap leaves of 3.00, at most 90%
-  assert.deepEqual(p.subtasks[0].candidates.map((c) => c.handle), ['cheap']); // 5.00 > cap 0.10 + reserve 2.70
+  assert.deepEqual(p.subtasks[0].candidates.map((c) => c.handle), ['cheap']);
+});
+
+test('an agent whose price fits is hired even when the full cap does not fit; fallback cover never costs a later subtask its agent', () => {
+  // budget 1.00 -> 0.80 to allocate. Quotes 0.50 and 0.90 made a 0.90 cap, so the subtask went self_do although 0.50 fits.
+  const a = sub('a', { self_do_ok: true }), b = sub('b', { self_do_ok: true });
+  const selected = { a: [agent('half'), agent('more')], b: [agent('dear', { success_rate: 100, delivered_jobs: 100 }), agent('fits', { success_rate: 1, delivered_jobs: 200 })] };
+  const quotes = { half: row('500000'), more: row('900000'), dear: row('900000'), fits: row('250000') };
+  const shape = (p: ReturnType<typeof buildPlan>) => p.subtasks.map((s) => [s.title, s.self_do, s.cap_atomic, s.candidates.map((c) => c.handle)]);
+
+  const alone = buildPlan(input({ budget_atomic: 1_000_000n, draft: [a], selected: [selected.a], quotes }));
+  // The cap takes what is left (0.80); the 0.90 fallback gets its last 0.10 from the 0.20 reserve.
+  assert.deepEqual(shape(alone), [['a', false, '800000', ['half', 'more']]]);
+  assert.equal(alone.budget.reserve_atomic, '200000');
+
+  // With 'b' too, both are hired at their price first. 'dear' ranks first in 'b' but 0.90 is more than the 0.30 left,
+  // so it is dropped and 'fits' is hired. 'a' keeps no fallback: 0.90 > its 0.50 cap + the 0.25 reserve.
+  const both = buildPlan(input({ budget_atomic: 1_000_000n, draft: [a, b], selected: [selected.a, selected.b], quotes }));
+  assert.deepEqual(shape(both), [['a', false, '500000', ['half']], ['b', false, '250000', ['fits']]]);
+  assert.deepEqual([both.budget.allocated_atomic, both.budget.reserve_atomic], ['750000', '250000']);
+  assert.ok(both.notes.includes('"b": candidate dear dropped, price 900000 exceeds the 300000 left to allocate'), both.notes.join('\n'));
+
+  // No agent's price fits: self_do, and the reason says it is the budget, not the market.
+  const over = buildPlan(input({ budget_atomic: 1_000_000n, draft: [a, b], selected: [[agent('x')], [agent('y')]], quotes: { x: row('600000'), y: row('300000') } }));
+  assert.deepEqual(over.subtasks.map((s) => [s.title, s.self_do, s.self_do_reason ?? null]), [['a', false, null], ['b', true, 'over_budget']]);
+});
+
+test('a cap is never sized for a fallback that is then dropped: the freed money hires the next subtask', () => {
+  // Seen on a coding plan: 1.00 and 5.00 made a 2.00 cap, the 5.00 agent was then dropped as unpayable, and the next
+  // subtask went self_do for want of the 1.00 that cap locked for nothing.
+  const p = buildPlan(input({
+    draft: [sub('audit'), sub('fix', { self_do_ok: true })],
+    selected: [[agent('lucas'), agent('code-review')], [agent('fixer')]],
+    quotes: { lucas: row('1000000'), 'code-review': row('5000000'), fixer: row('1000000') },
+  }));
+  assert.deepEqual(p.subtasks.map((s) => [s.title, s.self_do, s.cap_atomic, s.candidates.map((c) => c.handle)]), [
+    ['audit', false, '1000000', ['lucas']], ['fix', false, '1000000', ['fixer']],
+  ]);
+  assert.deepEqual([p.budget.allocated_atomic, p.budget.reserve_atomic], ['2000000', '990000']);
+  assert.ok(p.notes.some((n) => n.includes('code-review dropped') && n.includes('cap + reserve')));
 });
 
 // ---- ranking by expected cost (5.2 step 4) ----
@@ -286,13 +327,15 @@ test('caps never fall below the first-ranked price, and the drop rule follows ra
     quotes: { top: row('100000'), dear: row('3000000'), flaky: row('50000') },
   }));
   assert.deepEqual(p.subtasks[0].candidates.map((c) => c.handle), ['top', 'flaky']);
-  assert.equal(p.subtasks[0].cap_atomic, '200000');
+  assert.equal(p.subtasks[0].cap_atomic, '100000'); // 2 x 0.10 covered 'dear', which can never be paid; 'flaky' fits 0.10
   assert.ok(p.notes.some((n) => n.includes('dear dropped')) && !p.notes.some((n) => n.includes('flaky dropped')));
 
-  // Sweep: whatever the prices and records, first price <= cap <= 2 x first price, the first-ranked agent is never
-  // dropped, and the kept ones are the ranking minus those above cap + reserve, in rank order.
+  // Sweep: whatever the prices and records, the lead is the first-ranked agent whose price fits the allocatable budget
+  // (16.00 of 20.00) and is never dropped, lead price <= cap <= 2 x lead price, the cap covers nothing more than the
+  // kept candidates need, and the kept ones are the ranking from the lead on minus those above cap + reserve.
   let seed = 7;
   const rnd = (n: number) => (seed = (seed * 48271) % 2147483647) % n;
+  const fallbackCap = (ps: bigint[]) => { const [f, s = f] = ps, both = s > f ? s : f; return both < 2n * f ? both : 2n * f; };
   for (let i = 0; i < 300; i++) {
     const agents = [0, 1, 2].map((k) => agent(`x${k}`, { success_rate: rnd(3) ? rnd(101) : null, delivered_jobs: rnd(400) }));
     const quotes = Object.fromEntries(agents.map((a) => [a.handle, row(String(1000 + rnd(30_000_000)))]));
@@ -300,12 +343,44 @@ test('caps never fall below the first-ranked price, and the drop rule follows ra
     const plan = (budget_atomic: bigint) => buildPlan(input({ draft: [sub('a')], selected: [agents], quotes, history, budget_atomic }));
     const all = plan(10n ** 15n).subtasks[0].candidates; // a reserve so large that nothing is dropped
     const p20 = plan(20_000_000n), s = p20.subtasks[0];
-    if (!s) continue; // the cap did not fit the budget
-    const cap = BigInt(s.cap_atomic), first = BigInt(all[0].price_atomic), reserve = BigInt(p20.budget.reserve_atomic);
+    const lead = all.findIndex((c) => BigInt(c.price_atomic) <= 16_000_000n);
+    if (!s) { assert.equal(lead, -1, `case ${i}`); continue; } // no price fits the budget
+    const cap = BigInt(s.cap_atomic), first = BigInt(all[lead].price_atomic), reserve = BigInt(p20.budget.reserve_atomic);
     assert.ok(cap >= first && cap <= 2n * first, `case ${i}`);
+    assert.ok(cap <= fallbackCap(s.candidates.map((c) => BigInt(c.price_atomic))), `case ${i}: cap sized for a dropped candidate`);
     assert.equal(reserve, (20_000_000n * BigInt(Math.min(9000, Math.floor(Number(((20_000_000n - cap) * 10_000n) / 20_000_000n) / 100) * 100))) / 10_000n, `case ${i}`);
-    assert.equal(s.candidates[0].handle, all[0].handle, `case ${i}`);
-    assert.deepEqual(s.candidates.map((c) => c.handle), all.filter((c) => BigInt(c.price_atomic) <= cap + reserve).map((c) => c.handle), `case ${i}`);
+    assert.equal(s.candidates[0].handle, all[lead].handle, `case ${i}`);
+    assert.deepEqual(s.candidates.map((c) => c.handle), all.slice(lead).filter((c) => BigInt(c.price_atomic) <= cap + reserve).map((c) => c.handle), `case ${i}`);
+  }
+});
+
+test('sweep over several subtasks: caps fit the allocatable budget, every listed agent is payable, and a subtask is over budget only when no price fits', () => {
+  let seed = 11;
+  const rnd = (n: number) => (seed = (seed * 48271) % 2147483647) % n;
+  for (let i = 0; i < 300; i++) {
+    const budget = BigInt(500_000 + rnd(5_000_000));
+    const draft = [0, 1, 2, 3].map((k) => sub(`t${k}`, { self_do_ok: !!rnd(2) }));
+    const selected = draft.map((_, k) => Array.from({ length: rnd(4) }, (_, j) => agent(`a${k}${j}`, { success_rate: rnd(101), delivered_jobs: rnd(50) })));
+    const quotes = Object.fromEntries(selected.flat().map((a) => [a.handle, row(String(10_000 + rnd(2_000_000)))]));
+    const p = buildPlan(input({ budget_atomic: budget, draft, selected, quotes }));
+    const allocatable = budget - budget / 5n, reserve = BigInt(p.budget.reserve_atomic);
+    const hired = p.subtasks.filter((s) => !s.self_do);
+    assert.equal(BigInt(p.budget.allocated_atomic), hired.reduce((n, s) => n + BigInt(s.cap_atomic), 0n), `case ${i}`);
+    assert.ok(BigInt(p.budget.allocated_atomic) <= allocatable, `case ${i}`);
+    for (const s of hired) {
+      assert.ok(BigInt(s.cap_atomic) >= BigInt(s.candidates[0].price_atomic), `case ${i} ${s.title}`);
+      assert.ok(s.candidates.every((c) => BigInt(c.price_atomic) <= BigInt(s.cap_atomic) + reserve), `case ${i} ${s.title}`);
+    }
+    // In priority order, what the hired subtasks before it took at their lead price is all that stood in the way.
+    let taken = 0n;
+    draft.forEach((d, k) => {
+      const s = p.subtasks.find((x) => x.title === d.title);
+      const prices = selected[k].map((a) => BigInt((quotes[a.handle] as any).row.amount));
+      if (s && !s.self_do) { taken += BigInt(s.candidates[0].price_atomic); return; }
+      const overBudget = s ? s.self_do_reason === 'over_budget' : p.dropped.some((x) => x.title === d.title && x.reason === 'over budget');
+      if (overBudget) assert.ok(prices.length && prices.every((x) => x > allocatable - taken), `case ${i} ${d.title}`);
+      else assert.equal(prices.length, 0, `case ${i} ${d.title}`);
+    });
   }
 });
 

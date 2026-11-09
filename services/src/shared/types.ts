@@ -63,9 +63,12 @@ export type Candidate = {
   success_rate: number | null; delivered_jobs: number; price_atomic: string; quote: AcceptsRow;
   p_pass: number; expected_cost_atomic: string; rank_reason: string;
 };
+/** Why a subtask is self_do: no agent could be hired for it, or no agent's price fit what was left of the budget. */
+export type SelfDoReason = 'no_agent' | 'over_budget';
 export type PlanSubtask = {
   id: string; title: string; brief: string; search_terms: string[];
   criteria: Criterion[]; cap_atomic: string; deadline_s: number; self_do: boolean;
+  self_do_reason?: SelfDoReason; // set on every self_do subtask
   candidates: Candidate[];
 };
 export type Plan = {
