@@ -6,7 +6,7 @@ import { config } from '../shared/config.ts';
 import { HttpError, serve, type Running } from '../shared/http.ts';
 import { escapeDelimiters, json } from '../shared/llm.ts';
 import { EvaluateRequest, type Criterion, type CriterionResult, type Evaluation, type Extracted, type LlmCall } from '../shared/types.ts';
-import { canonicalJson, checkSchema, extractCanned, parseNumber, scanInjection, sha256, verifyQuote } from './checks.ts';
+import { canonicalJson, checkSchema, extractCanned, readings, scanInjection, sha256, verifyQuote } from './checks.ts';
 
 export const EVALUATOR_VERSION = '1';
 
@@ -16,10 +16,7 @@ const wrap = (text: string) => `<deliverable>\n${escapeDelimiters(text)}\n</deli
 
 // The reply is checked label by label: one malformed entry ({"value": null}, "41.6%") loses that label only.
 const ExtractReply = z.record(z.string(), z.unknown());
-const ExtractHit = z.object({
-  value: z.union([z.number(), z.string().transform((v) => parseNumber(v.replace(/[\s$%]/g, '')))]),
-  quote: z.string().min(1),
-});
+const ExtractHit = z.object({ value: z.union([z.number(), z.string()]), quote: z.string().min(1) });
 const JudgeReply = z.object({ answers: z.array(z.object({ id: z.string(), answer: z.enum(['yes', 'no']), reason: z.string() })) });
 
 /** Run one LLM step, keep its calls (paid even when it fails), and turn a failure into a 502 that carries them. */
@@ -34,8 +31,12 @@ async function llm<R extends { calls: LlmCall[] }>(calls: LlmCall[], f: () => Pr
   }
 }
 
-/** Find each label's number in the text. LLM output is never trusted: every hit goes through verifyQuote. */
-async function extract(text: string, labels: string[], calls: LlmCall[]): Promise<Extracted> {
+/**
+ * Find each label's number in the text. LLM output is never trusted: every hit goes through verifyQuote. `fits`: whether
+ * a value is inside every numeric_match bound on its label, which picks the reading of a value the extractor returned
+ * as a string (confirmHit).
+ */
+async function extract(text: string, labels: string[], calls: LlmCall[], fits: (label: string, value: number) => boolean = () => true): Promise<Extracted> {
   const out: Extracted = {};
   if (!labels.length) return out;
   if (config.llm !== 'near') {
@@ -51,10 +52,21 @@ async function extract(text: string, labels: string[], calls: LlmCall[]): Promis
     '1,234.5, while Turkish, German and many others write 1.234,5, where 85.000 is eighty-five thousand and 41,6 is 41.6.',
     `Labels: ${JSON.stringify(labels)}\nReply as {"<label>": {"value": ..., "quote": "..."} | null} with every label as a key.\n\n${wrap(text)}`, 4000)); // reasoning model: hidden thinking counts toward max_tokens
   for (const l of labels) {
-    const hit = ExtractHit.safeParse(data[l]);
-    out[l] = hit.success ? verifyQuote(text, hit.data.quote, hit.data.value, l) : null;
+    const parsed = ExtractHit.safeParse(data[l]);
+    out[l] = parsed.success ? confirmHit(text, parsed.data, l, fits) : null;
   }
   return out;
+}
+
+/**
+ * A number the extractor returned as a string ("85.000") is the agent's own digits, so it is read every way they can
+ * be (readings: 85 or 85000). Each reading the quote confirms counts, and the first inside the label's bounds is kept,
+ * else the first. A plain number is the extractor's own reading of the report's language and is checked as it is.
+ */
+function confirmHit(text: string, h: z.infer<typeof ExtractHit>, label: string, fits: (label: string, value: number) => boolean) {
+  const values = typeof h.value === 'number' ? [h.value] : readings(h.value.replace(/[\s$%]/g, ''));
+  const confirmed = values.map((v) => verifyQuote(text, h.quote, v, label)).filter((x) => x !== null);
+  return confirmed.find((x) => fits(label, x.value)) ?? confirmed[0] ?? null;
 }
 
 async function judge(req: EvaluateRequest, crits: Extract<Criterion, { kind: 'llm_judge' }>[], calls: LlmCall[]): Promise<CriterionResult[]> {
@@ -108,15 +120,16 @@ export async function evaluate(req: EvaluateRequest): Promise<Evaluation> {
 
   const numeric = of('numeric_match'), cross = of('cross_check');
   const labels = [...new Set([...numeric.map((c) => c.spec.label), ...cross.map((c) => c.spec.label)])];
+  const within = (c: (typeof numeric)[number], v: number) => (c.spec.min === undefined || v >= c.spec.min) && (c.spec.max === undefined || v <= c.spec.max);
+  const fits = (label: string, v: number) => numeric.every((c) => c.spec.label !== label || within(c, v));
   // No point paying for extraction on an empty deliverable: every label then reads as not found.
-  const extracted = nonEmpty ? await extract(text, labels, llm_calls) : Object.fromEntries(labels.map((l) => [l, null])) as Extracted;
+  const extracted = nonEmpty ? await extract(text, labels, llm_calls, fits) : Object.fromEntries(labels.map((l) => [l, null])) as Extracted;
 
   for (const c of numeric) {
     const hit = extracted[c.spec.label];
     if (!hit) { res(c.id, c.kind, false, `label not found: "${c.spec.label}"`); continue; }
-    const { min, max } = c.spec;
-    const ok = (min === undefined || hit.value >= min) && (max === undefined || hit.value <= max);
-    res(c.id, c.kind, ok, `${c.spec.label} = ${hit.value} ${ok ? 'within' : 'outside'} [${min ?? '-inf'}, ${max ?? 'inf'}]`);
+    const ok = within(c, hit.value);
+    res(c.id, c.kind, ok, `${c.spec.label} = ${hit.value} ${ok ? 'within' : 'outside'} [${c.spec.min ?? '-inf'}, ${c.spec.max ?? 'inf'}]`);
   }
 
   // Peer labels, one extraction per peer; stored as "<subtask>:<label>" so they cannot collide with ours.

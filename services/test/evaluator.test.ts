@@ -186,6 +186,49 @@ test('numbers in Turkish, German and similar formats parse; English ones read as
   assert.equal(ev.verdict, 'pass', JSON.stringify(ev.results));
 });
 
+/** Runs `f` with ROOK_LLM=near against a fake NEAR AI whose every chat reply is `content` as JSON. */
+async function withNearAi<T>(content: unknown, f: () => Promise<T>): Promise<T> {
+  const { config } = await import('../src/shared/config.ts');
+  const keys = ['ROOK_LLM', 'NEARAI_API_KEY', 'NEARAI_BASE_URL'] as const;
+  const saved = keys.map((k) => process.env[k]);
+  Object.assign(process.env, { ROOK_LLM: 'near', NEARAI_API_KEY: 'test-key', NEARAI_BASE_URL: 'https://nearai.test/v1' });
+  const real = globalThis.fetch;
+  const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  globalThis.fetch = (async (input: any) => {
+    const url = String(input);
+    if (url.endsWith('/models')) return reply({ data: [{ id: config.evaluatorModel, pricing: { prompt: 0, completion: 0 } }] });
+    if (url.includes('/signature/')) return reply({}); // unsigned: fine here
+    if (!url.endsWith('/chat/completions')) return reply({}, 404); // attestation evidence
+    return reply({ id: 'c1', choices: [{ message: { content: JSON.stringify(content) }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+  }) as typeof fetch;
+  try { return await f(); } finally {
+    globalThis.fetch = real;
+    keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; });
+  }
+}
+
+test('a number the extractor returns as a string is read both ways, and the reading inside the bounds is kept', async () => {
+  // Seen in review: "85.000" as a string was read the English way (85), so a Turkish rent failed min 1000.
+  const TR = 'Ortalama aylık kira (TL): 85.000\nFiyat (USD): 3.125\nNüfus: 1.234.567';
+  const hit = (value: string, quote: string) => ({ value, quote });
+  const reply = {
+    'Ortalama aylık kira (TL)': hit('85.000', 'Ortalama aylık kira (TL): 85.000'),
+    'Fiyat (USD)': hit('3.125', 'Fiyat (USD): 3.125'),
+    'Nüfus': hit('850', 'Nüfus: 1.234.567'), // a value the quote does not hold never counts
+  };
+  const run = (criteria: Criterion[]) => withNearAi(reply, () => evaluate(req('s1', TR, criteria)));
+  const ev = await run([
+    c('c1', 'numeric_match', { label: 'Ortalama aylık kira (TL)', min: 1000 }),
+    c('c2', 'numeric_match', { label: 'Fiyat (USD)', min: 0, max: 100 }),
+    c('c3', 'numeric_match', { label: 'Nüfus', min: 1 }),
+  ]);
+  assert.deepEqual(ev.failed_criteria, ['c3'], JSON.stringify(ev.results));
+  assert.deepEqual([ev.extracted['Ortalama aylık kira (TL)']?.value, ev.extracted['Fiyat (USD)']?.value, ev.extracted['Nüfus']], [85000, 3.125, null]);
+  // When both readings fit (or no bound decides), the English one stays, as before.
+  const loose = await run([c('c1', 'numeric_match', { label: 'Ortalama aylık kira (TL)', min: 0 })]);
+  assert.equal(loose.extracted['Ortalama aylık kira (TL)']?.value, 85);
+});
+
 test('a contains pattern with regex characters also matches its literal text', async () => {
   const ev = await evaluate(req('s4', MARKET, [c('c1', 'contains', { pattern: 'Price (USD)' }), c('c2', 'contains', { pattern: 'gini' })]));
   assert.deepEqual(ev.failed_criteria, ['c2']);
