@@ -13,8 +13,9 @@ import { Composer, type ComposerErrors } from './Composer';
 import { alertLine, deliveredParts, problemLine, skipReason } from './feed';
 import {
   balanceProblem, closeTaskTransaction, confirmFailure, contractHasTask, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
-  moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, termsOf, txHashOf, usdc, whoseTransfer,
-  type CloseResult, type Funding, type FundingResult, type Terms,
+  keptTransferKey, keptValue, moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, restoreKept, termsOf, txHashOf, usdc,
+  whoseTransfer,
+  type CloseResult, type Funding, type FundingResult, type KeptTransfer, type Terms,
 } from './funding';
 import { explorerTx, NETWORK, rpcFor, type Network } from './network';
 import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary } from './orchestrator';
@@ -360,6 +361,17 @@ function ReceiptProof({ r, network }: { r: Receipt; network: Network }) {
 
 const TX_HASH = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/;
 
+/** This tab's sessionStorage. A private window or blocked site data may refuse it: then nothing is kept. */
+const session = {
+  get: (key: string) => { try { return window.sessionStorage.getItem(key); } catch { return null; } },
+  set: (key: string, value: string | null) => {
+    try {
+      if (value === null) window.sessionStorage.removeItem(key);
+      else window.sessionStorage.setItem(key, value);
+    } catch { /* nothing kept */ }
+  },
+};
+
 type Sent = NonNullable<TaskSnapshot['funding_sent']>;
 
 /** What a funding transfer did, read from NEAR by its hash; unknown while NEAR can't find it. */
@@ -373,7 +385,8 @@ function TxLink({ network, tx }: { network: Network; tx: string | null }) {
 /**
  * Chain mode, after approval: the owner's wallet sends the budget to the Rook contract (SHARED API DECISION 4), the
  * contract's task_created event names the contract task, and Rook checks it against the plan before running. The
- * transfer's hash is remembered by this web server the moment the wallet returns it, so no reload offers a second one.
+ * transfer's hash is remembered by this web server the moment the wallet returns it, so no reload offers a second one,
+ * and by this tab too, for when the session ended and the server couldn't take it.
  */
 function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contractId, onConfirmed, onStop, stopping, autoStart, onBusy, onChanged }: {
   id: string; plan: PlanView; budget: string; funding: Funding | null;
@@ -399,10 +412,13 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
   // A transfer may have gone out but can't be read: ask for its hash, and offer no second transfer (or Cancel) meanwhile.
   const [pasted, setPasted] = useState<string | null>(null);
   const [mayBeUnsent, setMayBeUnsent] = useState(false); // the wallet errored, so the owner may know nothing went out
+  // This tab's own transfer, kept in sessionStorage too: a session that ends mid-funding remounts this step after the
+  // next sign-in, and the server may never have heard of the transfer (remembering it needs a session).
+  const [kept] = useState(() => restoreKept(session.get(keptTransferKey(id)), wallet.account ?? '', sent ?? null));
   // The transfer created a contract task: from then on this step only confirms it, before the server remembers it too.
-  const [made, setMade] = useState<{ contract_task_id: string; tx_hash: string | null } | null>(null);
+  const [made, setMade] = useState<{ contract_task_id: string; tx_hash: string | null } | null>(kept.made);
   // This page's own transfer, by hash, while what it did isn't settled: sent from here, or remembered by the server.
-  const [ownTx, setOwnTx] = useState<string | null>(null);
+  const [ownTx, setOwnTx] = useState<string | null>(kept.ownTx);
   // This account's transfer created a contract task on other terms than the plan's: Rook never runs it, so the only way
   // for its USDC is back to the wallet (the funder's close_task). Then the plan can be funded again.
   const [stray, setStray] = useState<{ task_id: string; tx: string | null } | null>(null);
@@ -418,6 +434,19 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
   useEffect(() => { onBusy(phase !== 'idle'); }, [phase, onBusy]);
   useEffect(() => () => onBusy(false), [onBusy]);
 
+  const keep = (t: KeptTransfer | null) => { if (wallet.account) session.set(keptTransferKey(id), keptValue(wallet.account, t)); };
+  // Kept while it is unsettled. The entry goes with it: it moved no USDC, funds another task, or left the contract.
+  useEffect(() => keep(made ?? (ownTx ? { contract_task_id: null, tx_hash: ownTx } : null)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- keep only reads the account and id
+    [id, wallet.account, made, ownTx]);
+  // A restored transfer is one the server doesn't hold: it hears of it now, so a reload, a Stop (which then offers the
+  // refund) or another tab knows it too.
+  useEffect(() => {
+    const tx = kept.made?.tx_hash ?? kept.ownTx;
+    if (tx) void rememberTransfer(id, { tx_hash: tx, contract_task_id: kept.made?.contract_task_id ?? null }).then((r) => { if (r.ok) onChanged(); }, () => null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once, for what this mount restored
+  }, []);
+
   async function confirm(cid: string, tx: string | null) {
     setError(null);
     setRefundable(false);
@@ -425,7 +454,10 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
     const out: ActResult = await confirmFunding(id, { contract_task_id: cid, tx_hash: tx })
       .catch(() => ({ ok: false as const, message: UNREACHABLE }));
     setPhase('idle');
-    if (out.ok) return onConfirmed();
+    if (out.ok) {
+      session.set(keptTransferKey(id), null); // Rook runs it now: the server's books know the way back to it
+      return onConfirmed();
+    }
     // The orchestrator's own refusals are fragments, quoted after a lead; Rook's own sentences stand on their own.
     const why = out.message.replace(/\.?$/, '.');
     const next = confirmFailure(out.message);
@@ -476,6 +508,7 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
       // A paste while this page knows no transfer of its own keeps the paste form behind the confirm: if Rook turns the
       // contract task down as another task's, the form comes back, not a second transfer.
       if (who === 'own') { setPasted(null); setMayBeUnsent(false); }
+      keep({ contract_task_id: result.task_id, tx_hash: tx }); // at once: this step may be gone before it renders again
       setOwnTx(null);
       setMade({ contract_task_id: result.task_id, tx_hash: tx });
       if (start) return confirm(result.task_id, tx);
@@ -529,7 +562,9 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
     const tx = txHashOf(outcome);
     if (tx) {
       // Remembered before anything reads the outcome or calls Rook, so a reload or a closed tab never offers a second
-      // transfer. This page reads it itself.
+      // transfer. This page reads it itself. This tab keeps it at once, too: if the session ended while the wallet was
+      // open, the server can't take it, and this step is mounted afresh after the next sign-in.
+      keep({ contract_task_id: null, tx_hash: tx });
       autoRead.current = tx;
       setOwnTx(tx);
       await rememberTransfer(id, { tx_hash: tx }).catch(() => null);
@@ -546,17 +581,17 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
     await settle(await lookUp(tx), tx, whoseTransfer(tx, pendingTx), true);
   }
 
-  // A transfer remembered only by its hash (the page closed or reloaded while reading it): read it once, so the page can
-  // confirm or refund the contract task it created.
+  // A transfer remembered only by its hash (the page closed or reloaded while reading it, by the server or this tab): read
+  // it once, so the page can confirm or refund the contract task it created. One this page is reading already is skipped.
   const autoRead = useRef<string | null>(null);
   useEffect(() => {
-    if (!unreadTx || !contract || !wallet.account || phase !== 'idle' || autoRead.current === unreadTx) return;
-    autoRead.current = unreadTx;
-    setOwnTx(unreadTx);
+    if (!pendingTx || !contract || !wallet.account || phase !== 'idle' || autoRead.current === pendingTx) return;
+    autoRead.current = pendingTx;
+    setOwnTx(pendingTx);
     setPhase('reading');
-    void lookUp(unreadTx).then((r) => settle(r, unreadTx, 'own', false));
+    void lookUp(pendingTx).then((r) => settle(r, pendingTx, 'own', false));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per remembered hash; settle reads the current state
-  }, [unreadTx, contract, wallet.account, phase]);
+  }, [pendingTx, contract, wallet.account, phase]);
 
   // One click: the approve button asked for the transfer, so the wallet opens once, as soon as the instructions are in.
   const autoFired = useRef(false);
@@ -597,7 +632,7 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
         </p>
         <div className="mt-4 flex flex-wrap gap-3">
           {refund
-            ? <RefundButton id={id} contractId={refund} taskId={done.contract_task_id} network={network} onRefunded={onChanged} />
+            ? <RefundButton id={id} contractId={refund} taskId={done.contract_task_id} network={network} onRefunded={() => { session.set(keptTransferKey(id), null); onChanged(); }} />
             : <ActionButton primary onClick={() => confirm(done.contract_task_id, done.tx_hash)} busy={phase !== 'idle'}>{phase === 'idle' ? 'Confirm funding and start' : busyLabel[phase]}</ActionButton>}
           {stopButton('Stop')}
         </div>

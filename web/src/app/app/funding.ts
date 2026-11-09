@@ -171,6 +171,42 @@ export function fundingMismatch(c: Extract<FundingResult, { kind: 'created' }>, 
 }
 
 /**
+ * The page's own funding transfer for a task, as its tab keeps it (sessionStorage) until Rook runs it or it moved no
+ * USDC: a contract task it created, or only its hash while that isn't read yet. The server keeps it too, but only with a
+ * session; when the session ends mid-funding, this is what still knows the way back to that USDC.
+ */
+export type KeptTransfer = { contract_task_id: string | null; tx_hash: string | null };
+
+export const keptTransferKey = (task_id: string) => `rook:funding:${task_id}`;
+
+const TX_HASH = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/;
+const CONTRACT_TASK = /^[0-9a-z]{1,20}$/;
+
+/** A transfer to keep for `account`, as stored; null when there is nothing to keep (the entry goes). */
+export function keptValue(account: string, t: KeptTransfer | null): string | null {
+  return t && (t.contract_task_id || t.tx_hash) ? JSON.stringify({ account, contract_task_id: t.contract_task_id, tx_hash: t.tx_hash }) : null;
+}
+
+/**
+ * What the funding step restores from a kept transfer when it mounts: `made` (the contract task it created) or `ownTx`
+ * (a hash still to read). Only `account`'s, and only when the server holds no live record (its record wins), nor says
+ * that this transfer's USDC already came back.
+ */
+export function restoreKept(raw: string | null, account: string, sent: { contract_task_id: string | null; tx_hash: string | null; refunded: boolean } | null):
+  { made: { contract_task_id: string; tx_hash: string | null } | null; ownTx: string | null } {
+  const none = { made: null, ownTx: null };
+  if (sent && !sent.refunded) return none;
+  let k: Record<string, unknown> | null = null;
+  try { k = JSON.parse(raw ?? 'null'); } catch { /* not ours */ }
+  if (!k || typeof k !== 'object' || k.account !== account) return none;
+  const tx = typeof k.tx_hash === 'string' && TX_HASH.test(k.tx_hash) ? k.tx_hash : null;
+  const cid = typeof k.contract_task_id === 'string' && CONTRACT_TASK.test(k.contract_task_id) ? k.contract_task_id : null;
+  if (sent?.refunded && ((cid && sent.contract_task_id === cid) || (tx && sent.tx_hash === tx))) return none;
+  if (cid) return { made: { contract_task_id: cid, tx_hash: tx }, ownTx: null };
+  return tx ? { made: null, ownTx: tx } : none;
+}
+
+/**
  * Whose transfer a looked-up hash is. 'own': the one this page waits on (its wallet returned that hash). 'other': any
  * other hash while it waits, which never stands in for that transfer (it would be forgotten, and a second one offered).
  * 'unsure': the page knows no hash of its own (the wallet errored or returned none), so a paste is all it has.

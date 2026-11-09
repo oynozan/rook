@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   balanceProblem, closeTaskTransaction, confirmFailure, contractHasTask, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
-  moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, termsOf, txHashOf, usdc, whoseTransfer, untilFinal, type Funding,
+  keptTransferKey, keptValue, moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, restoreKept, termsOf, txHashOf, usdc,
+  whoseTransfer, untilFinal, type Funding,
 } from './funding';
 
 const F: Funding = {
@@ -97,6 +98,32 @@ test('while the page waits on its own transfer, no other pasted hash stands in f
   assert.equal(whoseTransfer('H1', 'H1'), 'own');
   assert.equal(whoseTransfer('H2', 'H1'), 'other'); // its contract task may match the plan, but H1 would be forgotten
   assert.equal(whoseTransfer('H2', null), 'unsure'); // the wallet errored or returned no hash: the paste is all there is
+});
+
+test('a session that ends mid-funding never loses the way back to the transfer: the tab keeps it and restores it', () => {
+  const H = '9xQ1oFz3pW7Zb6cQx6m3c7cR8mN4m2Qe5yVfK1sLdTzA';
+  assert.equal(keptTransferKey('t_1'), 'rook:funding:t_1');
+  const made = keptValue('ops.near', { contract_task_id: '1a', tx_hash: H });
+  const sentOnly = keptValue('ops.near', { contract_task_id: null, tx_hash: H });
+  assert.equal(keptValue('ops.near', null), null); // nothing unsettled: the entry goes
+  assert.equal(keptValue('ops.near', { contract_task_id: null, tx_hash: null }), null);
+
+  // The server never heard of it (no session when the wallet returned): the contract task to confirm, or the hash to read.
+  assert.deepEqual(restoreKept(made, 'ops.near', null), { made: { contract_task_id: '1a', tx_hash: H }, ownTx: null });
+  assert.deepEqual(restoreKept(sentOnly, 'ops.near', null), { made: null, ownTx: H });
+  // A wallet that returned no hash still has its contract task.
+  assert.deepEqual(restoreKept(keptValue('ops.near', { contract_task_id: '1a', tx_hash: null }), 'ops.near', null), { made: { contract_task_id: '1a', tx_hash: null }, ownTx: null });
+
+  const none = { made: null, ownTx: null };
+  // The server's live record wins; another account's entry, or anything malformed, is never restored.
+  assert.deepEqual(restoreKept(made, 'ops.near', { contract_task_id: '1b', tx_hash: null, refunded: false }), none);
+  assert.deepEqual(restoreKept(made, 'alice.near', null), none);
+  for (const raw of [null, '', 'nope', '[]', JSON.stringify({ account: 'ops.near', contract_task_id: 'X; drop', tx_hash: 'short' })]) {
+    assert.deepEqual(restoreKept(raw, 'ops.near', null), none, String(raw));
+  }
+  // That transfer's USDC already came back (the funder's refund): nothing to confirm. A later transfer still counts.
+  assert.deepEqual(restoreKept(made, 'ops.near', { contract_task_id: '1a', tx_hash: H, refunded: true }), none);
+  assert.deepEqual(restoreKept(made, 'ops.near', { contract_task_id: '19', tx_hash: 'other', refunded: true }), { made: { contract_task_id: '1a', tx_hash: H }, ownTx: null });
 });
 
 test('a failed confirm offers the refund only when Rook will never run that contract task', () => {
