@@ -78,14 +78,18 @@ export function revokeSession(id: string) {
 }
 
 /** Takes one of `limit` drafts per `windowMs` for this account, or says how long until the oldest frees up. */
-export function takeDraftSlot(account: string, limit: number, windowMs: number): { ok: true } | { ok: false; retryInS: number } {
+export function takeDraftSlot(account: string, limit: number, windowMs: number): { ok: true; slot: number } | { ok: false; retryInS: number } {
   const d = db();
   const now = Date.now();
   d.prepare('DELETE FROM drafts WHERE at <= ?').run(now - windowMs);
   const rows = d.prepare('SELECT at FROM drafts WHERE account = ? ORDER BY at ASC').all(account) as { at: number }[];
   if (rows.length >= limit) return { ok: false, retryInS: Math.max(1, Math.ceil((rows[0].at + windowMs - now) / 1000)) };
-  d.prepare('INSERT INTO drafts (account, at) VALUES (?, ?)').run(account, now);
-  return { ok: true };
+  return { ok: true, slot: Number(d.prepare('INSERT INTO drafts (account, at) VALUES (?, ?)').run(account, now).lastInsertRowid) };
+}
+
+/** Gives a slot back: Rook created no task with it, so no planning was paid for. */
+export function giveBackDraftSlot(account: string, slot: number) {
+  db().prepare('DELETE FROM drafts WHERE rowid = ? AND account = ?').run(slot, account);
 }
 
 /**
