@@ -3,7 +3,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { config, MAX_PROMPT_CHARS } from '../shared/config.ts';
 import { bigintReplacer, call, HttpError, serve, type Ctx, type Routes, type Running } from '../shared/http.ts';
-import { formatUsdc, parseUsdc } from '../shared/money.ts';
+import { formatUsdc, namedBudgetProblem, parseUsdc } from '../shared/money.ts';
 import { CONVERSATION_MESSAGES, CONVERSATION_REPORT_CHARS, type AgentHistory, type Conversation, type Plan, type RookEvent, type X402Config } from '../shared/types.ts';
 import { attack } from './attack.ts';
 import { createChainLedger } from './chain-ledger.ts';
@@ -11,7 +11,7 @@ import { createLedger, type Ledger } from './ledger.ts';
 import { kill, restoreTask, runTask, SHUTDOWN } from './runner.ts';
 import { openStore } from './db.ts';
 import {
-  ancestors, emit, fromDoc, isFree, isTerminal, newTask, openPlan, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task,
+  ancestors, emit, fromDoc, headOf, isFree, isTerminal, newTask, openPlan, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task,
 } from './store.ts';
 
 const CreateBody = z.object({
@@ -41,14 +41,15 @@ export function conversationFor(chain: Task[], revises: Task | null): Conversati
 /**
  * Asks the planner for a plan, relaying its progress lines as `planning` events. A planner that answers with plain
  * JSON (an older one, or a test double) still works: there is just no progress to relay. `history`: Rook's own
- * verdicts per agent, which the planner ranks candidates with.
+ * verdicts per agent, which the planner ranks candidates with. `min`: the contract's smallest budget, which a total
+ * the message names must meet too.
  */
-async function planWithProgress(t: Task, history: Record<string, AgentHistory>, conversation?: Conversation): Promise<Plan> {
+async function planWithProgress(t: Task, history: Record<string, AgentHistory>, min: bigint, conversation?: Conversation): Promise<Plan> {
   emit(t, 'planning', { stage: 'drafting' });
   const r = await fetch(config.urls.planner + '/plan', {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/x-ndjson, application/json' },
-    body: JSON.stringify({ task_id: t.id, prompt: t.prompt, budget_atomic: t.budget_atomic, reserve_share: t.reserve_share, history, conversation }),
+    body: JSON.stringify({ task_id: t.id, prompt: t.prompt, budget_atomic: t.budget_atomic, reserve_share: t.reserve_share, min_budget_atomic: min.toString(), history, conversation }),
     signal: t.abort.signal,
   });
   if (!(r.headers.get('content-type') ?? '').includes('ndjson')) {
@@ -106,6 +107,11 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     if (typeof owner === 'string' && t.owner !== owner) throw new HttpError(404, `no task ${id}`);
     return t;
   };
+  /** A newer message is being planned as a revision of `t`, a planned task: its plan replaces `t` once ready (8.9). */
+  const beingRevised = (t: Task) => t.status === 'planned' && [...tasks.values()].some((x) => {
+    const parent = x.status === 'draft' && x.parent_id !== null ? tasks.get(x.parent_id) : undefined;
+    return parent !== undefined && openPlan(ancestors(parent, tasks)) === t;
+  });
 
   // With ROOK_DB set, tasks survive restarts. A plan waiting for approval carries on, and so does a chain-mode task
   // waiting for its funding transaction. A chain-mode task bound to a contract task is rebuilt from the contract before
@@ -187,15 +193,19 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       // A message in a conversation follows its newest task. Checked after the last await, so two messages sent at once
       // cannot both follow the same task.
       const parent = b.parent_id === undefined ? null : owned(b.parent_id, b.owner);
+      const above = parent ? ancestors(parent, tasks) : []; // the parent and the tasks above it, nearest first
       if (parent) {
         if (parent.owner !== (b.owner ?? null)) throw new HttpError(409, `task ${parent.id} has another owner: a follow-up keeps its owner`);
-        if (parent.status === 'draft') throw new HttpError(409, 'Wait for the plan to be ready before sending more.');
-        if (parent.status !== 'planned' && !isTerminal(parent.status)) throw new HttpError(409, 'Wait for this run to finish, or stop it, before sending more.');
-        if ([...tasks.values()].some((x) => x.parent_id === parent.id)) throw new HttpError(409, 'This conversation has a newer message: reload the page and send from there.');
+        // What the message acts on: the parent, or the task above replies that never got a plan (a run under way, say).
+        const head = headOf(above)!;
+        if (head.status === 'draft') throw new HttpError(409, 'Wait for the plan to be ready before sending more.');
+        // Chain mode, approved and not funded yet: no run has started, the funding step waits for the wallet.
+        if (head.status === 'approved' && chain && !isFree(head) && !chain.contractTaskOf(head.id)) throw new HttpError(409, 'Fund or cancel the plan above before sending more.');
+        if (head.status !== 'planned' && !isTerminal(head.status)) throw new HttpError(409, 'Wait for this run to finish, or stop it, before sending more.');
+        if ([...tasks.values()].some((x) => x.parent_id === parent.id)) throw new HttpError(409, 'This conversation has a newer message: send after the newest one.');
       }
-      const chain = parent ? ancestors(parent, tasks) : [];
-      const revises = openPlan(chain);
-      const conversation = parent ? conversationFor(chain, revises) : undefined;
+      const revises = openPlan(above);
+      const conversation = parent ? conversationFor(above, revises) : undefined;
       const t = newTask(b.prompt, budget, b.reserve_share ?? 0.2, b.owner ?? null, parent?.id ?? null);
       if (conversation) t.earlier_prompts = conversation.earlier;
       tasks.set(t.id, t);
@@ -204,8 +214,19 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         try {
           // A kill during planning aborts the wait. ponytail: the planner does not watch the disconnect, so its LLM
           // calls for this plan still finish (and are not in this task's cost).
-          const plan = await planWithProgress(t, verdictHistory(tasks.values()), conversation);
+          const plan = await planWithProgress(t, verdictHistory(tasks.values()), min, conversation);
           if (isTerminal(t.status)) return;
+          if (plan.budget.from_message) {
+            // The total the message names ("make it 1 USDC", 5.1) is the task's budget, within the same limits as one sent.
+            const problem = namedBudgetProblem(BigInt(plan.budget.budget_atomic), min, max);
+            if (problem) {
+              t.error = problem;
+              emit(t, 'error', { kind: 'planner', message: problem });
+              setStatus(t, 'failed');
+              return;
+            }
+            t.budget_atomic = plan.budget.budget_atomic;
+          }
           setPlan(t, plan);
           emit(t, 'plan', plan);
           if (!plan.subtasks.length) {
@@ -253,11 +274,12 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       };
     },
 
-    // An owner sees only their own tasks; a caller naming no owner (the CLI) sees every task.
+    // An owner sees only their own tasks; a caller naming no owner (the CLI) sees every task. `has_plan`: it got a plan
+    // with something to run, which tells a failed run from a failed reply in a conversation.
     'GET /tasks': ({ query }) => ({
       tasks: [...tasks.values()]
         .filter((t) => !query.has('owner') || t.owner === query.get('owner'))
-        .map(({ id, status, prompt, budget_atomic, created_at, parent_id }) => ({ id, status, prompt, budget_atomic, created_at, parent_id })),
+        .map(({ id, status, prompt, budget_atomic, created_at, parent_id, subtasks }) => ({ id, status, prompt, budget_atomic, created_at, parent_id, has_plan: subtasks.length > 0 })),
     }),
 
     'GET /tasks/:id': ({ params, query }) => snapshot(owned(params.id, query.get('owner')), ledger),
@@ -270,9 +292,13 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       if (config.market === 'live' && !chain) {
         throw new HttpError(409, 'live market: paying agents needs ROOK_LEDGER=chain (signer, chain-gateway, budget contract); see docs/x402-payments-plan.md');
       }
+      // A newer message is revising this plan, and its plan replaces this one once ready: two live plans otherwise.
+      const revising = () => { if (beingRevised(t)) throw new HttpError(409, 'Wait for the revised plan below.'); };
+      revising();
       if (chain && !isFree(t)) {
         // Rook never creates the task on chain: the human funds it with the caps they approve, then calls /funded.
         const funding = await fundingInstructions(t, await contractCfg(), !!reprint);
+        revising(); // sent while the funding was being read
         setStatus(t, 'approved');
         return { ...taskView(t), funding };
       }

@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { forgetFundingOf, forgetUnreadFunding, fundingSent, giveBackDraftSlot, markFundingRefunded, recordFundingSent, takeDraftSlot } from './db';
+import { amountsNamed } from './conversations';
 import { checkDraft, draftRefusal, followUpRefusal } from './draft';
 import { CONTRACT_TASK, draftShortfall, TX_HASH, untilFinal, type Funding } from './funding';
 import { approveTask, cancelTask, createTask, fundedTask, getMode, getTask, killTask, OrchestratorDown, OrchestratorError } from './orchestrator';
@@ -42,8 +43,10 @@ export async function draftTask(input: { prompt: string; budget: string; parent_
   const check = checkDraft({ prompt: String(input?.prompt ?? ''), budget: String(input?.budget ?? '') }, mode);
   if (!check.ok) return { kind: 'invalid', prompt: check.prompt, budget: check.budget };
   // Chain mode: the signed-in wallet funds the plan, so one that can't cover the budget hears it now, before any
-  // planning is paid for, rather than after the plan is drafted.
-  const short = await draftShortfall(mode, owner, check.atomic);
+  // planning is paid for, rather than after the plan is drafted. A total the message names ("make it 1 USDC") is planned
+  // at instead of the field's, so the smallest of them is checked: a wallet short of 3.00 can still ask for 1.00.
+  const least = amountsNamed(check.prompt).reduce((a, b) => (b < a ? b : a), check.atomic);
+  const short = await draftShortfall(mode, owner, least);
   if (short) return { kind: 'invalid', budget: short };
 
   const slot = takeDraftSlot(owner, DRAFTS_PER_HOUR, 3_600_000);
@@ -62,7 +65,12 @@ export async function draftTask(input: { prompt: string; budget: string; parent_
     const refused = e instanceof OrchestratorError && e.status === 400 ? draftRefusal(e.message) : null;
     if (refused) return { kind: 'invalid', ...refused };
     const follow = e instanceof OrchestratorError ? followUpRefusal(e.status, e.message) : null;
-    if (follow) return { kind: 'error', message: follow };
+    if (follow) {
+      // The page's view of the conversation was out of date (a message sent from another tab, or a list that failed to
+      // load): the list catches up, so the newer message shows; the composer keeps the typed text.
+      if (e instanceof OrchestratorError && e.status === 409) refreshSidebar();
+      return { kind: 'error', message: follow };
+    }
     console.error('[web] draftTask:', e instanceof Error ? e.message : e);
     return { kind: 'error', message: "Rook couldn't draft a plan for this task. Try again in a moment." };
   }
@@ -83,6 +91,9 @@ async function act(run: () => Promise<object & { funding?: Funding }>, action?: 
     if (e instanceof OrchestratorDown) return { ok: false, message: DOWN };
     const message = e instanceof Error ? e.message : '';
     const status = e instanceof OrchestratorError ? e.status : null;
+    // A button refused because the task or its conversation moved on since the page loaded (a revision sent from
+    // another tab, say): the list catches up, so the page shows what changed.
+    if (action && status === 409) refreshSidebar();
     if (!action) {
       const out = fundingCallFailure(status, message);
       if (!out.raw) console.error('[web] funding:', message || e);

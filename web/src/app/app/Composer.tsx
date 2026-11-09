@@ -38,7 +38,7 @@ export function Composer({ onSend, errors, sending, compact, thread }: {
   useEffect(() => { if (parent && startBudget) setBudget(usdc(startBudget)); }, [parent, startBudget]);
   const current = thread?.current ?? null;
   const wallet = useWallet();
-  const { mode } = useMode();
+  const { mode, chain } = useMode();
   const locked = !wallet.account;
   // Problems found here, before anything is sent. They show instead of the last send's errors, until the next send, a
   // sign-in or another page.
@@ -55,7 +55,7 @@ export function Composer({ onSend, errors, sending, compact, thread }: {
   async function submit() {
     if (sending) return;
     if (locked) return setFound({ message: 'Connect your NEAR wallet to send this task.' }); // the text stays
-    const wait = current && waitReason(current.status);
+    const wait = current && waitReason(current.status, chain);
     if (wait) return setFound({ message: wait }); // the orchestrator refuses it too
     // Checked here first, so a task that can't be sent never shows in the thread. The action checks again. In a
     // conversation a changed budget alone asks for the same task at that budget.
@@ -94,7 +94,7 @@ export function Composer({ onSend, errors, sending, compact, thread }: {
             void submit();
           }}
           rows={2}
-          placeholder={thread ? placeholderFor(current, budget) : compact ? 'Start a new task' : 'Due diligence on the NEAR token'}
+          placeholder={thread ? placeholderFor(current, budget, chain) : compact ? 'Start a new task' : 'Due diligence on the NEAR token'}
           className={`field-sizing-content block max-h-64 w-full ${compact ? 'min-h-11' : 'min-h-11 sm:min-h-20'} resize-none overflow-y-auto bg-transparent px-3 pt-2.5 pb-2 sm:pt-2 ${compact ? 'text-base sm:text-lg' : 'text-base sm:text-xl md:text-2xl'} ${folded ? 'max-sm:pr-12' : ''} leading-snug outline-none placeholder:text-ink/55`}
         />
 

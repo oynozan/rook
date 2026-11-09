@@ -523,6 +523,8 @@ test('orchestrator, ROOK_LEDGER=chain: approve gives funding instructions, /fund
   const alice = await call(`${orch.url}/tasks`, { prompt: 'p3', budget_usdc: '1', owner: 'alice.near' });
   await call(`${orch.url}/tasks/${alice.id}/approve`, { owner: 'alice.near' });
   await refused(call(`${orch.url}/tasks/${alice.id}/funded`, { contract_task_id: 'other', owner: 'alice.near' }), /funded by owner\.test, not by the task owner alice\.near/);
+  // Approved and not funded: no run has started, so a message after it is told to fund or cancel it, not to wait for a run.
+  await refused(call(`${orch.url}/tasks`, { prompt: 'more', budget_usdc: '1', owner: 'alice.near', parent_id: alice.id }), /^Fund or cancel the plan above before sending more\.$/);
   const both = await Promise.allSettled([1, 2].map(() => call(`${orch.url}/tasks/${t.id}/funded`, { contract_task_id: 'ok' })));
   assert.deepEqual(both.map((x) => x.status).sort(), ['fulfilled', 'rejected']); // overlapping /funded: one binds and runs
   assert.equal((both.find((x) => x.status === 'fulfilled') as any).value.contract_task_id, 'ok');

@@ -22,6 +22,7 @@ test('Stop after the report is written says the task finished and the refund is 
 test('known refusals: no task for this account, an empty plan, payments off, the open-task limit, the contract minimum, a 0 USDC cap', () => {
   assert.equal(words('stop', 404, 'no task t_1'), "Rook has no task at this link for the wallet you're signed in with.");
   assert.equal(words('approve', 409, 'the plan has no subtasks'), "This plan has nothing to run, so it can't be started.");
+  assert.equal(words('approve', 409, 'Wait for the revised plan below.'), 'Wait for the revised plan below.');
   assert.equal(words('approve', 409, 'live market: paying agents needs ROOK_LEDGER=chain (signer, chain-gateway, budget contract); see docs/x402-payments-plan.md'),
     "Paying live agents isn't switched on yet, so this plan can't be started.");
   const limit = words('approve', 409, 'alice.near already has 5 open tasks on the contract (the limit is 5); wait for one to close');

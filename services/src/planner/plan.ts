@@ -4,7 +4,7 @@ import { Ajv } from 'ajv';
 import { z } from 'zod';
 import { config } from '../shared/config.ts';
 import { AcceptsRow, Criterion, type AgentHistory, type AgentSummary, type Candidate, type Plan, type PlanSubtask, type SelfDoReason, type X402Config } from '../shared/types.ts';
-import { formatUsdc, share } from '../shared/money.ts';
+import { formatUsdc, parseUsdc, share } from '../shared/money.ts';
 
 // Draft as the LLM writes it. Criteria are loose here on purpose: an invalid one is removed with a note
 // (step 8) instead of failing the whole draft. Cross-check `other_subtask` uses draft ids s1..sN by position.
@@ -21,9 +21,15 @@ export const DraftSubtask = z.object({
   self_do_ok: z.boolean(),
   criteria: z.array(DraftCriterion),
 });
+const isUsdc = (v: number | string) => { try { parseUsdc(v); return true; } catch { return false; } };
 // No subtasks only with `not_a_task`: the message is not a task to plan ("go ahead", "hi"), and that sentence says why.
-export const Draft = z.object({ subtasks: z.array(DraftSubtask).max(5), not_a_task: z.string().optional() })
-  .refine((d) => d.subtasks.length > 0 || !!d.not_a_task?.trim(), 'return at least one subtask, or set not_a_task');
+// `budget_usdc`: the total budget the message itself names ("make it 1 USDC"), in USDC; absent when it names none.
+export const Draft = z.object({
+  subtasks: z.array(DraftSubtask).max(5),
+  not_a_task: z.string().optional(),
+  budget_usdc: z.union([z.number(), z.string()]).nullish()
+    .refine((v) => v == null || isUsdc(v), 'budget_usdc must be an amount of USDC such as 1.5, with at most 6 decimals'),
+}).refine((d) => d.subtasks.length > 0 || !!d.not_a_task?.trim(), 'return at least one subtask, or set not_a_task');
 export type DraftSubtask = z.infer<typeof DraftSubtask>;
 export type Draft = z.infer<typeof Draft>;
 

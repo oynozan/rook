@@ -75,8 +75,11 @@ export type PlanSubtask = {
 export type Plan = {
   subtasks: PlanSubtask[];
   dropped: { title: string; reason: string }[];
-  /** reserve_bps: the reserve the funding transfer asks the contract for; every budget unit no cap takes, at most 90%. */
-  budget: { budget_atomic: string; reserve_atomic: string; reserve_bps?: number; allocatable_atomic: string; allocated_atomic: string };
+  /**
+   * reserve_bps: the reserve the funding transfer asks the contract for; every budget unit no cap takes, at most 90%.
+   * from_message: budget_atomic is the total the message itself names ("make it 1 USDC"), not the one sent with it.
+   */
+  budget: { budget_atomic: string; reserve_atomic: string; reserve_bps?: number; allocatable_atomic: string; allocated_atomic: string; from_message?: boolean };
   notes: string[];
   llm_calls: LlmCall[];
 };
@@ -97,6 +100,8 @@ export const Conversation = z.object({ earlier: Earlier, revising: z.boolean(), 
 export type Conversation = z.infer<typeof Conversation>;
 export const PlanRequest = z.object({
   task_id: z.string(), prompt: z.string().min(1), budget_atomic: atomic, reserve_share: z.number().min(0).max(0.9),
+  // The contract's smallest budget, so a smaller total named in the message is refused before the market is searched.
+  min_budget_atomic: atomic.optional(),
   // By agent handle; optional, so the planner also ranks without it (market record only).
   history: z.record(z.string().min(1), AgentHistory)
     .refine((h) => Object.keys(h).length <= MAX_HISTORY_HANDLES, `history lists more than ${MAX_HISTORY_HANDLES} handles`).optional(),

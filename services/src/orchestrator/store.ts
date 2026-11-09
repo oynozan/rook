@@ -159,17 +159,21 @@ export function ancestors(t: Task, byId: Map<string, Task>): Task[] {
   return out;
 }
 
+/** A message that never got a plan to run: a reply that is not a task, a planner failure, a draft stopped while planning. */
+export const planless = (t: Task) => isTerminal(t.status) && !t.subtasks.length;
+
 /**
- * The plan a new message after `chain[0]` changes: the nearest planned task, reached only through messages that never
- * got a plan to run (a reply that is not a task, a planner failure, a draft stopped while planning). Null: the new
- * message follows up on work that ended.
+ * The task a new message after `chain[0]` acts on: the nearest one up the chain that is not planless, so a failed reply
+ * under a plan or a run never hides it. `chain[0]` when every one is planless.
  */
+export function headOf(chain: Task[]): Task | undefined {
+  return chain.find((x) => !planless(x)) ?? chain[0];
+}
+
+/** The plan a new message after `chain[0]` changes: the head, when it is planned. Null: it follows up on work that ended. */
 export function openPlan(chain: Task[]): Task | null {
-  for (const x of chain) {
-    if (x.status === 'planned') return x;
-    if (!isTerminal(x.status) || x.subtasks.length) return null;
-  }
-  return null;
+  const head = headOf(chain);
+  return head?.status === 'planned' ? head : null;
 }
 
 export function snapshot(t: Task, ledger: Ledger) {

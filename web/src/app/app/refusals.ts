@@ -32,6 +32,8 @@ export function actionRefusal(action: TaskAction, status: number | null, message
   const known = (text: string) => ({ message: text, known: true });
   if (status === 404 && /^no task /.test(message)) return known("Rook has no task at this link for the wallet you're signed in with.");
   if (status === 409) {
+    // A newer message in the conversation is revising this plan (another tab sent it, say).
+    if (/^Wait for the revised plan below/.test(message)) return known('Wait for the revised plan below.');
     let m = /^task is (?:already )?(\w+)/.exec(message);
     // Stop is refused only once a task has ended, which says it all.
     if (m) return known(`This task ${NOW[m[1]] ?? `is ${m[1]}`}${action === 'stop' ? '' : `, so it can't be ${DONE[action]}`}.`);

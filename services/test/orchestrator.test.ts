@@ -381,7 +381,7 @@ test('a follow-up on a finished task gives the planner the earlier messages and 
   assert.equal((await snap(first.task.id)).task.status, 'closed'); // a finished task stays as it was
   const rows = (await call(`${orch.url}/tasks`)).tasks;
   assert.deepEqual(rows.find((x: any) => x.id === follow.id),
-    { id: follow.id, status: 'planned', prompt: 'Now translate it to Turkish', budget_atomic: '2000000', created_at: follow.created_at, parent_id: first.task.id });
+    { id: follow.id, status: 'planned', prompt: 'Now translate it to Turkish', budget_atomic: '2000000', created_at: follow.created_at, parent_id: first.task.id, has_plan: true });
   assert.equal(rows.find((x: any) => x.id === first.task.id).parent_id, null);
 
   await call(`${orch.url}/tasks/${follow.id}/approve`, {});
@@ -399,7 +399,7 @@ test('a follow-up on a finished task gives the planner the earlier messages and 
   await call(`${orch.url}/tasks/${third.id}/cancel`, {});
 });
 
-test('a revision replaces the plan it changes once its own plan is ready; a reply that is not a task leaves that plan usable', async () => {
+test('a revision replaces the plan it changes once its own plan is ready, and that plan waits for it; a reply that is not a task leaves that plan usable', async () => {
   plan = holdersPlan();
   const first = await call(`${orch.url}/tasks`, { prompt: 'Due diligence on the NEAR token', budget_usdc: '3', owner: 'alice.near' });
   assert.equal(first.status, 'planned');
@@ -421,20 +421,69 @@ test('a revision replaces the plan it changes once its own plan is ready; a repl
   assert.deepEqual(evs.at(-1).data, { from: 'planned', to: 'cancelled' });
   await assert.rejects(call(`${orch.url}/tasks/${first.id}/approve`, { owner: 'alice.near' }), /cancelled/);
 
-  // A plan approved while its revision was being drafted runs on: the revision does not cancel it.
-  plan = holdersPlan();
-  const runs = await call(`${orch.url}/tasks`, { prompt: 'Revise me', budget_usdc: '1', owner: 'alice.near' });
+  // While a revision is being planned, the plan it changes can't be approved, even through a failed reply: running it
+  // would leave two live plans. Once the revision is ready, it replaces that plan.
+  const approve = (id: string) => call(`${orch.url}/tasks/${id}/approve`, { owner: 'alice.near' });
+  const waits = (e: any) => e.status === 409 && e.message === 'Wait for the revised plan below.';
   let open!: () => void;
-  planGate = new Promise((ok) => (open = ok));
-  const late = await call(`${orch.url}/tasks`, { prompt: 'Make it shorter', budget_usdc: '1', owner: 'alice.near', parent_id: runs.id, wait: false });
-  assert.equal(late.status, 'draft');
-  await call(`${orch.url}/tasks/${runs.id}/approve`, { owner: 'alice.near' });
-  open();
-  planGate = Promise.resolve();
-  await until(async () => (await snap(late.id)).task.status === 'planned');
-  const ran = await ended(runs.id);
+  const gate = () => { planGate = new Promise((ok) => (open = ok)); };
+  const release = () => { open(); planGate = Promise.resolve(); };
+  plan = holdersPlan();
+  const base = await call(`${orch.url}/tasks`, { prompt: 'Revise me', budget_usdc: '1', owner: 'alice.near' });
+  const nod = await call(`${orch.url}/tasks`, { prompt: 'go ahead', budget_usdc: '1', owner: 'alice.near', parent_id: base.id });
+  gate();
+  const shorter = await call(`${orch.url}/tasks`, { prompt: 'Make it shorter', budget_usdc: '1', owner: 'alice.near', parent_id: nod.id, wait: false });
+  assert.equal(shorter.status, 'draft');
+  await assert.rejects(approve(base.id), waits);
+  release();
+  await until(async () => (await snap(shorter.id)).task.status === 'planned');
+  assert.deepEqual([(await snap(base.id)).task.status, (await snap(base.id)).task.replaced_by], ['cancelled', shorter.id]);
+
+  // A revision that fails leaves the plan as it was, and it can run then.
+  gate();
+  const reply2 = await call(`${orch.url}/tasks`, { prompt: 'go ahead', budget_usdc: '1', owner: 'alice.near', parent_id: shorter.id, wait: false });
+  await assert.rejects(approve(shorter.id), waits);
+  release();
+  await until(async () => (await snap(reply2.id)).task.status === 'failed');
+  assert.equal((await approve(shorter.id)).status, 'approved');
+  const ran = await ended(shorter.id);
   assert.deepEqual([ran.task.status, ran.task.replaced_by], ['closed', null]);
-  await call(`${orch.url}/tasks/${late.id}/cancel`, {});
+});
+
+test('a failed reply under a plan never hides it: once that plan runs, a message waits for the run, then follows up on it', async () => {
+  const send = (prompt: string, parent_id: string) => call(`${orch.url}/tasks`, { prompt, budget_usdc: '1', owner: 'dan.near', parent_id });
+  const refused = (e: any) => e.status === 409 && e.message === 'Wait for this run to finish, or stop it, before sending more.';
+
+  // [running, failed reply]: "go ahead" fails as not a task, then the plan above runs from its button.
+  plan = { subtasks: [sub('s1', 'Hang', '200000', [cand('hang', '100000', 60)])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] };
+  const hang = await call(`${orch.url}/tasks`, { prompt: 'Holders', budget_usdc: '1', owner: 'dan.near' });
+  const reply = await send('go ahead', hang.id);
+  assert.equal(reply.status, 'failed');
+  await call(`${orch.url}/tasks/${hang.id}/approve`, { owner: 'dan.near' });
+  await until(async () => (await snap(hang.id)).task.status === 'running');
+  const asked = planRequests.length;
+  await assert.rejects(send('More', reply.id), refused);
+  assert.equal(planRequests.length, asked); // never planned as if the run had ended, so no second run beside it
+  // The list tells a failed run from a failed reply.
+  assert.deepEqual((await call(`${orch.url}/tasks?owner=dan.near`)).tasks.map((x: any) => [x.id, x.status, x.has_plan]),
+    [[hang.id, 'running', true], [reply.id, 'failed', false]]);
+  await call(`${orch.url}/tasks/${hang.id}/kill`, { owner: 'dan.near' });
+  plan = holdersPlan();
+  const afterKill = await send('Try it again', reply.id);
+  assert.equal(afterKill.status, 'planned');
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Holders', 'go ahead'], revising: false });
+  await call(`${orch.url}/tasks/${afterKill.id}/cancel`, {});
+
+  // [closed, failed reply]: the next message follows up on the finished run, with its report.
+  const first = await call(`${orch.url}/tasks`, { prompt: 'Due diligence', budget_usdc: '1', owner: 'dan.near' });
+  const again = await send('go ahead', first.id);
+  await call(`${orch.url}/tasks/${first.id}/approve`, { owner: 'dan.near' });
+  const done = await ended(first.id);
+  assert.equal(done.task.status, 'closed', done.task.error);
+  const follow = await send('Now translate it to Turkish', again.id);
+  assert.deepEqual([follow.status, follow.parent_id], ['planned', again.id]);
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Due diligence', 'go ahead'], revising: false, report: done.final_result.final_markdown.trim() });
+  await call(`${orch.url}/tasks/${follow.id}/cancel`, {});
 });
 
 test('a message is refused while the task it follows is planning or running, after a newer message, and for another owner', async () => {
@@ -458,7 +507,7 @@ test('a message is refused while the task it follows is planning or running, aft
   // A conversation is a chain: once a task has a follow-up, only the newest task takes the next message.
   const next = await send(drafting.id, 'bob.near');
   assert.equal(next.status, 'planned');
-  await assert.rejects(send(drafting.id, 'bob.near'), refused(409, 'This conversation has a newer message: reload the page and send from there.'));
+  await assert.rejects(send(drafting.id, 'bob.near'), refused(409, 'This conversation has a newer message: send after the newest one.'));
 
   // Approved and running: wait or stop. Stopped: a follow-up is fine, and it changes no plan.
   plan = { subtasks: [sub('s1', 'Hang', '200000', [cand('hang', '100000', 60)])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] };
@@ -472,6 +521,28 @@ test('a message is refused while the task it follows is planning or running, aft
   assert.equal(after.status, 'planned');
   assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Holders', 'More', 'More'], revising: false });
   assert.equal((await snap(running.id)).task.replaced_by, null);
+});
+
+test("a total budget the message names becomes the task's budget, within the limits; one out of range ends the draft with the reason", async () => {
+  const named = (budget_atomic: string, reserve_atomic: string, reserve_bps: number) => ({
+    ...holdersPlan(), budget: { budget_atomic, reserve_atomic, reserve_bps, allocatable_atomic: String(BigInt(budget_atomic) - BigInt(reserve_atomic)), allocated_atomic: '300000', from_message: true },
+  });
+  plan = named('1500000', '1200000', 8000);
+  const first = await call(`${orch.url}/tasks`, { prompt: 'Holders of NEAR, make it 1.5 USDC', budget_usdc: '3', owner: 'erin.near' });
+  assert.deepEqual([first.status, first.budget_atomic, first.reserve_share], ['planned', '1500000', 0.8]);
+  // The planner got the budget sent with the message, and the contract's minimum (none with the sim ledger).
+  assert.deepEqual([planRequests.at(-1).budget_atomic, planRequests.at(-1).min_budget_atomic], ['3000000', '0']);
+  assert.equal((await call(`${orch.url}/tasks?owner=erin.near`)).tasks[0].budget_atomic, '1500000');
+  await call(`${orch.url}/tasks/${first.id}/approve`, { owner: 'erin.near' });
+  const ran = await ended(first.id);
+  assert.equal(ran.task.status, 'closed', ran.task.error);
+  assert.equal(ran.ledger.budget_atomic, '1500000'); // the run's books hold the named budget
+
+  // Out of range (a planner that didn't check): the draft fails with the reason and keeps the budget it was sent with.
+  plan = named('60000000', '1200000', 8000);
+  const big = await call(`${orch.url}/tasks`, { prompt: 'Holders of NEAR for 60 USDC', budget_usdc: '3', owner: 'erin.near' });
+  assert.deepEqual([big.status, big.error, big.budget_atomic, big.plan],
+    ['failed', 'Your message asks for a budget of 60.00 USDC, but the most Rook takes is 50.00 USDC.', '3000000', null]);
 });
 
 test('the conversation sent to the planner keeps the first and the newest messages, and the newest report cut to size', async () => {
