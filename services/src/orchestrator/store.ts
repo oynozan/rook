@@ -41,10 +41,11 @@ export type Task = {
   inflight: Map<string, { subtask: Sub; hire: Hire; handle: string; a2a_task_id: string | null }>; // null: /send in flight
   allow: Recipient[];
   running?: Promise<void>; // the run (or a restore), so the unwind after a kill starts once its loops have stopped
-  unwinding?: Promise<void>; // returning what is still on chain after a kill or a failure
+  unwinding?: Promise<void>; // returning what is still on chain after a kill, a failure or a failed close
   salvaging?: boolean; // events still record after the terminal status while money moves back
+  shutdown: AbortController; // aborted when the orchestrator stops: the unwind stops retrying, and the next start resumes it
 };
-type Runtime = 'listeners' | 'abort' | 'inflight' | 'allow' | 'running' | 'unwinding' | 'salvaging';
+type Runtime = 'listeners' | 'abort' | 'inflight' | 'allow' | 'running' | 'unwinding' | 'salvaging' | 'shutdown';
 /** A task without its runtime parts: what SQLite stores. */
 export type TaskDoc = Omit<Task, Runtime>;
 
@@ -61,14 +62,14 @@ export const saveTask = (t: Task) => persist?.(t);
 
 /** The task without its runtime parts, ready to store. */
 export function toDoc(t: Task): TaskDoc {
-  const { listeners: _l, abort: _a, inflight: _i, allow: _w, running: _r, unwinding: _u, salvaging: _s, ...doc } = t;
+  const { listeners: _l, abort: _a, inflight: _i, allow: _w, running: _r, unwinding: _u, salvaging: _s, shutdown: _d, ...doc } = t;
   return doc;
 }
 
 /** A stored task with fresh runtime parts. */
 export function fromDoc(doc: TaskDoc): Task {
   // Tasks saved before owners existed have none; they stay out of every account's list.
-  return { ...doc, owner: doc.owner ?? null, listeners: new Set(), abort: new AbortController(), inflight: new Map(), allow: [] };
+  return { ...doc, owner: doc.owner ?? null, listeners: new Set(), abort: new AbortController(), inflight: new Map(), allow: [], shutdown: new AbortController() };
 }
 
 export function newTask(prompt: string, budget_atomic: bigint, reserve_share: number, owner: string | null = null): Task {
@@ -77,7 +78,7 @@ export function newTask(prompt: string, budget_atomic: bigint, reserve_share: nu
     id: `t_${randomUUID().slice(0, 8)}`, prompt, budget_atomic: budget_atomic.toString(), reserve_share, funder: null, owner,
     status: 'draft', error: null, created_at: ts, updated_at: ts,
     plan: null, subtasks: [], receipts: [], events: [], final_result: null, llm_calls: [],
-    listeners: new Set(), abort: new AbortController(), inflight: new Map(), allow: [],
+    listeners: new Set(), abort: new AbortController(), inflight: new Map(), allow: [], shutdown: new AbortController(),
   };
   emit(t, 'task_status', { from: null, to: 'draft' });
   return t;

@@ -125,7 +125,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
 
   // A killed or failed task returns its money after the terminal status; its stream stays open until then. In chain
   // mode only a task bound to a contract task holds money (a plan that hires no agent has books of 0, never on chain).
-  // ponytail: a closeTask that keeps failing leaves the stream open until the client goes; the errors still stream.
+  // The unwind retries until the books close, so a stream can stay open for minutes; each problem streams once.
   const moving = (t: Task) => ledger.view(t.id)?.closed === false && (chain === null || chain.contractTaskOf(t.id) !== null);
   /** The contract's settings, read once from the chain-gateway (null until it answers). */
   let chainCfg: ChainCfg | null = null;
@@ -300,7 +300,10 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
   return {
     ...running,
     close: async () => {
-      for (const t of tasks.values()) if (!isTerminal(t.status)) t.abort.abort(new Error(SHUTDOWN)); // restore depends on it
+      for (const t of tasks.values()) {
+        t.shutdown.abort(); // an unwind stops retrying; the next start resumes it
+        if (!isTerminal(t.status)) t.abort.abort(new Error(SHUTDOWN)); // restore depends on it
+      }
       await running.close();
       persistWith(null);
       db?.close();

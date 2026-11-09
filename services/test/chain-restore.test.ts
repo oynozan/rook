@@ -654,24 +654,72 @@ test('a return or a close that fails for a moment is tried again: the task close
   } finally { await orch.close(); failing.clear(); }
 });
 
-test('a close that keeps failing after the report keeps the report; the refund finishes after a restart', async () => {
+test('a close that fails past its quick retries: the task stays closing, the unwind keeps trying, and it ends closed with its report', async () => {
+  // Seen on mainnet (t_891b1147): send_tx failed with INVALID_TRANSACTION for minutes, longer than the quick retries.
+  process.env.ROOK_DB = join(dir, 'close-slow.sqlite');
+  const orch = await start(0);
+  try {
+    const id = await fundedAndWorking(orch, 'alpha', 'cs');
+    failing.set('close', 8); // 5 quick tries, then the unwind's rounds 1 to 3 fail and round 4 closes
+    await deliverAndPay(orch, id, 'cs');
+    const s = await until(async () => { const x = await snap(orch, id); return ['closed', 'failed'].includes(x.task.status) ? x : false; });
+    assert.deepEqual([s.task.status, s.task.error, s.final_result.final_markdown], ['closed', null, 'final']);
+    assert.deepEqual([s.ledger.closed, s.ledger.refunded_atomic], [true, '900000']);
+    const evs = await events(orch, id);
+    assert.deepEqual(evs.filter((e) => e.type === 'task_status').map((e) => e.data.to).slice(-2), ['closing', 'closed']);
+    assert.deepEqual(evs.find((e) => e.type === 'final').data.refunded_atomic, '900000');
+    // Each problem is reported once, however often the same close fails again.
+    const errs = evs.filter((e) => e.type === 'error' && e.data.kind !== 'payment_lookup');
+    assert.deepEqual(errs.map((e) => e.data.kind), ['close_retry', 'close_retry', 'close_retry', 'close_retry', 'close', 'unwind']);
+    assert.match(errs.at(-1).data.message, /^closing, closeTask: .*INVALID_TRANSACTION/);
+  } finally { await orch.close(); failing.clear(); }
+});
+
+test('a close that keeps failing after the report keeps the report and the task closing; a shutdown stops the retries and the next start closes it', async () => {
   process.env.ROOK_DB = join(dir, 'close-fails.sqlite');
   let orch = await start(0);
   const id = await fundedAndWorking(orch, 'alpha', 'cf');
   try {
     failing.set('close', 99);
     await deliverAndPay(orch, id, 'cf');
-    const s = await until(async () => { const x = await snap(orch, id); return x.task.status === 'failed' ? x : false; });
-    assert.equal(s.final_result.final_markdown, 'final'); // paid for and passed: never thrown away
-    assert.match(s.task.error, /INVALID_TRANSACTION/);
+    await until(async () => (failing.get('close') ?? 0) <= 90); // the quick tries and 4 of the unwind's rounds
+    const s = await snap(orch, id);
+    assert.deepEqual([s.task.status, s.task.error, s.final_result.final_markdown], ['closing', null, 'final']); // paid for and passed: never thrown away
     assert.deepEqual([s.subtasks[0].status, s.ledger.closed], ['returned', false]);
-  } finally { await orch.close(); failing.clear(); }
+  } finally { await orch.close(); }
+  const settle = () => new Promise((ok) => setTimeout(ok, 700)); // longer than the unwind's next two waits
+  await settle(); // a close already sent at the shutdown lands
+  const left = failing.get('close');
+  await settle();
+  assert.equal(failing.get('close'), left); // stopped retrying at the shutdown
+  failing.clear();
+  const store = openStore(process.env.ROOK_DB!);
+  const doc = store.load().find((d) => d.id === id)!;
+  store.close();
+  assert.deepEqual(doc.events.filter((e) => e.type === 'error').map((e) => e.data.kind).filter((k) => k === 'close' || k === 'unwind'), ['close', 'unwind']);
+
   orch = await start(0);
   try {
-    const s = await until(async () => { const x = await snap(orch, id); return x.ledger?.closed ? x : false; });
-    assert.deepEqual([s.task.status, s.final_result.final_markdown, s.ledger.refunded_atomic], ['failed', 'final', '900000']);
+    const s = await until(async () => { const x = await snap(orch, id); return ['closed', 'failed'].includes(x.task.status) ? x : false; });
+    assert.deepEqual([s.task.status, s.final_result.final_markdown, s.ledger.closed, s.ledger.refunded_atomic], ['closed', 'final', true, '900000']);
     const evs = await events(orch, id);
-    assert.ok(evs.some((e) => e.type === 'error' && e.data.kind === 'close'));
-    assert.equal(evs.at(-1).data.op, 'closeTask');
+    assert.ok(!evs.some((e) => e.type === 'task_status' && e.data.to === 'failed'));
+    assert.equal(evs.filter((e) => e.type === 'final').length, 1);
   } finally { await orch.close(); }
+});
+
+test('a kill whose close keeps failing for a while: the unwind tries again until the books close, reporting the problem once', async () => {
+  process.env.ROOK_DB = join(dir, 'kill-close.sqlite');
+  const orch = await start(0);
+  try {
+    const id = await fundedAndWorking(orch, 'alpha', 'kc');
+    failing.set('close', 3);
+    await call(`${orch.url}/tasks/${id}/kill`, {});
+    const s = await until(async () => { const x = await snap(orch, id); return x.ledger?.closed ? x : false; });
+    assert.deepEqual([s.task.status, s.ledger.spent_atomic, s.ledger.refunded_atomic], ['killed', '0', '1000000']);
+    assert.ok(calls.includes('close kc'));
+    const errs = (await events(orch, id)).filter((e) => e.type === 'error');
+    assert.deepEqual(errs.map((e) => e.data.kind), ['unwind']);
+    assert.match(errs[0].data.message, /^after kill, closeTask: /);
+  } finally { await orch.close(); failing.clear(); }
 });
