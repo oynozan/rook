@@ -54,6 +54,22 @@ test('quotes that failed or do not match the /x402 recipients are dropped', () =
   assert.ok(p.notes.some((n) => n.includes('evil') && n.includes('/x402')));
 });
 
+test('a 0 USDC quote is dropped like any unpayable quote, so a hired subtask never gets a cap of 0', () => {
+  // Seen live: purchasing-research-agent-v2 quotes amount "0"; it ranked first and made the contract refuse the funding.
+  const p = buildPlan(input({
+    budget_atomic: 1_000_000n,
+    draft: [sub('compare'), sub('only-free', { self_do_ok: true }), sub('only-free-no')],
+    selected: [[agent('free'), agent('kaminari')], [agent('free')], [agent('free')]],
+    quotes: { free: row('0'), kaminari: row('250000') },
+  }));
+  assert.deepEqual(p.subtasks.map((s) => [s.title, s.self_do, s.cap_atomic, s.candidates.map((c) => c.handle)]), [
+    ['compare', false, '250000', ['kaminari']], ['only-free', true, '0', []],
+  ]);
+  assert.deepEqual(p.dropped, [{ title: 'only-free-no', reason: 'no fitting agent' }]);
+  assert.ok(p.notes.includes('"compare": quote from free dropped: amount 0 is not a payable price'), p.notes.join('\n'));
+  assert.ok(p.subtasks.every((s) => s.self_do || BigInt(s.cap_atomic) > 0n));
+});
+
 test('a 1-day payment window (87000 s, the market default) is kept; one over ROOK_MAX_PAYMENT_TIMEOUT_S (default 90000 s) is dropped', () => {
   // At 15000 s the planner dropped most of the market and planned whole tasks as self_do (mainnet, a portfolio site).
   const ttl = (handle: string, maxTimeoutSeconds: number): [string, QuoteResult] => [handle, { ok: true, row: { ...(row('100000') as any).row, maxTimeoutSeconds } }];

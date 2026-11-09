@@ -162,6 +162,11 @@ function quotedCandidates(agents: AgentSummary[], quotes: Record<string, QuoteRe
       notes.push(`"${title}": quote from ${a.handle} dropped: row does not match the /x402 recipients`);
       continue;
     }
+    // Same rule as the orchestrator's checkQuote: x402 cannot pay 0, and the contract refuses a cap of 0.
+    if (BigInt(r.amount) <= 0n) {
+      notes.push(`"${title}": quote from ${a.handle} dropped: amount ${r.amount} is not a payable price`);
+      continue;
+    }
     // The orchestrator and the signer refuse a longer payment window at hire time, so the plan never lists such an agent.
     const max = config.maxPaymentTimeoutS;
     if (!Number.isInteger(r.maxTimeoutSeconds) || r.maxTimeoutSeconds < 1 || r.maxTimeoutSeconds > max) {
