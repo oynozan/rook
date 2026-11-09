@@ -71,8 +71,11 @@ test('a plan whose revision is still being planned: the one the newest message r
 
 test('nothing goes while the task it follows is planning or running, in the orchestrator\'s words', () => {
   assert.equal(waitReason('draft'), 'Wait for the plan to be ready before sending more.');
-  for (const s of ['approved', 'funded', 'running', 'aggregating', 'closing']) assert.equal(waitReason(s), 'Wait for this run to finish, or stop it, before sending more.', s);
+  for (const s of ['approved', 'funded', 'running', 'aggregating']) assert.equal(waitReason(s), 'Wait for this run to finish, or stop it, before sending more.', s);
   for (const s of ['planned', 'closed', 'failed', 'cancelled', 'killed']) assert.equal(waitReason(s), null, s);
+  // Closing: the report is written and only the refund is left, so the run has finished and takes a follow-up.
+  assert.equal(waitReason('closing'), null);
+  assert.equal(waitReason('closing', true), null);
   // The chain ledger: an approved plan waits for its funding, and no run has started.
   assert.equal(waitReason('approved', true), 'Fund or cancel the plan above before sending more.');
   assert.equal(waitReason('running', true), 'Wait for this run to finish, or stop it, before sending more.');
@@ -105,6 +108,7 @@ test('the placeholder says what a message does there', () => {
   assert.equal(placeholderFor(at('planned'), '1.5'), 'Send to revise the plan at 1.50 USDC, or say what to change');
   assert.equal(placeholderFor(at('closed'), '3.00'), 'Ask a follow-up, like going deeper on one part');
   assert.equal(placeholderFor(at('closed'), '5'), 'Send to plan this task again at 5.00 USDC');
+  assert.equal(placeholderFor(at('closing'), '3.00'), 'Ask a follow-up, like going deeper on one part'); // finished, refund on its way
   for (const s of ['failed', 'cancelled', 'killed']) assert.equal(placeholderFor(at(s), '3.00'), 'Change the task, or try it again', s);
   assert.equal(placeholderFor(at('failed'), '10'), 'Send to plan this task again at 10.00 USDC');
   assert.equal(placeholderFor(at('running'), '1'), 'Wait for this run to finish, or stop it, before sending more.');

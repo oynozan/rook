@@ -789,6 +789,20 @@ test('a close that keeps failing after the report keeps the report and the task 
   } finally { await orch.close(); }
 });
 
+test('a run whose report is written takes a follow-up while its refund is still under way', async () => {
+  process.env.ROOK_DB = join(dir, 'closing-follow-up.sqlite');
+  const orch = await start(0);
+  try {
+    const id = await fundedAndWorking(orch, 'alpha', 'cu');
+    failing.set('close', 99);
+    await deliverAndPay(orch, id, 'cu');
+    await until(async () => { const x = await snap(orch, id); return x.task.status === 'closing' && x.final_result ? x : false; });
+    const follow = await call(`${orch.url}/tasks`, { prompt: 'beta', budget_usdc: '1', parent_id: id });
+    assert.deepEqual([follow.status, follow.parent_id], ['planned', id]);
+    assert.equal((await snap(orch, id)).task.status, 'closing'); // the refund goes on beside it
+  } finally { await orch.close(); failing.clear(); }
+});
+
 test("a return whose answer was lost: the next try finds the subtask Returned on the contract, books it and closes, never mark_empty", async () => {
   process.env.ROOK_DB = join(dir, 'lost-return.sqlite');
   const orch = await start(0);

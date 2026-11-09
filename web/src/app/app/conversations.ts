@@ -63,7 +63,8 @@ export function revisedPlan(chain: TaskSummary[]): string | null {
   return head.status === 'planned' ? head.id : null;
 }
 
-const RUNNING = new Set(['approved', 'funded', 'running', 'aggregating', 'closing']);
+// Not 'closing': a run is closing only once its report is written, so it has finished and only its refund is left.
+const RUNNING = new Set(['approved', 'funded', 'running', 'aggregating']);
 
 /**
  * Why nothing can be sent after a task in this status yet, in the orchestrator's words (it refuses the same); null when
@@ -122,5 +123,5 @@ export function placeholderFor(current: TaskSummary | null, budget: string, chai
   const usdc = changedBudget(budget, current);
   if (current.status === 'planned') return usdc ? `Send to revise the plan at ${usdc} USDC, or say what to change` : 'Change the plan, or ask a follow-up';
   if (usdc) return `Send to plan this task again at ${usdc} USDC`;
-  return current.status === 'closed' ? 'Ask a follow-up, like going deeper on one part' : 'Change the task, or try it again';
+  return current.status === 'closed' || current.status === 'closing' ? 'Ask a follow-up, like going deeper on one part' : 'Change the task, or try it again';
 }
