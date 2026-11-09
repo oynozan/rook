@@ -18,6 +18,8 @@ test("a planner failure reads in plain words, never the services' raw text", () 
     ['planner: planner LLM failed: LLM plan.draft returned invalid JSON twice: [ { "origin": "array", "code": "too_big", "maximum": 3, "path": [ "subtasks", 2, "search_terms" ] } ]', /^The planning model gave an answer Rook couldn't use/],
     ['planner: planner LLM failed: no JSON object in model output', /^The planning model gave an answer Rook couldn't use/],
     ['planner: planner LLM failed: NEAR AI 402 for plan.draft: {"error":{"type":"no_limit_configured"}}', /^NEAR AI has no credits/],
+    // Any other 402 is the same story (credits used up): no "try again", which can't help.
+    ['planner: planner LLM failed: NEAR AI 402 for plan.draft: {"error":{"type":"insufficient_balance","message":"Credits exhausted"}}', /^NEAR AI has no credits available for Rook, so the planning model could not run\.$/],
     ['planner: planner LLM failed: NEAR AI 401 for plan.draft: {"error":"invalid api key"}', /^NEAR AI rejected Rook's API key/],
     ['planner: planner LLM failed: LLM cost guard: 1.0200 USD spent in the last 24 h (0.0000 in flight), limit ROOK_LLM_MAX_USD=1 per day', /daily spending limit/],
     // Anything else internal gets the plain fallback, never the raw text.
@@ -33,6 +35,12 @@ test("a planner failure reads in plain words, never the services' raw text", () 
   // The planner's answer to a message that isn't a task is a sentence for the user (a 422, kept as is): shown as is.
   const notATask = 'That reads like a reply, not a task: to run a plan, use its button; to start something new, say what you want done.';
   assert.equal(plannerReason(notATask), notATask);
+  // Tasks stored by older services carry it behind "planner: ": still the sentence, not "hit a problem".
+  assert.equal(plannerReason(`planner: ${notATask}`), notATask);
+  const fallback = 'This does not read as a task Rook can plan: say what you want done.';
+  assert.equal(plannerReason(`planner: ${fallback}`), fallback);
+  // Only the planner's own sentence: model errors that happen to say it are still internal.
+  assert.match(plannerReason('planner: planner LLM failed: NEAR AI 400 for plan.draft: not a task'), /^Rook's planner hit a problem/);
 });
 
 test('a part Rook does itself says the true reason: no fitting agent, or a budget too small for the agents found', () => {

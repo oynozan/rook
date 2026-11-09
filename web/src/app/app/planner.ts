@@ -13,7 +13,8 @@ export function plannerReason(error: string): string {
   const why = error.slice('planner: '.length);
   // NEAR AI, the model Rook plans with (services/src/shared/llm.ts, wrapped by the planner as "planner LLM failed: ...").
   if (why.startsWith('planner LLM failed: ')) {
-    if (/no_limit_configured|No spending limit/i.test(why)) return 'NEAR AI has no credits set up for Rook, so the planning model could not run.';
+    // 402 is NEAR AI refusing to bill Rook (no spending limit set up, or the credits used up): a retry can't help.
+    if (/NEAR AI 402\b|no_limit_configured|No spending limit/i.test(why)) return 'NEAR AI has no credits available for Rook, so the planning model could not run.';
     if (/NEAR AI 401|invalid api key|unauthorized/i.test(why)) return "NEAR AI rejected Rook's API key, so the planning model could not run.";
     if (/LLM cost guard/.test(why)) return "Rook's planner reached its daily spending limit. Try again later.";
     if (/NEAR AI (429|5\d\d)\b|failed: (fetch failed|terminated)/.test(why)) return 'The planning model is busy or out of reach right now. Try again in a minute.';
@@ -25,6 +26,8 @@ export function plannerReason(error: string): string {
   if (/^(fetch failed|terminated|other side closed|planner ended without a plan|planner answered HTTP 5)|ECONNREFUSED|ECONNRESET/.test(why)) {
     return "Rook's planner could not be reached. Try again in a minute.";
   }
+  // Services from before the not-a-task sentence was kept as is stored it with the prefix too: still the user's sentence.
+  if (!why.startsWith('planner LLM failed: ') && /not a task|read as a task Rook can plan/.test(why)) return why;
   return "Rook's planner hit a problem. Try again in a moment.";
 }
 
