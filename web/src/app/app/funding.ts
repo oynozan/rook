@@ -1,8 +1,8 @@
 // Funding a task from the browser (SHARED API DECISION 4): the human's USDC ft_transfer_call to the budget contract,
 // then reading the contract's NEP-297 "task_created" event from the outcome. Pure functions, no Next.js or Node imports,
 // so the browser and the tests both use them.
-import type { Network } from './network';
-import type { PlanView } from './orchestrator';
+import { rpcFor, type Network } from './network';
+import type { Mode, PlanView } from './orchestrator';
 
 /**
  * What POST /tasks/:id/approve returns in chain mode. Any account funds its own task: `funder` is the signed-in account
@@ -16,7 +16,7 @@ export type Funding = {
 
 /**
  * Atomic USDC (6 decimals) as the amount that really moves: at least 2 decimals, up to 6 (3000000 -> "3.00",
- * 2999000 -> "2.999", 5000 -> "0.005"). No floats, like the services' formatUsdc.
+ * 2999000 -> "2.999", 5000 -> "0.005"). No floats, like the services' formatUsdc. The web app's one USDC formatter.
  */
 export function usdc(atomic: string | number | bigint): string {
   let a: bigint;
@@ -24,22 +24,6 @@ export function usdc(atomic: string | number | bigint): string {
   const neg = a < 0n, v = neg ? -a : a;
   const frac = (v % 1_000_000n).toString().padStart(6, '0').replace(/0{1,4}$/, '');
   return `${neg ? '-' : ''}${v / 1_000_000n}.${frac}`;
-}
-
-/** A budget as typed ("2.999", "3") shown the same way; anything that isn't an amount, as typed. */
-export function typedUsdc(s: string): string {
-  const m = s.trim().match(/^(\d+)(?:\.(\d{1,6}))?$/);
-  return m ? usdc(BigInt(m[1]) * 1_000_000n + BigInt((m[2] ?? '').padEnd(6, '0'))) : s.trim();
-}
-
-/**
- * Why the funding instructions didn't load, as a sentence. The orchestrator reads its contract's settings from NEAR
- * for them, so a chain-gateway or RPC failure says that in plain words; Rook's own sentences (services down, signed
- * out) stay as they are.
- */
-export function fundingLoadReason(message: string): string {
-  if (/fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|-> \d{3}$|NEAR RPC|chain-gateway/i.test(message)) return "It couldn't read the Rook contract's settings from NEAR just now.";
-  return message.replace(/\.?$/, '.');
 }
 
 /** The account whose wallet must send the funding, or null if any account may. */
@@ -187,6 +171,43 @@ export function fundingMismatch(c: Extract<FundingResult, { kind: 'created' }>, 
 }
 
 /**
+ * The page's own funding transfer for a task, as its tab keeps it (sessionStorage) until Rook runs it or it moved no
+ * USDC: a contract task it created, or only its hash while that isn't read yet. The server keeps it too, but only with a
+ * session; when the session ends mid-funding, this is what still knows the way back to that USDC.
+ */
+export type KeptTransfer = { contract_task_id: string | null; tx_hash: string | null };
+
+export const keptTransferKey = (task_id: string) => `rook:funding:${task_id}`;
+
+/** A NEAR transaction hash, and a contract task id, as the page and the web server accept them. */
+export const TX_HASH = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/;
+export const CONTRACT_TASK = /^[0-9a-z]{1,20}$/;
+
+/** A transfer to keep for `account`, as stored; null when there is nothing to keep (the entry goes). */
+export function keptValue(account: string, t: KeptTransfer | null): string | null {
+  return t && (t.contract_task_id || t.tx_hash) ? JSON.stringify({ account, contract_task_id: t.contract_task_id, tx_hash: t.tx_hash }) : null;
+}
+
+/**
+ * What the funding step restores from a kept transfer when it mounts: `made` (the contract task it created) or `ownTx`
+ * (a hash still to read). Only `account`'s, and only when the server holds no live record (its record wins), nor says
+ * that this transfer's USDC already came back.
+ */
+export function restoreKept(raw: string | null, account: string, sent: { contract_task_id: string | null; tx_hash: string | null; refunded: boolean } | null):
+  { made: { contract_task_id: string; tx_hash: string | null } | null; ownTx: string | null } {
+  const none = { made: null, ownTx: null };
+  if (sent && !sent.refunded) return none;
+  let k: Record<string, unknown> | null = null;
+  try { k = JSON.parse(raw ?? 'null'); } catch { /* not ours */ }
+  if (!k || typeof k !== 'object' || k.account !== account) return none;
+  const tx = typeof k.tx_hash === 'string' && TX_HASH.test(k.tx_hash) ? k.tx_hash : null;
+  const cid = typeof k.contract_task_id === 'string' && CONTRACT_TASK.test(k.contract_task_id) ? k.contract_task_id : null;
+  if (sent?.refunded && ((cid && sent.contract_task_id === cid) || (tx && sent.tx_hash === tx))) return none;
+  if (cid) return { made: { contract_task_id: cid, tx_hash: tx }, ownTx: null };
+  return tx ? { made: null, ownTx: tx } : none;
+}
+
+/**
  * Whose transfer a looked-up hash is. 'own': the one this page waits on (its wallet returned that hash). 'other': any
  * other hash while it waits, which never stands in for that transfer (it would be forgotten, and a second one offered).
  * 'unsure': the page knows no hash of its own (the wallet errored or returned none), so a paste is all it has.
@@ -247,36 +268,68 @@ export function readCloseOutcome(outcome: unknown, contractId: string, taskId: s
 
 export type UsdcBalance = { balance: bigint; registered: boolean };
 
+/** How long one NEAR RPC view may take. A read that hangs fails instead, so no step waits on it forever. */
+const VIEW_MS = 5_000;
+
+/** A contract's view method, read from a NEAR RPC at optimistic finality (the wallet's own view). Throws when it can't read. */
+async function viewFunction(rpc: string, contract: string, method_name: string, args: object, fetchImpl: typeof fetch): Promise<unknown> {
+  const r = await fetchImpl(rpc, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 'rook-view', method: 'query', params: {
+      request_type: 'call_function', finality: 'optimistic', account_id: contract, method_name, args_base64: btoa(JSON.stringify(args)),
+    } }),
+    signal: AbortSignal.timeout(VIEW_MS),
+  });
+  const j = await r.json().catch(() => null);
+  const bytes = j?.result?.result;
+  if (!Array.isArray(bytes)) throw new Error(`NEAR RPC could not call ${method_name}: ${j?.error?.cause?.name ?? j?.result?.error ?? `HTTP ${r.status}`}`);
+  return JSON.parse(new TextDecoder().decode(Uint8Array.from(bytes)));
+}
+
 /**
  * What `account` holds of the USDC token (ft_balance_of), and whether the token knows the account at all
  * (storage_balance_of is null for an account never registered), read from a NEAR RPC. Throws when it can't read.
  */
 export async function readUsdcBalance(rpc: string, token: string, account: string, fetchImpl: typeof fetch = fetch): Promise<UsdcBalance> {
-  const view = async (method_name: string): Promise<unknown> => {
-    const r = await fetchImpl(rpc, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 'rook-balance', method: 'query', params: {
-        request_type: 'call_function', finality: 'optimistic', account_id: token, method_name, args_base64: btoa(JSON.stringify({ account_id: account })),
-      } }),
-    });
-    const j = await r.json().catch(() => null);
-    const bytes = j?.result?.result;
-    if (!Array.isArray(bytes)) throw new Error(`NEAR RPC could not call ${method_name}: ${j?.error?.cause?.name ?? j?.result?.error ?? `HTTP ${r.status}`}`);
-    return JSON.parse(new TextDecoder().decode(Uint8Array.from(bytes)));
-  };
+  const view = (method_name: string) => viewFunction(rpc, token, method_name, { account_id: account }, fetchImpl);
   // A token that can't answer storage_balance_of says nothing about registration: only its balance counts then.
   const [balance, storage] = await Promise.all([view('ft_balance_of'), view('storage_balance_of').catch(() => undefined)]);
   if (typeof balance !== 'string' || !/^\d+$/.test(balance)) throw new Error('ft_balance_of returned no amount');
   return { balance: BigInt(balance), registered: storage !== null };
 }
 
-/** Why the wallet can't send `amount_atomic`, said before it opens (the transfer would only fail), or null if it can. */
-export function balanceProblem(b: UsdcBalance, amount_atomic: string, account: string): string | null {
+/**
+ * Whether the Rook contract holds contract task `task_id` (get_task) in the wallet's own view of NEAR, which is ahead of
+ * Rook's (final). Throws when it can't read.
+ */
+export async function contractHasTask(rpc: string, contract: string, task_id: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+  return (await viewFunction(rpc, contract, 'get_task', { task_id }, fetchImpl)) !== null;
+}
+
+/**
+ * Why the wallet can't send `amount_atomic`, or null if it can. Said before the wallet opens (the transfer would only
+ * fail), and earlier still: `at` 'plan' for a plan waiting for approval or funding, 'budget' for the budget a task is
+ * about to be drafted with.
+ */
+export function balanceProblem(b: UsdcBalance, amount_atomic: string, account: string, at: 'plan' | 'budget' = 'plan'): string | null {
   const need = BigInt(amount_atomic);
   if (b.balance >= need) return null;
-  if (!b.registered) return `Your account ${account} isn't registered with the USDC contract on NEAR, so it holds no USDC. Add USDC to it, then fund this plan.`;
-  return `Your wallet holds ${usdc(b.balance)} USDC; this plan needs ${usdc(need)} USDC. Add USDC or draft it again with a smaller budget.`;
+  if (!b.registered) return `Your account ${account} isn't registered with the USDC contract on NEAR, so it holds no USDC. Add USDC to it, then ${at === 'plan' ? 'fund this plan' : 'send the task'}.`;
+  if (at === 'plan') return `Your wallet holds ${usdc(b.balance)} USDC; this plan needs ${usdc(need)} USDC. Add USDC or draft it again with a smaller budget.`;
+  if (b.balance === 0n) return 'Your wallet holds no USDC, and the budget is sent from it. Add USDC first.';
+  return `Your wallet holds ${usdc(b.balance)} USDC, less than this budget. Lower the budget, or add USDC first.`;
+}
+
+/**
+ * Chain mode, before a task is drafted: why the signed-in `account` can't fund a `budget_atomic` budget, so no planning
+ * is paid for a plan its wallet can't fund. Null when it can, without the chain ledger, or when NEAR can't tell (the plan
+ * and the funding step check again).
+ */
+export async function draftShortfall(mode: Pick<Mode, 'ledger' | 'usdc' | 'network'> | null, account: string, budget_atomic: bigint, fetchImpl: typeof fetch = fetch): Promise<string | null> {
+  if (mode?.ledger !== 'chain' || !mode.usdc || (mode.network !== 'mainnet' && mode.network !== 'testnet')) return null;
+  return readUsdcBalance(rpcFor(mode.network), mode.usdc, account, fetchImpl)
+    .then((b) => balanceProblem(b, budget_atomic.toString(), account, 'budget'), () => null);
 }
 
 /**
@@ -295,25 +348,44 @@ export function plainReason(reason: string): string {
   if ((m = r.match(/^budget below the minimum of (\d+)/))) return `the budget is below the contract's minimum of ${usdc(m[1])} USDC`;
   if ((m = r.match(/^\S+ already has (\d+) open tasks/))) return `your account already has ${m[1]} tasks open on the Rook contract, the most it allows; wait for one to close`;
   if (/^contract is killed/.test(r)) return 'the Rook contract is paused and takes no new tasks';
-  if (/LackBalanceForState/.test(r)) return 'the Rook contract is short of NEAR for new tasks; try again later';
+  // NEAR names the signer (signer_id) when the sender can't cover its own storage, and the account (account_id) when a
+  // receipt would leave that account, here the Rook contract, short.
+  if (/LackBalanceForState/.test(r)) {
+    return /signer_id/.test(r) ? "your wallet doesn't hold enough NEAR to pay for the transaction" : 'the Rook contract is short of NEAR for new tasks; try again later';
+  }
   if (/^need 1 to \d+ caps|^caps add up to more than budget|^need reserve_bps/.test(r)) return "the plan's spending limits don't fit the contract's rules; draft the task again";
   // The funder's close_task.
   if (/^unknown task/.test(r)) return 'the contract has no such task any more; its USDC was most likely refunded already';
   if (/^task is already closed/.test(r)) return 'the contract already closed this task';
-  if (/has not returned its leftover|has a transfer in flight|^task is closing/.test(r)) return "part of this task still holds USDC, so the contract can't close it yet; try again in a few minutes";
+  if (/^task is closing/.test(r)) return 'the contract is already closing this task, and its USDC is on its way back to the wallet that funded it';
+  if (/has not returned its leftover|has a transfer in flight/.test(r)) return "part of this task still holds USDC, so the contract can't close it yet; try again in a few minutes";
   return r;
 }
 
-/** The final outcome of a transaction by hash, from a NEAR RPC. Retries while the node hasn't seen it yet. */
+/** How long one ask for a transaction may take: the node itself gives up waiting for execution after about 10 s. */
+const TX_READ_MS = 20_000;
+
+/**
+ * The final outcome of a transaction by hash, from a NEAR RPC. Retries while the node hasn't seen it yet, or doesn't
+ * answer in time.
+ */
 export async function fetchTxOutcome(rpc: string, txHash: string, sender: string, fetchImpl: typeof fetch = fetch, tries = 5): Promise<unknown> {
   let last = 'no answer';
   for (let i = 0; i < tries; i++) {
     if (i) await new Promise((ok) => setTimeout(ok, 2000));
-    const r = await fetchImpl(rpc, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 'rook-funding', method: 'tx', params: { tx_hash: txHash, sender_account_id: sender, wait_until: 'EXECUTED_OPTIMISTIC' } }),
-    });
+    let r: Response;
+    try {
+      r = await fetchImpl(rpc, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 'rook-funding', method: 'tx', params: { tx_hash: txHash, sender_account_id: sender, wait_until: 'EXECUTED_OPTIMISTIC' } }),
+        signal: AbortSignal.timeout(TX_READ_MS),
+      });
+    } catch (e) {
+      if ((e as Error)?.name !== 'TimeoutError') throw e;
+      last = 'no answer in time';
+      continue;
+    }
     const j = await r.json().catch(() => null);
     if (j?.result) return j.result;
     last = j?.error?.cause?.name ?? j?.error?.message ?? `HTTP ${r.status}`;

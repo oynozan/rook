@@ -4,8 +4,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  balanceProblem, closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingLoadReason, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
-  moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, termsOf, txHashOf, typedUsdc, usdc, whoseTransfer, untilFinal, type Funding,
+  balanceProblem, closeTaskTransaction, confirmFailure, contractHasTask, draftShortfall, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
+  keptTransferKey, keptValue, moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, restoreKept, termsOf, txHashOf, usdc,
+  whoseTransfer, untilFinal, type Funding,
 } from './funding';
 
 const F: Funding = {
@@ -35,11 +36,6 @@ test('USDC amounts show what really moves: at least 2 decimals, up to 6, no floa
   assert.equal(usdc('9007199254740993000000'), '9007199254740993.00');
   assert.equal(usdc(-250000n), '-0.25');
   assert.equal(usdc('abc'), '?');
-  // A budget as typed, before the task exists.
-  assert.equal(typedUsdc('2.999'), '2.999');
-  assert.equal(typedUsdc(' 3 '), '3.00');
-  assert.equal(typedUsdc('03.5'), '3.50');
-  assert.equal(typedUsdc('1,5'), '1,5');
 });
 
 test('the transfer: USDC ft_transfer_call to the contract with the approved msg, 1 yoctoNEAR, 100 Tgas', () => {
@@ -102,6 +98,32 @@ test('while the page waits on its own transfer, no other pasted hash stands in f
   assert.equal(whoseTransfer('H1', 'H1'), 'own');
   assert.equal(whoseTransfer('H2', 'H1'), 'other'); // its contract task may match the plan, but H1 would be forgotten
   assert.equal(whoseTransfer('H2', null), 'unsure'); // the wallet errored or returned no hash: the paste is all there is
+});
+
+test('a session that ends mid-funding never loses the way back to the transfer: the tab keeps it and restores it', () => {
+  const H = '9xQ1oFz3pW7Zb6cQx6m3c7cR8mN4m2Qe5yVfK1sLdTzA';
+  assert.equal(keptTransferKey('t_1'), 'rook:funding:t_1');
+  const made = keptValue('ops.near', { contract_task_id: '1a', tx_hash: H });
+  const sentOnly = keptValue('ops.near', { contract_task_id: null, tx_hash: H });
+  assert.equal(keptValue('ops.near', null), null); // nothing unsettled: the entry goes
+  assert.equal(keptValue('ops.near', { contract_task_id: null, tx_hash: null }), null);
+
+  // The server never heard of it (no session when the wallet returned): the contract task to confirm, or the hash to read.
+  assert.deepEqual(restoreKept(made, 'ops.near', null), { made: { contract_task_id: '1a', tx_hash: H }, ownTx: null });
+  assert.deepEqual(restoreKept(sentOnly, 'ops.near', null), { made: null, ownTx: H });
+  // A wallet that returned no hash still has its contract task.
+  assert.deepEqual(restoreKept(keptValue('ops.near', { contract_task_id: '1a', tx_hash: null }), 'ops.near', null), { made: { contract_task_id: '1a', tx_hash: null }, ownTx: null });
+
+  const none = { made: null, ownTx: null };
+  // The server's live record wins; another account's entry, or anything malformed, is never restored.
+  assert.deepEqual(restoreKept(made, 'ops.near', { contract_task_id: '1b', tx_hash: null, refunded: false }), none);
+  assert.deepEqual(restoreKept(made, 'alice.near', null), none);
+  for (const raw of [null, '', 'nope', '[]', JSON.stringify({ account: 'ops.near', contract_task_id: 'X; drop', tx_hash: 'short' })]) {
+    assert.deepEqual(restoreKept(raw, 'ops.near', null), none, String(raw));
+  }
+  // That transfer's USDC already came back (the funder's refund): nothing to confirm. A later transfer still counts.
+  assert.deepEqual(restoreKept(made, 'ops.near', { contract_task_id: '1a', tx_hash: H, refunded: true }), none);
+  assert.deepEqual(restoreKept(made, 'ops.near', { contract_task_id: '19', tx_hash: 'other', refunded: true }), { made: { contract_task_id: '1a', tx_hash: H }, ownTx: null });
 });
 
 test('a failed confirm offers the refund only when Rook will never run that contract task', () => {
@@ -217,6 +239,24 @@ test('fetches the outcome by hash with the tx method, retrying while the node ha
   await assert.rejects(fetchTxOutcome('http://rpc', 'H', 'ops.near', never, 3), /INVALID_TRANSACTION/);
 });
 
+test('a NEAR RPC that never answers the transaction read is given up on, never waited on forever', async () => {
+  let calls = 0;
+  const signals: unknown[] = [];
+  const hung = (async (_url: string, init: RequestInit) => {
+    signals.push(init.signal);
+    if (++calls === 1) throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    return new Response(JSON.stringify({ result: { receipts_outcome: [] } }));
+  }) as unknown as typeof fetch;
+  assert.deepEqual(await fetchTxOutcome('http://rpc', 'H', 'ops.near', hung, 2), { receipts_outcome: [] });
+  assert.equal(calls, 2); // the timed-out ask was made again
+  assert.ok(signals.every((s) => s instanceof AbortSignal));
+  const always = (async () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); }) as unknown as typeof fetch;
+  await assert.rejects(fetchTxOutcome('http://rpc', 'H', 'ops.near', always, 2), /no answer in time/);
+  // Any other failure to reach the node ends the read at once, as before.
+  const down = (async () => { throw new TypeError('fetch failed'); }) as unknown as typeof fetch;
+  await assert.rejects(fetchTxOutcome('http://rpc', 'H', 'ops.near', down, 3), /fetch failed/);
+});
+
 test('confirming retries only while the just-created contract task is not final yet', async () => {
   let n = 0;
   const lagging = async () => (++n < 3 ? { ok: false, message: 'no contract task 1a' } : { ok: true });
@@ -242,15 +282,18 @@ test('a task stopped before its funding was bound never ran, though the kill add
   assert.equal(moneyMoved({ ledger: { spent_atomic: '0' }, receipts: [] }, []), true);
 });
 
+/** A NEAR RPC that answers view calls by method name (an Error: the RPC's error), recording each request body. */
+const viewRpc = (answers: Record<string, unknown>, bodies: any[] = []) => (async (_url: string, init: RequestInit) => {
+  const body = JSON.parse(String(init.body));
+  bodies.push(body);
+  const a = answers[body.params.method_name];
+  if (a instanceof Error) return new Response(JSON.stringify({ error: { cause: { name: a.message } } }));
+  return new Response(JSON.stringify({ result: { result: [...new TextEncoder().encode(JSON.stringify(a))], logs: [] } }));
+}) as unknown as typeof fetch;
+
 test("reads the wallet's USDC balance and registration from NEAR before the wallet opens", async () => {
   const bodies: any[] = [];
-  const rpc = (answers: Record<string, unknown>) => (async (_url: string, init: RequestInit) => {
-    const body = JSON.parse(String(init.body));
-    bodies.push(body);
-    const a = answers[body.params.method_name];
-    if (a instanceof Error) return new Response(JSON.stringify({ error: { cause: { name: a.message } } }));
-    return new Response(JSON.stringify({ result: { result: [...new TextEncoder().encode(JSON.stringify(a))], logs: [] } }));
-  }) as unknown as typeof fetch;
+  const rpc = (answers: Record<string, unknown>) => viewRpc(answers, bodies);
 
   const held = await readUsdcBalance('http://rpc', F.usdc, 'alice.near', rpc({ ft_balance_of: '2130000', storage_balance_of: { total: '1250000000000000000000', available: '0' } }));
   assert.deepEqual(held, { balance: 2_130_000n, registered: true });
@@ -262,12 +305,51 @@ test("reads the wallet's USDC balance and registration from NEAR before the wall
   assert.deepEqual(await readUsdcBalance('http://rpc', F.usdc, 'alice.near', rpc({ ft_balance_of: '5', storage_balance_of: new Error('MethodNotFound') })), { balance: 5n, registered: true });
   // Can't read the balance: the caller lets the transfer go ahead.
   await assert.rejects(readUsdcBalance('http://rpc', F.usdc, 'alice.near', rpc({ ft_balance_of: new Error('UNKNOWN_ACCOUNT'), storage_balance_of: null })), /UNKNOWN_ACCOUNT/);
+  // Every read has a deadline: an RPC that hangs fails the check (so the transfer goes ahead) instead of holding it.
+  const signals: unknown[] = [];
+  const hung = (async (_url: string, init: RequestInit) => {
+    signals.push(init.signal);
+    throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+  }) as unknown as typeof fetch;
+  await assert.rejects(readUsdcBalance('http://rpc', F.usdc, 'alice.near', hung), /timeout/);
+  assert.equal(signals.length, 2);
+  assert.ok(signals.every((s) => s instanceof AbortSignal));
 
   // What the page says, before any signature.
   assert.equal(balanceProblem(held, '3000000', 'alice.near'), 'Your wallet holds 2.13 USDC; this plan needs 3.00 USDC. Add USDC or draft it again with a smaller budget.');
   assert.equal(balanceProblem(held, '2130000', 'alice.near'), null);
   assert.equal(balanceProblem({ balance: 5_000n, registered: true }, '2999000', 'alice.near'), 'Your wallet holds 0.005 USDC; this plan needs 2.999 USDC. Add USDC or draft it again with a smaller budget.');
   assert.match(balanceProblem({ balance: 0n, registered: false }, '3000000', 'new.near') ?? '', /^Your account new\.near isn't registered with the USDC contract on NEAR, so it holds no USDC\./);
+});
+
+test('a wallet short of the budget hears it before the task is drafted, so no planning is paid for a plan it cannot fund', async () => {
+  const chain = { ledger: 'chain' as const, usdc: F.usdc, network: 'mainnet' as const };
+  const bodies: any[] = [];
+  const wallet = (balance: string, storage: unknown = { total: '1', available: '0' }) => viewRpc({ ft_balance_of: balance, storage_balance_of: storage }, bodies);
+  assert.equal(await draftShortfall(chain, 'alice.near', 3_000_000n, wallet('2130000')), 'Your wallet holds 2.13 USDC, less than this budget. Lower the budget, or add USDC first.');
+  assert.equal(bodies[0].params.account_id, F.usdc);
+  assert.equal(bodies[0].params.args_base64, btoa('{"account_id":"alice.near"}')); // the signed-in account, which funds its own task
+  assert.equal(await draftShortfall(chain, 'alice.near', 3_000_000n, wallet('0')), 'Your wallet holds no USDC, and the budget is sent from it. Add USDC first.');
+  assert.match(await draftShortfall(chain, 'new.near', 3_000_000n, wallet('0', null)) ?? '', /^Your account new\.near isn't registered with the USDC contract on NEAR, so it holds no USDC\. Add USDC to it, then send the task\.$/);
+  assert.equal(await draftShortfall(chain, 'alice.near', 3_000_000n, wallet('3000000')), null);
+  // NEAR can't tell: the draft goes ahead (the plan and the funding step check again).
+  assert.equal(await draftShortfall(chain, 'alice.near', 3_000_000n, viewRpc({ ft_balance_of: new Error('UNKNOWN_ACCOUNT') })), null);
+  // No chain ledger, or an orchestrator that names no token: nothing is funded from the wallet, nothing is read.
+  const untouched = (async () => { throw new Error('must not read'); }) as unknown as typeof fetch;
+  for (const mode of [null, { ...chain, ledger: 'sim' as const }, { ...chain, usdc: null }, { ...chain, network: 'sim' as const }]) {
+    assert.equal(await draftShortfall(mode, 'alice.near', 3_000_000n, untouched), null, JSON.stringify(mode));
+  }
+});
+
+test("a contract task Rook can't see after its tries is looked up in the wallet's own view: gone, or only late", async () => {
+  const bodies: any[] = [];
+  assert.equal(await contractHasTask('http://rpc', 'rook.near', '1a', viewRpc({ get_task: null }, bodies)), false); // refunded and deleted
+  assert.deepEqual(bodies[0].params, {
+    request_type: 'call_function', finality: 'optimistic', account_id: 'rook.near', method_name: 'get_task', args_base64: btoa('{"task_id":"1a"}'),
+  });
+  assert.equal(await contractHasTask('http://rpc', 'rook.near', '1a', viewRpc({ get_task: { funder: 'ops.near', budget: '3000000', status: 'Open' } })), true);
+  // Can't read it: the caller says nothing is gone.
+  await assert.rejects(contractHasTask('http://rpc', 'rook.near', '1a', viewRpc({ get_task: new Error('UNKNOWN_ACCOUNT') })), /UNKNOWN_ACCOUNT/);
 });
 
 test('the raw texts a failed transfer or refund carries read in plain words', () => {
@@ -280,23 +362,18 @@ test('the raw texts a failed transfer or refund carries read in plain words', ()
     ['need 1 to 8 caps, each > 0', "the plan's spending limits don't fit the contract's rules; draft the task again"],
     ['contract is killed', 'the Rook contract is paused and takes no new tasks'],
     ['{"ActionError":{"index":0,"kind":{"LackBalanceForState":{"account_id":"rook.near","amount":"1"}}}}', 'the Rook contract is short of NEAR for new tasks; try again later'],
+    // The same error about the sender: the wallet, not the contract, is short of NEAR.
+    ['{"InvalidTxError":{"LackBalanceForState":{"signer_id":"alice.near","amount":"1820000000000000000000"}}}', "your wallet doesn't hold enough NEAR to pay for the transaction"],
     ['Smart contract panicked: unknown task', 'the contract has no such task any more; its USDC was most likely refunded already'],
     ['Smart contract panicked: subtask 2 has not returned its leftover', "part of this task still holds USDC, so the contract can't close it yet; try again in a few minutes"],
+    ['Smart contract panicked: subtask 1 has a transfer in flight', "part of this task still holds USDC, so the contract can't close it yet; try again in a few minutes"],
+    // A close already under way: the refund is coming, nothing is stuck.
+    ['Smart contract panicked: task is closing', 'the contract is already closing this task, and its USDC is on its way back to the wallet that funded it'],
   ];
   for (const [raw, want] of plain) assert.equal(plainReason(raw), want, raw);
   // Anything else as NEAR gave it, without the panic prefix.
   assert.equal(plainReason('Smart contract panicked: something new'), 'something new');
   assert.equal(plainReason('the contract is short of NEAR for new tasks; try again later'), 'the contract is short of NEAR for new tasks; try again later');
-});
-
-test('funding instructions that did not load say why in a sentence', () => {
-  // The orchestrator couldn't read the contract's settings (chain-gateway down, or NEAR RPC failing).
-  for (const m of ['fetch failed', 'GET http://127.0.0.1:7104/config -> 502', 'NEAR RPC query failed: TIMEOUT_ERROR']) {
-    assert.equal(fundingLoadReason(m), "It couldn't read the Rook contract's settings from NEAR just now.", m);
-  }
-  // Rook's own sentences stay, ending in a full stop.
-  assert.equal(fundingLoadReason("Rook's services aren't running. Start them with pnpm dev, then try again."), "Rook's services aren't running. Start them with pnpm dev, then try again.");
-  assert.equal(fundingLoadReason("This page couldn't reach Rook's web server"), "This page couldn't reach Rook's web server.");
 });
 
 test('wallet cancellations read as a choice', () => {

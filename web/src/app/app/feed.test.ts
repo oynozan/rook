@@ -36,6 +36,19 @@ test("Rook's errors: retries and notes muted, real problems alert, no ids or raw
   assert.equal(problemLine({ kind: 'something-new', message: 'raw' })?.text, 'Rook hit a problem on its side.');
 });
 
+test('a part given up on ends the wait on its agent, so the run never says "Waiting on" an agent that is done', () => {
+  // Abandoned: the agent its latest hire went to.
+  assert.equal(problemLine({ kind: 'abandoned', message: 's2 abandoned: NEAR RPC send_tx: INVALID_TRANSACTION {}' }, 'Prices', 'luigi')?.ended, 'luigi');
+  // Unchecked: the agent the event names, else that hire's.
+  assert.equal(problemLine({ kind: 'unchecked', agent_handle: 'luigi', message: 'evaluation of luigi failed, subtask abandoned unjudged: down' }, 'Prices', 'mario')?.ended, 'luigi');
+  assert.equal(problemLine({ message: 'evaluation of luigi failed, subtask abandoned unjudged: down' }, 'Prices')?.ended, 'luigi');
+  assert.equal(problemLine({ kind: 'unchecked', message: 'evaluation failed' }, 'Prices', 'mario')?.ended, 'mario');
+  // Nothing hired for that part, or a line that doesn't end a part: nobody's wait ends.
+  assert.equal(problemLine({ kind: 'abandoned', message: 's2 abandoned: x' }, 'Prices')?.ended, undefined);
+  assert.equal(problemLine({ kind: 'eval_retry', message: 'evaluator attempt 1 failed, retrying: x' }, 'Prices', 'luigi')?.ended, undefined);
+  assert.equal(problemLine({ kind: 'close', message: 'x' }, undefined, 'luigi')?.ended, undefined);
+});
+
 test('error events stored before they had a kind are read from their message', () => {
   assert.equal(problemLine({ message: 'evaluator attempt 2 failed, retrying: fetch failed' }, 'Prices')?.tone, 'muted');
   assert.match(problemLine({ message: 'web-research: the indexer does not show the payment transaction yet; the balance already showed the payment, so the receipt stands without payment_tx' })!.text, /^The payment to web-research went through/);

@@ -3,9 +3,9 @@
 import { revalidatePath } from 'next/cache';
 import { forgetFundingOf, forgetUnreadFunding, fundingSent, giveBackDraftSlot, markFundingRefunded, recordFundingSent, takeDraftSlot } from './db';
 import { checkDraft, draftRefusal } from './draft';
-import { untilFinal, type Funding } from './funding';
+import { CONTRACT_TASK, draftShortfall, TX_HASH, untilFinal, type Funding } from './funding';
 import { approveTask, cancelTask, createTask, fundedTask, getMode, getTask, killTask, OrchestratorDown, OrchestratorError } from './orchestrator';
-import { actionRefusal, type TaskAction } from './refusals';
+import { actionRefusal, fundingCallFailure, type TaskAction } from './refusals';
 import { currentAccount } from './session';
 
 export type DraftResult =
@@ -13,7 +13,11 @@ export type DraftResult =
   | { kind: 'invalid'; prompt?: string; budget?: string }
   | { kind: 'error'; message: string };
 
-export type ActResult = { ok: true; funding?: Funding } | { ok: false; message: string };
+/**
+ * `raw`: the message is the orchestrator's own refusal (a 4xx), which the funding step reads (funding.ts confirmFailure)
+ * and words for the page. Without it the message is a sentence for people, shown as it is.
+ */
+export type ActResult = { ok: true; funding?: Funding } | { ok: false; message: string; raw?: true };
 
 // Each draft spends NEAR AI credit on the planner, so one account can't drain it. ponytail: per account only; many
 // throwaway accounts still add up, so the planner's own ROOK_LLM_MAX_USD cap is the backstop.
@@ -33,8 +37,13 @@ export async function draftTask(input: { prompt: string; budget: string }): Prom
   if (!owner) return { kind: 'error', message: signInFirst() };
 
   // The composer's own checks again, with the orchestrator's budget limits, all before a draft slot is taken.
-  const check = checkDraft({ prompt: String(input?.prompt ?? ''), budget: String(input?.budget ?? '') }, await getMode().catch(() => null));
+  const mode = await getMode().catch(() => null);
+  const check = checkDraft({ prompt: String(input?.prompt ?? ''), budget: String(input?.budget ?? '') }, mode);
   if (!check.ok) return { kind: 'invalid', prompt: check.prompt, budget: check.budget };
+  // Chain mode: the signed-in wallet funds the plan, so one that can't cover the budget hears it now, before any
+  // planning is paid for, rather than after the plan is drafted.
+  const short = await draftShortfall(mode, owner, check.atomic);
+  if (short) return { kind: 'invalid', budget: short };
 
   const slot = takeDraftSlot(owner, DRAFTS_PER_HOUR, 3_600_000);
   if (!slot.ok) {
@@ -57,7 +66,9 @@ export async function draftTask(input: { prompt: string; budget: string }): Prom
 
 /**
  * `action`: a task page button, whose refusals go back in plain words (the orchestrator's own go to the server log).
- * Without one they go back as the orchestrator wrote them: the funding step reads them (funding.ts confirmFailure).
+ * Without one (the funding step's calls), the orchestrator's refusals go back as it wrote them, marked raw, for the
+ * funding step to read; anything else (a 5xx, the chain-gateway down behind it, a service token that differs) only says
+ * the transfer couldn't be checked, and its text goes to the server log.
  */
 async function act(run: () => Promise<object & { funding?: Funding }>, action?: TaskAction): Promise<ActResult> {
   try {
@@ -67,8 +78,13 @@ async function act(run: () => Promise<object & { funding?: Funding }>, action?: 
   } catch (e) {
     if (e instanceof OrchestratorDown) return { ok: false, message: DOWN };
     const message = e instanceof Error ? e.message : '';
-    if (!action) return { ok: false, message: message || 'That did not work. Try again.' };
-    const plain = actionRefusal(action, e instanceof OrchestratorError ? e.status : null, message);
+    const status = e instanceof OrchestratorError ? e.status : null;
+    if (!action) {
+      const out = fundingCallFailure(status, message);
+      if (!out.raw) console.error('[web] funding:', message || e);
+      return { ok: false, ...out };
+    }
+    const plain = actionRefusal(action, status, message);
     if (!plain.known) console.error(`[web] ${action}:`, message || e);
     return { ok: false, message: plain.message };
   }
@@ -80,13 +96,13 @@ async function asOwner(action: TaskAction, run: (owner: string) => Promise<objec
   return act(() => run(owner), action);
 }
 
-/** Simulation: starts the run. Chain mode: returns the funding transfer for the wallet (again, if asked again). */
+/** Simulation: starts the run. Chain mode: returns the funding transfer for the wallet. */
 export async function approve(id: string) { return asOwner('approve', (owner) => approveTask(id, owner)); }
+/** Chain mode, approved and not funded yet (after a reload, say): the funding transfer again, with its own words for a failure. */
+export async function fundingInstructions(id: string) { return asOwner('fund', (owner) => approveTask(id, owner)); }
 export async function cancel(id: string) { return asOwner('cancel', (owner) => cancelTask(id, owner)); }
 export async function stop(id: string) { return asOwner('stop', (owner) => killTask(id, owner)); }
 
-const TX_HASH = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/;
-const CONTRACT_TASK = /^[0-9a-z]{1,20}$/;
 const txOf = (v: unknown) => (typeof v === 'string' && TX_HASH.test(v) ? v : null);
 
 // Funding records are keyed by task and signed-in account, so writing one needs no orchestrator: a record only ever
@@ -110,6 +126,16 @@ export async function forgetTransfer(id: string, tx_hash: string) {
   const owner = await currentAccount();
   const tx = txOf(tx_hash);
   if (owner && tx) forgetUnreadFunding(String(id), owner, tx);
+}
+
+/**
+ * The page found no contract task `contract_task_id` on the contract (refunded and deleted, or an old transfer's), after
+ * Rook couldn't see it either: no run can start from it, so the record goes and the plan can be funded again.
+ */
+export async function forgetContractTask(id: string, contract_task_id: string) {
+  const owner = await currentAccount();
+  const cid = String(contract_task_id ?? '');
+  if (owner && CONTRACT_TASK.test(cid)) forgetFundingOf(String(id), owner, cid);
 }
 
 /**
