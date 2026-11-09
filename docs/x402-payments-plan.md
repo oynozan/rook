@@ -200,6 +200,11 @@ Rook runs on NEAR mainnet. Everything below can be checked on nearblocks.io.
 | Role keys rotated after 9 tasks had used 0.12 of the orchestrator key's 0.25 NEAR allowance: new orchestrator key with 1 NEAR | `BR7DBFEvyk5AHCfaP3xUztf5sq2gBqi4TcvNi3L7WPFF` |
 | New signer key with 0.25 NEAR | `7w5uJKrcr2LpD28FfSMuqqC8hCM6Fxxt2CkXqkykrxdn` |
 | 0.2 NEAR to `orch.oynozan.near` for gas | `8QveY1qJXXSimViBEP21UH1RTqaopn6J3UK2FV8WEcvR` |
+| Task 9 funded from the web app (the first task on the new keys): 1.00 USDC, one cap of 0.25 | `AuA88gGpfwG6Mf8HZhgWs88sWhtkWsQ7bH8qgFcogtzs` |
+| Task 9: `cited-web-research-brief` paid 0.15 USDC | `HzUAMzyqNqYtRDhKvJdetNE11uKZKQHCQQsDX4WKFust` |
+| Its receipt (verdict fail: "Monthly active accounts: data not fully extractable") | `DdW5yLMC2MQ4CqjYQ76Z7T3gscQEmBeaPusVaT4VYcWq` |
+| Task 9: re-hire `kaminari-research` paid 0.25 USDC (0.10 left in the sub-account plus a 0.15 top-up from the reserve) | `4FeMBc693qYABmB3Tv12jYEQUM4Jdvwj2vgUcBXHUdFV` |
+| Its receipt (verdict pass) | `28ansicxUiLDbBmetwesFiackNCyGF37xcPrTvUzHg9p` |
 
 | Contract task | Rook task | Hires | Paid | Refunded | Outcome |
 | --- | --- | --- | --- | --- | --- |
@@ -212,6 +217,7 @@ Rook runs on NEAR mainnet. Everything below can be checked on nearblocks.io.
 | 6 | `t_924d21c2`, latest nearcore release and NEAR staking APR, **stopped** 11 s after the hires went out | `cited-web-research-brief` twice (paid on delivery), `taifoon-research` (ended unpaid) | 0.30 | 1.20 | the kill path: no new hires; the unpaid hire released at once and its sub-account returned 0.04 within 13 s; each sub-account waited out its own authorization (the two agents delivered, 40 s and 2 min after Stop), then returned; the close refunded 1.20 2.5 minutes after Stop |
 | 7 | `t_4ad5ea62`, NEAR TVL last week from DefiLlama; **all services killed and restarted** while the hire was out | `cited-web-research-brief` (pass); the self-done summary abandoned | 0.15 | 0.85 | Rook rebuilt the task from contract task 7, followed the hire it had sent, booked the payment and closed. The planned "summarise the finding" subtask ran before the finding existed and failed its checks; the open page stayed on "Running" after the restart |
 | 8 | `t_ac564006`, NEAR staking APR and total staked; services restarted mid-hire again | `cited-web-research-brief` twice (pass, pass) | 0.30 | 0.70 | after both fixes below: the page reconnected by itself and showed the report |
+| 9 | `t_1c0599a8`, NEAR monthly active accounts last month | `cited-web-research-brief` (fail), then `kaminari-research` (pass) | 0.40 | 0.60 | the reserve at work: the first agent delivered after 9 minutes without the figure, the evaluator failed it, Rook topped the sub-account up from the reserve and re-hired the second-ranked agent, whose report passed |
 
 Task 3 ran in the web app (`web/`, branch `feat/web-real-path`) in a headless Chromium. The wallet was an injected near-connect wallet, the way extension wallets plug in, holding `oynozan.near`'s key: it signed the sign-in message and the funding transfer, and nothing else was stubbed.
 
