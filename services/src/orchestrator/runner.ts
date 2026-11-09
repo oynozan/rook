@@ -120,60 +120,91 @@ export async function runTask(ledger: Ledger, t: Task) {
     for (const s of t.subtasks) if (!s.final_outcome && s.tried.length && !s.hires.some((h) => h.agent_handle === s.tried.at(-1))) s.tried.pop();
 
     // One subtask's error (planner /self-do down, evaluator unreachable, a ledger refusal) abandons that subtask
-    // only; the others keep their paid work. Only an abort (kill, shutdown) stops the whole task.
+    // only; the others keep their paid work. Only an abort (kill, shutdown) stops the whole task. A leftover that
+    // failed to go back stays unreturned: closeBooks tries it again.
     const done = new Map(t.subtasks.map((s) => [s.id, deferred()]));
-    await Promise.allSettled(t.subtasks.map((s) => runSubtask(ledger, t, s, done).catch(async (e) => {
+    await Promise.allSettled(t.subtasks.map((s) => runSubtask(ledger, t, s, done).catch((e) => {
       if (signal.aborted) throw e;
       t.llm_calls.push(...paidCalls(e));
-      emit(t, 'error', { message: `${s.id} abandoned: ${msg(e)}` }, s.id);
-      if (!s.final_outcome) finish(t, s, 'abandoned', done);
-      try {
-        if (!s.self_do && ledger.view(t.id)?.subtasks.find((x) => x.n === s.n)?.returned_atomic === null) {
-          await ledgerOp(t, 'returnLeftover', s, () => ledger.returnLeftover(t.id, s.n));
-        }
-      } catch (e2) { emit(t, 'error', { message: `${s.id}: ${msg(e2)}` }, s.id); }
-      setSub(t, s, 'returned');
+      if (s.final_outcome) { // finished: only its returnLeftover can have failed
+        emit(t, 'error', { kind: 'return', message: `${s.id}: returning its leftover failed: ${msg(e)}` }, s.id);
+        return;
+      }
+      emit(t, 'error', { kind: 'abandoned', message: `${s.id} abandoned: ${msg(e)}` }, s.id);
+      finish(t, s, 'abandoned', done);
     })));
     signal.throwIfAborted();
 
-    advance(t, 'aggregating');
-    const subtasks = t.subtasks.map((s) => ({
-      id: s.id, title: s.title, status: s.final_outcome ?? s.status,
-      agent_handle: s.accepted?.agent_handle, deliverable_text: s.accepted?.text,
-    }));
-    let agg: AggregateResult;
-    try {
-      agg = await call<AggregateResult>(config.urls.planner + '/aggregate', { task_id: t.id, prompt: t.prompt, subtasks }, { signal });
-    } catch (e) {
-      // The deliverables are paid for and passed: fall back to the deterministic merge rather than lose them.
+    if (!t.final_result) { // written already when a restart came during the close
+      advance(t, 'aggregating');
+      const subtasks = t.subtasks.map((s) => ({
+        id: s.id, title: s.title, status: s.final_outcome ?? s.status,
+        agent_handle: s.accepted?.agent_handle, deliverable_text: s.accepted?.text,
+      }));
+      let agg: AggregateResult;
+      try {
+        agg = await call<AggregateResult>(config.urls.planner + '/aggregate', { task_id: t.id, prompt: t.prompt, subtasks }, { signal });
+      } catch (e) {
+        // The deliverables are paid for and passed: fall back to the deterministic merge rather than lose them.
+        signal.throwIfAborted();
+        t.llm_calls.push(...paidCalls(e));
+        emit(t, 'error', { kind: 'aggregate', message: `aggregate failed, using the deterministic merge: ${msg(e)}` });
+        const req = { task_id: t.id, prompt: t.prompt, subtasks };
+        agg = { final_markdown: cannedAggregate(req), attribution: subtasks.filter(isMerged).map((s) => ({ subtask_id: s.id, agent_handle: agentOf(s) })), llm_calls: [] };
+      }
       signal.throwIfAborted();
-      t.llm_calls.push(...paidCalls(e));
-      emit(t, 'error', { message: `aggregate failed, using the deterministic merge: ${msg(e)}` });
-      const req = { task_id: t.id, prompt: t.prompt, subtasks };
-      agg = { final_markdown: cannedAggregate(req), attribution: subtasks.filter(isMerged).map((s) => ({ subtask_id: s.id, agent_handle: agentOf(s) })), llm_calls: [] };
+      t.llm_calls.push(...(agg.llm_calls ?? []));
+      // Stored before the close: the report is paid for, so a close that fails (or a restart) never loses it.
+      t.final_result = {
+        final_markdown: agg.final_markdown, attribution: agg.attribution ?? [],
+        abandoned: t.subtasks.filter((s) => s.final_outcome === 'abandoned').map((s) => s.id),
+      };
+      saveTask(t);
     }
-    signal.throwIfAborted();
-    t.llm_calls.push(...(agg.llm_calls ?? []));
 
     advance(t, 'closing');
-    const before = ledger.view(t.id)!; // closed already when the services stopped right after close_task
-    const refunded = before.closed ? before.refunded_atomic : await ledgerOp(t, 'closeTask', null, () => ledger.closeTask(t.id));
+    const refunded = await closeBooks(ledger, t);
     const view = ledger.view(t.id)!;
-    t.final_result = {
-      final_markdown: agg.final_markdown, attribution: agg.attribution ?? [],
-      abandoned: t.subtasks.filter((s) => s.final_outcome === 'abandoned').map((s) => s.id),
-    };
     emit(t, 'final', { ...t.final_result, spent_atomic: view.spent_atomic, refunded_atomic: refunded, reserve_used_atomic: view.reserve_used_atomic });
     setStatus(t, 'closed');
   } catch (e) {
     if (t.status === 'killed') return; // kill() unwinds once this run has stopped
     if (onChain(ledger) && signal.reason?.message === SHUTDOWN) return; // left as it is: the next start restores and resumes it
     t.error = msg(e);
-    emit(t, 'error', { message: t.error });
+    // With the report written, only the close failed: the unwind below keeps returning the money.
+    emit(t, 'error', { kind: t.final_result ? 'close' : 'run', message: t.error });
     setStatus(t, 'failed');
     await unwind(ledger, t, 'salvage');
   } finally {
     run.resolve();
+  }
+}
+
+const CLOSE_TRIES = 5;
+
+/**
+ * Returns what a subtask still holds (its return failed during the run) and closes the task, so the contract refunds
+ * the funder. Retried with backoff: a chain call can fail for a moment (seen on mainnet: send_tx INVALID_TRANSACTION).
+ * An outstanding authorization is not retried here: only the unwind clears it.
+ */
+async function closeBooks(ledger: Ledger, t: Task): Promise<bigint> {
+  const signal = t.abort.signal;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      const v = ledger.view(t.id)!;
+      if (v.closed) return v.refunded_atomic; // closed already when the services stopped right after close_task
+      for (const s of t.subtasks) {
+        if (s.self_do || v.subtasks.find((x) => x.n === s.n)?.returned_atomic !== null) continue;
+        await ledgerOp(t, 'returnLeftover', s, () => ledger.returnLeftover(t.id, s.n));
+        setSub(t, s, 'returned');
+      }
+      return await ledgerOp(t, 'closeTask', null, () => ledger.closeTask(t.id));
+    } catch (e) {
+      signal.throwIfAborted();
+      if (attempt >= CLOSE_TRIES || t.subtasks.some((s) => authorizedNow(ledger, t, s))) throw e;
+      emit(t, 'error', { kind: 'close_retry', message: `closing, attempt ${attempt} failed, retrying: ${msg(e)}` });
+      await sleep(Math.min(config.pollMs, 2000) * attempt, undefined, { signal });
+    }
   }
 }
 
