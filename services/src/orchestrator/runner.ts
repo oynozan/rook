@@ -366,7 +366,8 @@ async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Defer
       pending = null;
       hire = h.paid ? h : await resumeHire(ledger, t, s, h);
     } else {
-      const c = s.candidates.find((x) => !s.tried.includes(x.handle)); // plan order = cheapest first
+      // The plan's order (lowest expected cost first, docs 5.2 step 4), never re-sorted by price here.
+      const c = s.candidates.find((x) => !s.tried.includes(x.handle));
       if (!c) return finish(t, s, 'abandoned', done);
       s.tried.push(c.handle);
       setSub(t, s, 'quoting');

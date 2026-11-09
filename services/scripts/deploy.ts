@@ -2,7 +2,7 @@
 // sub-accounts of the admin), the budget contract, its USDC registration, the two role keys, and the env file
 // `pnpm live` reads. Every step checks the chain first and skips what is already done. contract/README.md, "Mainnet".
 //
-//   pnpm --filter @rook/services exec tsx scripts/deploy.ts [--network mainnet] [--dry]
+//   pnpm --filter @rook/services exec tsx scripts/deploy.ts [--network mainnet] [--dry] [--upgrade]
 //
 // Admin key: ROOK_ADMIN_KEY, or ADMIN_WALLET_PRIVATE_KEY in the repo's .env (read here only, never by a service).
 // New keys go to ~/.rook/accounts/<network>/<account>.json (written before the transaction that uses them), the
@@ -113,7 +113,8 @@ const hash = baseEncode(createHash('sha256').update(code).digest());
 const deployed = (await viewAccount(CONTRACT))?.code_hash;
 const inited = await viewCall(CONTRACT, 'get_config').then(() => true, () => false);
 if (deployed === hash) console.log(`  code ${hash} already deployed`);
-else if (inited) throw new Error(`${CONTRACT} has state and other code (${deployed}); a redeploy may need a state migration: do it by hand`);
+// --upgrade: new code over existing state, for a build whose state layout (the Contract struct) is unchanged.
+else if (inited && !process.argv.includes('--upgrade')) throw new Error(`${CONTRACT} has state and other code (${deployed}): pass --upgrade only if the state layout is unchanged, else migrate by hand`);
 const initArgs = { owner: ADMIN, orchestrator: ORCH, signer: SIGNER, usdc: USDC };
 const acts = [
   ...(deployed === hash ? [] : [actions.deployContract(code)]),

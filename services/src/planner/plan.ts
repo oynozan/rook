@@ -2,8 +2,8 @@
 // No I/O and no LLM here: index.ts gathers search results, selections and quotes, then calls buildPlan.
 import { Ajv } from 'ajv';
 import { z } from 'zod';
-import { AcceptsRow, Criterion, type AgentSummary, type Candidate, type Plan, type PlanSubtask, type X402Config } from '../shared/types.ts';
-import { share } from '../shared/money.ts';
+import { AcceptsRow, Criterion, type AgentHistory, type AgentSummary, type Candidate, type Plan, type PlanSubtask, type X402Config } from '../shared/types.ts';
+import { formatUsdc, share } from '../shared/money.ts';
 
 // Draft as the LLM writes it. Criteria are loose here on purpose: an invalid one is removed with a note
 // (step 8) instead of failing the whole draft. Cross-check `other_subtask` uses draft ids s1..sN by position.
@@ -53,6 +53,7 @@ export type PlanInput = {
   recipients: X402Config['recipients'];
   budget_atomic: bigint;
   reserve_share: number;
+  history?: Record<string, AgentHistory>; // Rook's own verdicts by handle; without it, the market's record alone
 };
 
 export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
@@ -66,18 +67,21 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
   const kept: Kept[] = [];
   let allocated = 0n;
   input.draft.forEach((d, draftIdx) => {
-    const candidates = quotedCandidates(input.selected[draftIdx] ?? [], input.quotes, input.recipients, d.title, notes);
+    const candidates = quotedCandidates(input.selected[draftIdx] ?? [], input.quotes, input.recipients, input.history ?? {}, d.title, notes);
     if (candidates.length === 0) {
       if (d.self_do_ok) kept.push({ draftIdx, d, candidates: [], cap: 0n, self_do: true });
       else dropped.push({ title: d.title, reason: 'no fitting agent' });
       return;
     }
-    // Sorted cheapest first. The cap covers one nearby fallback (a first agent that fails without charge) but never
-    // more than twice the cheapest price, so one expensive candidate cannot inflate what the user locks per subtask;
-    // a pricier fallback is paid by a reserve top-up, and one the reserve cannot cover is dropped below.
-    const cheapest = BigInt(candidates[0].price_atomic);
+    // Ranked by expected cost, so the first hire is not always the cheapest. Over the first two ranked prices,
+    // cap = min(max(first, second), 2 x first): never below the first hire's price, it also covers the second-ranked
+    // fallback (when the first fails without charge) unless that one costs more than twice the first, so one expensive
+    // candidate cannot inflate what the user locks per subtask; a pricier fallback is paid by a reserve top-up, and one
+    // the reserve cannot cover is dropped below. With candidates cheapest first it is min(second, 2 x first) as before.
+    const first = BigInt(candidates[0].price_atomic);
     const second = BigInt(candidates[Math.min(1, candidates.length - 1)].price_atomic);
-    const cap = second < cheapest * 2n ? second : cheapest * 2n;
+    const both = second > first ? second : first;
+    const cap = both < first * 2n ? both : first * 2n;
     if (allocated + cap > allocatable) {
       if (d.self_do_ok) {
         notes.push(`"${d.title}" is self_do: cap ${cap} would exceed the allocatable budget`);
@@ -87,8 +91,9 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
     }
     allocated += cap;
     // A fallback priced above cap + the whole reserve can never be paid; listing it would only stretch the deadline.
+    // Any rank can be dropped (the order is not by price) except the first, whose price the cap always covers.
     const payable = candidates.filter((c) => BigInt(c.price_atomic) <= cap + reserve);
-    for (const c of candidates.slice(payable.length)) notes.push(`"${d.title}": candidate ${c.handle} dropped, price ${c.price_atomic} exceeds cap + reserve`);
+    for (const c of candidates) if (!payable.includes(c)) notes.push(`"${d.title}": candidate ${c.handle} dropped, price ${c.price_atomic} exceeds cap + reserve`);
     kept.push({ draftIdx, d, candidates: payable, cap, self_do: false });
   });
 
@@ -123,8 +128,11 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
   };
 }
 
-/** Step 4: keep agents whose quote succeeded with a row matching a /x402 recipient, cheapest first. */
-function quotedCandidates(agents: AgentSummary[], quotes: Record<string, QuoteResult>, recipients: X402Config['recipients'], title: string, notes: string[]): Candidate[] {
+/**
+ * Step 4: keep agents whose quote succeeded with a row matching a /x402 recipient, ranked by expected cost (lowest
+ * first), then higher p_pass, more delivered jobs, handle.
+ */
+function quotedCandidates(agents: AgentSummary[], quotes: Record<string, QuoteResult>, recipients: X402Config['recipients'], history: Record<string, AgentHistory>, title: string, notes: string[]): Candidate[] {
   const out: Candidate[] = [];
   for (const a of agents) {
     const q = quotes[a.handle];
@@ -139,14 +147,37 @@ function quotedCandidates(agents: AgentSummary[], quotes: Record<string, QuoteRe
     out.push({
       handle: a.handle, name: a.name, description: a.description, sla_seconds: a.sla_seconds,
       success_rate: a.success_rate, delivered_jobs: a.delivered_jobs, price_atomic: r.amount, quote: r,
+      ...rank(a, r.amount, Object.hasOwn(history, a.handle) ? history[a.handle] : undefined),
     });
   }
   return out.sort((x, y) => {
-    const dp = BigInt(x.price_atomic) - BigInt(y.price_atomic);
-    if (dp !== 0n) return dp < 0n ? -1 : 1;
-    const ds = (y.success_rate ?? -1) - (x.success_rate ?? -1);
-    return ds !== 0 ? ds : y.delivered_jobs - x.delivered_jobs;
+    const de = BigInt(x.expected_cost_atomic) - BigInt(y.expected_cost_atomic);
+    if (de !== 0n) return de < 0n ? -1 : 1;
+    return (y.p_pass - x.p_pass) || (y.delivered_jobs - x.delivered_jobs) || (x.handle < y.handle ? -1 : x.handle > y.handle ? 1 : 0);
   });
+}
+
+/**
+ * p_pass = (successes + 1) / (jobs + 2) (Laplace) over the market's record plus Rook's own verdicts on this agent, and
+ * expected cost = price / p_pass: what Rook pays per passing deliverable on average. With no record at all p_pass is 0.5.
+ */
+function rank(a: AgentSummary, price: string, own: AgentHistory | undefined): Pick<Candidate, 'p_pass' | 'expected_cost_atomic' | 'rank_reason'> {
+  // success_rate is the market's percentage (0 to 100; the simulator's too). With none, the market's jobs say nothing
+  // about passing, so they count as 0 of 0. Market numbers are untrusted: clamped, and non-finite ones ignored.
+  const known = a.success_rate !== null && Number.isFinite(a.success_rate) && Number.isFinite(a.delivered_jobs);
+  const mJobs = known ? Math.max(0, Math.floor(a.delivered_jobs)) : 0;
+  // Multiply before dividing so a half rounds up exactly: 29% of 50 is 14.5 -> 15 (0.29 * 50 is 14.4999... -> 14).
+  const mPass = known ? Math.min(mJobs, Math.round((Math.min(100, Math.max(0, a.success_rate!)) * mJobs) / 100)) : 0;
+  const rPass = own?.pass ?? 0, rJobs = rPass + (own?.fail ?? 0);
+  const s = mPass + rPass, n = mJobs + rJobs;
+  // price / p = price * (n + 2) / (s + 1), rounded up in integers: money never goes through a float.
+  const expected = (BigInt(price) * BigInt(n + 2) + BigInt(s)) / BigInt(s + 1);
+  const p_pass = Math.min(1, Math.round(((s + 1) * 1000) / (n + 2)) / 1000); // 201 / 400 = 0.5025 -> 0.503, same reason
+  const record = [mJobs > 0 && `market ${mPass} of ${mJobs}`, rJobs > 0 && `Rook ${rPass} of ${rJobs}`].filter(Boolean).join(', ') || 'no record yet';
+  return {
+    p_pass, expected_cost_atomic: expected.toString(),
+    rank_reason: `${formatUsdc(price)} USDC / ${p_pass} pass chance (${record}) = ${formatUsdc(expected)} USDC expected`,
+  };
 }
 
 // ponytail: compile-only Ajv, lenient about unknown keywords and formats; the evaluator does the real validation.

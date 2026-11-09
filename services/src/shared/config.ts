@@ -10,7 +10,8 @@ import { parseUsdc } from './money.ts';
 const REPO = resolve(import.meta.dirname, '../../..');
 const NEAR_KEY = /^ROOK_(SIGNER|ORCHESTRATOR)_KEY$/, ADMIN_KEY = /^(ADMIN_WALLET_PRIVATE_KEY|ROOK_ADMIN_KEY)$/;
 const live = process.env.ROOK_PROFILE === 'live' || process.argv.includes('--live');
-const outside = process.env.ROOK_ENV_FILE || (live ? join(homedir(), '.rook', 'mainnet.env') : '');
+// A child of scripts/dev.ts gets its env from the parent, which hands each role key only to the service that uses it.
+const outside = process.env.ROOK_DEV_CHILD ? '' : process.env.ROOK_ENV_FILE || (live ? join(homedir(), '.rook', 'mainnet.env') : '');
 for (const p of [outside, resolve(REPO, '.env'), resolve(process.cwd(), '.env')]) {
   if (!p || !existsSync(p)) continue;
   const inRepo = !relative(REPO, resolve(p)).startsWith('..');
@@ -83,7 +84,7 @@ export const config = {
   },
   get contractId() { return env('ROOK_CONTRACT_ID', ''); },
   /** Longest payment validity Rook signs or accepts, in blocks (about seconds): a quote asking more is refused. */
-  get maxPaymentTimeoutS() { return num('ROOK_MAX_PAYMENT_TIMEOUT_S', 3600); },
+  get maxPaymentTimeoutS() { return num('ROOK_MAX_PAYMENT_TIMEOUT_S', 90_000); },
 
   /** `live`: `pnpm live`, nothing simulated (checkProfile). Anything else: the simulation profile of `pnpm dev`. */
   get profile() { return process.env.ROOK_PROFILE === 'live' ? 'live' as const : 'sim' as const; },
