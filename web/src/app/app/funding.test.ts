@@ -3,7 +3,7 @@
 // (contract/budget/src/lib.rs: emit() and ft_on_transfer's refund log). Run: npx tsx --test src/app/app/*.test.ts
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fetchTxOutcome, fundingOwner, fundingTerms, fundingTransaction, isWalletCancel, readFundingOutcome, txHashOf, untilFinal, type Funding } from './funding';
+import { fetchTxOutcome, fundingFrom, fundingTerms, fundingTransaction, isWalletCancel, readFundingOutcome, txHashOf, untilFinal, type Funding } from './funding';
 
 const F: Funding = {
   contract_id: 'rook.near', usdc: '17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1', network: 'mainnet',
@@ -32,10 +32,10 @@ test('terms: caps and the reserve the contract will compute', () => {
   assert.equal(fundingTerms({ ...F, msg: JSON.stringify({ create_task: { reserve_bps: 2000, caps: [1000000] } }) }), null);
 });
 
-test('owner: SHARED API DECISION 4 says owner; older orchestrators said funder', () => {
-  assert.equal(fundingOwner(F), 'ops.near');
-  assert.equal(fundingOwner({ ...F, owner: undefined, funder: 'old.near' }), 'old.near');
-  assert.equal(fundingOwner({ ...F, owner: undefined }), null);
+test('from: open funding names the signed-in funder; older orchestrators only sent the contract owner', () => {
+  assert.equal(fundingFrom({ ...F, owner: undefined, funder: 'alice.near', contract_owner: 'ops.near' }), 'alice.near');
+  assert.equal(fundingFrom(F), 'ops.near');
+  assert.equal(fundingFrom({ ...F, owner: undefined, funder: null }), null); // a CLI task: whoever sends it funds it
 });
 
 test('reads the contract task id from task_created', () => {

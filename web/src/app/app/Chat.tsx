@@ -10,7 +10,7 @@ import { WebSearch, type WebSource } from '@/components/ui/web-search';
 import { approve, cancel, confirmFunding, draftTask, stop } from './actions';
 import { go } from './AppShell';
 import { Composer, type ComposerErrors } from './Composer';
-import { fetchTxOutcome, fundingOwner, fundingTerms, fundingTransaction, isWalletCancel, readFundingOutcome, txHashOf, type Funding, type FundingResult } from './funding';
+import { fetchTxOutcome, fundingFrom, fundingTerms, fundingTransaction, isWalletCancel, readFundingOutcome, txHashOf, type Funding, type FundingResult } from './funding';
 import { explorerTx, NETWORK, rpcFor, type Network } from './network';
 import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary } from './orchestrator';
 import { useMode } from './mode';
@@ -257,27 +257,6 @@ function PlanCard({ plan, usage }: { plan: PlanView; usage?: Map<string, LedgerS
   );
 }
 
-/** Says plainly whether money moves, on every screen of the app. */
-function ModeBanner() {
-  const { mode, simulated, noMoney, network } = useMode();
-  if (!mode) return null;
-  const money = network === 'mainnet' ? 'real USDC' : 'testnet tokens';
-  const parts = [
-    mode.market === 'sim' ? 'simulated agents' : 'live market agents and prices',
-    mode.llm === 'canned' && 'scripted planner and checks',
-    mode.ledger === 'sim' && 'in-memory budget',
-  ].filter(Boolean).join(', ');
-  const [title, detail] = !simulated ? [`Live on NEAR ${network}`, `funding a plan moves ${money}`]
-    : noMoney ? ['Simulation: no real money moves', parts]
-    : [`Test run on NEAR ${network}`, `${parts}; funding moves ${money}`];
-  return (
-    <p className="mx-auto mt-2 flex w-fit max-w-[calc(100%-2rem)] shrink-0 items-baseline gap-2 rounded-full border border-ink/15 px-3 py-1 text-sm">
-      <span aria-hidden="true" className={`size-2 shrink-0 self-center rounded-full ${noMoney ? 'bg-accent' : 'bg-alert'}`} />
-      <span><span className="font-medium">{title}</span><span className="text-ink/65">: {detail}</span></span>
-    </p>
-  );
-}
-
 const short = (s: string) => (s.length > 14 ? `${s.slice(0, 6)}…${s.slice(-4)}` : s);
 const LINK = 'underline decoration-ink/30 underline-offset-2 hover:decoration-ink';
 
@@ -319,7 +298,7 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping }:
     const out = await confirmFunding(id, { contract_task_id: cid, tx_hash: tx });
     setPhase('idle');
     if (out.ok) return onConfirmed();
-    setError(`Rook didn't start the run: ${out.message.replace(/\.?$/, '.')} Your USDC is in contract task ${cid}. Confirm again to start it. If Rook still can't, the contract owner can close that contract task (close_task) to refund it.`);
+    setError(`Rook didn't start the run: ${out.message.replace(/\.?$/, '.')} Your USDC is in contract task ${cid}. Confirm again to start it. If Rook still can't, you can close that contract task (close_task) to get it refunded.`);
   }
 
   const lookUp = (tx: string) => fetchTxOutcome(rpcFor(network), tx, wallet.account ?? '')
@@ -391,11 +370,11 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping }:
   }
   if (!funding) return <Working label="Getting the funding transfer ready" />;
 
-  const owner = fundingOwner(funding);
+  const from = fundingFrom(funding);
   const terms = fundingTerms(funding);
   const hired = plan.subtasks.filter((s) => !s.self_do);
   const wrongNetwork = funding.network !== NETWORK;
-  const notOwner = !!owner && !!wallet.account && wallet.account !== owner;
+  const otherAccount = !!from && !!wallet.account && wallet.account !== from;
   const capsTotal = terms?.caps.reduce((sum, c) => sum + BigInt(c), 0n) ?? 0n;
   const unallocated = terms ? BigInt(funding.amount_atomic) - BigInt(terms.reserve_atomic) - capsTotal : 0n;
   const row = 'flex items-baseline justify-between gap-4 py-1';
@@ -420,14 +399,13 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping }:
       </dl>
       {!terms && <p className="mt-3 text-alert">Rook sent funding instructions this page can&apos;t read, so it won&apos;t offer the transfer.</p>}
       {wrongNetwork && <p className="mt-3 text-alert">Rook&apos;s contract is on NEAR {funding.network}, but this app connects wallets on NEAR {NETWORK}. Run the web app with NEXT_PUBLIC_NEAR_NETWORK={funding.network}.</p>}
-      {notOwner && (
+      {otherAccount && (
         <p className="mt-3 text-ink/80">
-          In this deployment only the Rook operator account, <span className="font-mono">{owner}</span>, can fund tasks: the contract accepts funding only from its owner.
-          The team is deciding whether to open funding to everyone who signs in. You&apos;re signed in as <span className="font-mono">{wallet.account}</span>.
+          This task belongs to <span className="font-mono">{from}</span>, so that account&apos;s wallet funds it. You&apos;re signed in as <span className="font-mono">{wallet.account}</span>.
         </p>
       )}
       <div className="mt-4 flex flex-wrap gap-3">
-        <ActionButton primary onClick={fund} busy={phase !== 'idle'} disabled={!terms || wrongNetwork || notOwner || !wallet.account || pasted !== null}
+        <ActionButton primary onClick={fund} busy={phase !== 'idle'} disabled={!terms || wrongNetwork || otherAccount || !wallet.account || pasted !== null}
           title={pasted !== null ? 'Rook can’t tell yet whether your first transfer went out' : undefined}>
           {phase === 'idle' ? `Fund ${usdc(funding.amount_atomic)} USDC with wallet` : busyLabel[phase]}
         </ActionButton>
@@ -889,7 +867,6 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
 
   return (
     <div className="flex h-full flex-col">
-      <ModeBanner />
       <div className={`flex min-h-0 flex-1 flex-col ${home ? 'sm:justify-center' : ''}`}>
         {home ? (
           <div className="mx-auto flex w-full max-w-208 flex-col items-center justify-center px-5 max-sm:flex-1 md:px-8">
@@ -914,9 +891,9 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
               lastTouchY.current = y;
             }}
             onKeyDown={(e) => { if (['ArrowUp', 'PageUp', 'Home'].includes(e.key)) letGo(e.timeStamp); }}
-            className="min-h-0 flex-1 overflow-y-auto max-sm:mask-[linear-gradient(to_bottom,transparent,#000_12px,#000_calc(100%-12px),transparent)]"
+            className="min-h-0 flex-1 overflow-y-auto mask-[linear-gradient(to_bottom,transparent,#000_12px,#000_calc(100%-12px),transparent)] sm:mask-[linear-gradient(to_bottom,transparent,#000_48px,#000_calc(100%-12px),transparent)]"
           >
-            <div className="mx-auto w-full max-w-208 space-y-6 px-4 pt-3 pb-6 sm:px-5 sm:pt-4 sm:pb-8 md:px-8">
+            <div className="mx-auto w-full max-w-208 space-y-6 px-4 pt-3 pb-6 sm:px-5 sm:pt-16 sm:pb-8 md:px-8">
               <h1 className="sr-only">{sending?.prompt ?? loaded.snap?.task.prompt ?? 'Task'}</h1>
               {sending ? (
                 <>

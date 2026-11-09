@@ -117,6 +117,16 @@ type SidebarProps = {
  * One layout for both states. Everything a rail shows is centred on the same line (36px from the left) and at the same
  * height whether the sidebar is open or not, so narrowing it only hides what's to the right, and the icons never move.
  */
+/** A pen on a page: start a new task. */
+function ComposeIcon({ className }: { className: string }) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+      <path d="M7.25 2.75h-3a1.5 1.5 0 0 0-1.5 1.5v7.5a1.5 1.5 0 0 0 1.5 1.5h7.5a1.5 1.5 0 0 0 1.5-1.5v-3" />
+      <path d="M11.4 2.35a1.3 1.3 0 0 1 1.84 1.84L8.5 8.93l-2.25.57.57-2.25z" />
+    </svg>
+  );
+}
+
 function SidebarContent({ tasks, rail = false, toggleLabel = 'Close sidebar', onToggle, onNavigate, onExpand, avatarRef }: SidebarProps) {
   const wallet = useWallet();
   const fade = `transition-opacity ${GLIDE} ${rail ? 'opacity-0' : ''}`;
@@ -134,7 +144,7 @@ function SidebarContent({ tasks, rail = false, toggleLabel = 'Close sidebar', on
         onClick={(e) => { go('/app', e); onNavigate(); }}
         className={`ml-3.5 flex min-h-11 shrink-0 items-center gap-2.5 overflow-hidden rounded-lg bg-ink/5 pl-3.5 font-medium whitespace-nowrap transition-[width,background-color] ${GLIDE} hover:bg-ink/10 active:translate-y-px ${rail ? 'w-11' : 'w-[calc(100%-1.75rem)]'}`}
       >
-        <svg className="size-4 shrink-0" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true"><path d="M8 2.5v11M2.5 8h11" /></svg>
+        <ComposeIcon className="size-4 shrink-0" />
         <span className={fade}>New task</span>
       </a>
 
@@ -312,7 +322,7 @@ export function AppShell({ tasks, children }: { tasks: TaskSummary[] | null; chi
                   onClick={(e) => go('/app', e)}
                   className="grid size-11 place-items-center rounded-lg transition-colors hover:bg-ink/5 active:translate-y-px motion-reduce:transition-none md:hidden"
                 >
-                  <svg className="size-5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden="true"><path d="M8 2.5v11M2.5 8h11" /></svg>
+                  <ComposeIcon className="size-5" />
                 </a>
               )}
               {!wallet.account && !wallet.checking && <WalletButton />}
