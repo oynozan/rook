@@ -5,7 +5,7 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { isAbsolute, join, relative, resolve } from 'node:path';
-import { KeyPair, type KeyPairString } from 'near-api-js';
+import { KeyPair, actions, type KeyPairString } from 'near-api-js';
 import { config } from '../shared/config.ts';
 import { call, HttpError, serve, type Running } from '../shared/http.ts';
 import { ftBalance, functionCall, latestBlock, sendTx, signDelegate, viewAccessKey, viewCall } from '../shared/near.ts';
@@ -186,12 +186,34 @@ export async function start(port = config.ports.signer): Promise<Running> {
       // NEP-141 refuses a 0 transfer: an empty sub-account is closed out with the contract's mark_empty (chain-gateway).
       if (amount === 0n) refuse(`${account_id} is empty: nothing to return; chain-gateway /mark-empty marks it returned`);
       const msg = JSON.stringify({ return: { task_id, n } });
-      // ponytail: 50 Tgas (0.005 NEAR at 100 Mgas/gas price) fits the sub-account's 0.01 NEAR; measure on testnet (plan step 2).
+      // 50 Tgas costs 0.0509 NEAR up front on mainnet (refunded but for what burns), within the contract's 0.06 NEAR.
       const r = await sendTx(account_id, key, cfg.usdc, [functionCall('ft_transfer_call', { receiver_id: contract, amount: amount.toString(), msg }, 50, 1n)]);
       if (!r.success) throw new HttpError(502, `return failed: ${JSON.stringify(r.failure)}`, { tx_hash: r.hash });
       // ft_transfer_call returns the amount the receiver kept; the contract refunds (keeps 0) on a refused return.
       if (String(r.value) !== amount.toString()) throw new HttpError(502, `contract kept ${String(r.value)} of ${amount}`, { tx_hash: r.hash });
       return { tx_hash: r.hash, amount: amount.toString() };
+    },
+
+    /**
+     * Deletes a finished sub-account so its NEAR goes back to the contract (beneficiary): only once the contract marks
+     * the subtask Returned and the account holds no USDC and no authorization. First storage_unregister on USDC, so
+     * that deposit comes back too; if that fails the account is deleted anyway (losing only the deposit).
+     */
+    'POST /reclaim': async ({ body }) => {
+      const task_id = String(body?.task_id ?? ''), n = Number(body?.n), account_id = String(body?.account_id ?? '');
+      if (auths.has(`${task_id}/${n}`)) refuse(`subtask ${n} has an outstanding authorization`);
+      const { cfg, sub, key } = await subtask(task_id, n, account_id);
+      if (sub.status !== 'Returned') refuse(`subtask ${n} is ${sub.status}, not Returned`);
+      if ((await ftBalance(cfg.usdc, account_id)) !== 0n) refuse(`${account_id} still holds USDC`);
+      let unregister: string | null = null;
+      if (await viewCall(cfg.usdc, 'storage_balance_of', { account_id })) {
+        const u = await sendTx(account_id, key, cfg.usdc, [functionCall('storage_unregister', { force: false }, 30, 1n)]);
+        unregister = u.success ? u.hash : null;
+        if (!u.success) console.warn(`[signer] storage_unregister for ${account_id} failed: ${JSON.stringify(u.failure)}`);
+      }
+      const d = await sendTx(account_id, key, account_id, [actions.deleteAccount(contract)]);
+      if (!d.success) throw new HttpError(502, `delete ${account_id} failed: ${JSON.stringify(d.failure)}`, { tx_hash: d.hash });
+      return { tx_hash: d.hash, storage_unregister_tx: unregister, beneficiary: contract };
     },
   }, port);
 }

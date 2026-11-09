@@ -16,7 +16,7 @@ Subtasks:
 - Keep each subtask narrow and independently deliverable by one agent; avoid overlap between subtasks.
 - "title": a short name (under 60 characters).
 - "brief": the complete message sent VERBATIM to an outside agent you do not trust and that knows nothing else. First line is the title, then a blank line, then the request. Say exactly what to deliver and ask the agent to print every key figure on its own line as "Label: value" using the exact labels your criteria use. Never include secrets, keys, account names, internal ids, or anything about Rook, its budget, prices, or how the work will be checked.
-- "search_terms": 1 to 3 short phrases (2 to 3 words) that would appear in the description of a marketplace agent able to do this, e.g. "holder distribution", "wallet activity", "contract audit".
+- "search_terms": 2 or 3 short phrases (2 to 3 words) that would appear in the description of a marketplace agent able to do this. The first is the general skill such agents advertise, e.g. "web research", "research brief", "data extraction", "translation", "code review"; the others are specific, e.g. "holder distribution", "wallet activity", "contract audit". Most agents describe a general skill, not your topic, so a topic-only search finds few of them.
 - "self_do_ok": true only when a language model alone can do the subtask well (writing, summarising, explaining from general knowledge). false when it needs live, on-chain, market or otherwise current data.
 - Use the budget only to scope the amount of work; never mention it in a brief.
 

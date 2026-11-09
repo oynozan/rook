@@ -186,6 +186,8 @@ export function createChainLedger(): ChainLedger {
       }
       const amount = m.returnLeftover(task_id, n);
       if (onChain !== amount) console.warn(`[orchestrator] ${task_id} subtask ${n}: returned ${onChain} on chain, ${amount} in Rook's books`);
+      // The emptied sub-account is deleted, its NEAR back to the contract; a failure only leaves that NEAR behind.
+      await signer('/reclaim', c).catch((e) => console.warn(`[orchestrator] ${task_id} subtask ${n}: reclaim ${c.account_id} failed: ${e?.message ?? e}`));
       return amount;
     },
 

@@ -57,8 +57,11 @@ use near_sdk::{
 };
 
 /// NEAR given to each sub-account: its own storage (~0.002 NEAR for a minimal account with one key)
-/// plus gas for one return `ft_transfer_call`. A first guess: measure on testnet (payments plan step 2).
-pub const SUBACCOUNT_NEAR: NearToken = NearToken::from_millinear(10);
+/// plus gas for one return `ft_transfer_call`. Measured on mainnet 2026-11-09: a 50 Tgas `ft_transfer_call` needs 0.0509 NEAR up front (the runtime prices
+/// prepaid gas pessimistically; the unused part is refunded), plus 0.00182 NEAR of storage stake, so 0.01 failed with
+/// NotEnoughBalance. The signer deletes the sub-account after its return with this contract as beneficiary, so
+/// nearly all of it comes back.
+pub const SUBACCOUNT_NEAR: NearToken = NearToken::from_millinear(60);
 /// USDC `storage_balance_bounds` min = max = 0.00125 NEAR, read on mainnet 2026-11-07.
 pub const STORAGE_DEPOSIT: NearToken = NearToken::from_yoctonear(1_250_000_000_000_000_000_000);
 const ONE_YOCTO: NearToken = NearToken::from_yoctonear(1);

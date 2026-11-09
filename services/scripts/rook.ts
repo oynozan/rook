@@ -278,9 +278,10 @@ async function approveAndWatch(id: string, yes: boolean) {
 /** ROOK_LEDGER=chain: Rook never moves the budget itself; the human's own transfer creates the task with the caps. */
 function printFunding(id: string, f: any) {
   console.log(`\n${bold('Fund this task on chain')} (${f.network}): send ${bold(usdc(f.amount_atomic))} to ${f.contract_id} with the approved caps.`);
-  console.log(`  token ${f.usdc}, from ${f.funder} (the contract owner), msg ${f.msg}`);
+  console.log(`  token ${f.usdc}, msg ${f.msg}`);
+  console.log(`  from ${f.funder ?? 'your own NEAR account'}: the sender becomes the task's funder, can stop and close it, and gets every refund`);
   const args = JSON.stringify({ receiver_id: f.contract_id, amount: f.amount_atomic, msg: f.msg });
-  console.log(`\n  near contract call-function as-transaction ${f.usdc} ft_transfer_call json-args '${args}' prepaid-gas '100 Tgas' attached-deposit '1 yoctoNEAR' sign-as ${f.funder} network-config ${f.network} sign-with-keychain send\n`);
+  console.log(`\n  near contract call-function as-transaction ${f.usdc} ft_transfer_call json-args '${args}' prepaid-gas '100 Tgas' attached-deposit '1 yoctoNEAR' sign-as ${f.funder ?? '<your-account>'} network-config ${f.network} sign-with-keychain send\n`);
   console.log(`Read the contract task id from the task_created event in that transaction's logs, then: ${bold(`rook funded ${id} <contract_task_id>`)}`);
 }
 
