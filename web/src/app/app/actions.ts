@@ -5,6 +5,7 @@ import { forgetFundingOf, forgetUnreadFunding, fundingSent, giveBackDraftSlot, m
 import { checkDraft, draftRefusal } from './draft';
 import { untilFinal, type Funding } from './funding';
 import { approveTask, cancelTask, createTask, fundedTask, getMode, getTask, killTask, OrchestratorDown, OrchestratorError } from './orchestrator';
+import { actionRefusal, type TaskAction } from './refusals';
 import { currentAccount } from './session';
 
 export type DraftResult =
@@ -50,26 +51,35 @@ export async function draftTask(input: { prompt: string; budget: string }): Prom
   }
 }
 
-async function act(run: () => Promise<object & { funding?: Funding }>): Promise<ActResult> {
+/**
+ * `action`: a task page button, whose refusals go back in plain words (the orchestrator's own go to the server log).
+ * Without one they go back as the orchestrator wrote them: the funding step reads them (funding.ts confirmFailure).
+ */
+async function act(run: () => Promise<object & { funding?: Funding }>, action?: TaskAction): Promise<ActResult> {
   try {
     const out = await run();
     refreshSidebar();
     return out.funding ? { ok: true, funding: out.funding } : { ok: true };
   } catch (e) {
-    return { ok: false, message: e instanceof OrchestratorDown ? DOWN : e instanceof Error ? e.message : 'That did not work. Try again.' };
+    if (e instanceof OrchestratorDown) return { ok: false, message: DOWN };
+    const message = e instanceof Error ? e.message : '';
+    if (!action) return { ok: false, message: message || 'That did not work. Try again.' };
+    const plain = actionRefusal(action, e instanceof OrchestratorError ? e.status : null, message);
+    if (!plain.known) console.error(`[web] ${action}:`, message || e);
+    return { ok: false, message: plain.message };
   }
 }
 
-async function asOwner(run: (owner: string) => Promise<object & { funding?: Funding }>): Promise<ActResult> {
+async function asOwner(action: TaskAction, run: (owner: string) => Promise<object & { funding?: Funding }>): Promise<ActResult> {
   const owner = await currentAccount();
   if (!owner) return { ok: false, message: SIGN_IN };
-  return act(() => run(owner));
+  return act(() => run(owner), action);
 }
 
 /** Simulation: starts the run. Chain mode: returns the funding transfer for the wallet (again, if asked again). */
-export async function approve(id: string) { return asOwner((owner) => approveTask(id, owner)); }
-export async function cancel(id: string) { return asOwner((owner) => cancelTask(id, owner)); }
-export async function stop(id: string) { return asOwner((owner) => killTask(id, owner)); }
+export async function approve(id: string) { return asOwner('approve', (owner) => approveTask(id, owner)); }
+export async function cancel(id: string) { return asOwner('cancel', (owner) => cancelTask(id, owner)); }
+export async function stop(id: string) { return asOwner('stop', (owner) => killTask(id, owner)); }
 
 const TX_HASH = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/;
 const CONTRACT_TASK = /^[0-9a-z]{1,20}$/;
