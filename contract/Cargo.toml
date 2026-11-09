@@ -18,3 +18,5 @@ lto = true
 debug = false
 panic = "abort"
 overflow-checks = true
+# Size: "z" beats "s" (364 KB) and "3" (380 KB) here; strip drops names and debug sections.
+strip = true

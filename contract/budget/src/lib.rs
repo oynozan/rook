@@ -24,6 +24,8 @@
 //! - top_up: `reserve_remaining -= amount`, `topped_up += amount`, before the promise; undone on failure.
 //! - return: `returned += amount`, `unallocated += amount` (leftovers can fund later subtasks, like the
 //!   phase-1 ledger in services/src/orchestrator/ledger.ts).
+//! - mark_empty: a Funded subtask whose sub-account holds exactly 0 USDC becomes Returned with nothing
+//!   credited (NEP-141 refuses a 0-amount `return`); no amount changes.
 //! - close: `refunded += unallocated + reserve_remaining`, both set to 0; undone if the refund fails,
 //!   and the task goes back to the status it had before that close (Open, or Closed for a re-close).
 //!
@@ -69,6 +71,7 @@ pub const RESOLVE_AFTER_BLOCKS: u64 = 10_000;
 const GAS_FT_TRANSFER: Gas = Gas::from_tgas(10);
 const GAS_STORAGE_DEPOSIT: Gas = Gas::from_tgas(10);
 const GAS_CALLBACK: Gas = Gas::from_tgas(10);
+const GAS_FT_BALANCE_OF: Gas = Gas::from_tgas(10);
 const GAS_ON_ACCOUNT_CREATED: Gas =
     Gas::from_tgas(10 + 10 + 10 + 10 + 5); // own work + storage_deposit + ft_transfer + on_subtask_funded + receipt overhead
 
@@ -488,6 +491,25 @@ impl Contract {
             .into()
     }
 
+    /// Marks a Funded subtask whose sub-account holds exactly 0 USDC as Returned with 0: NEP-141 refuses a
+    /// 0-amount transfer, so an emptied sub-account can never send its `return`, and close_task needs one.
+    /// Reads USDC `ft_balance_of`; `on_mark_empty` marks only if it is 0 and the subtask is unchanged
+    /// (still Funded, same attempt, no top-up since), else changes nothing and returns false. Works on
+    /// killed tasks, not on a Closing or Closed one. Attach 50 Tgas.
+    pub fn mark_empty(&mut self, task_id: String, n: u32) -> Promise {
+        let caller = env::predecessor_account_id();
+        require!(caller == self.owner || caller == self.orchestrator, "only the owner or orchestrator");
+        let task = self.tasks.get(&task_id).unwrap_or_else(|| env::panic_str("unknown task"));
+        require!(task.status == TaskStatus::Open, "task is not open");
+        let sub = self.subtasks.get(&(task_id.clone(), n)).unwrap_or_else(|| env::panic_str("unknown subtask"));
+        require!(sub.status == SubtaskStatus::Funded, "subtask is not funded");
+        let args = json!({ "account_id": sub.account_id }).to_string();
+        let (attempt, since) = (sub.attempt, sub.since);
+        Promise::new(self.usdc.clone())
+            .function_call("ft_balance_of", args, NearToken::from_yoctonear(0), GAS_FT_BALANCE_OF)
+            .then(Self::ext(env::current_account_id()).with_static_gas(GAS_CALLBACK).on_mark_empty(task_id, n, attempt, since))
+    }
+
     // ---------- owner ----------
 
     pub fn kill(&mut self) {
@@ -607,6 +629,27 @@ impl Contract {
     #[private]
     pub fn on_task_closed(&mut self, task_id: String) -> bool {
         self.finish_close(&task_id, promise_ok())
+    }
+
+    /// `since` is the subtask's `since` when mark_empty read the balance: a top-up started after that
+    /// (it changes `since`) may have landed after the read, so the 0 is stale.
+    #[private]
+    pub fn on_mark_empty(&mut self, task_id: String, n: u32, attempt: u32, since: u64) -> bool {
+        self.assert_attempt(&task_id, n, attempt);
+        let balance = (env::promise_results_count() == 1)
+            .then(|| env::promise_result_checked(0, 64).ok())
+            .flatten()
+            .and_then(|b| serde_json::from_slice::<U128>(&b).ok());
+        let open = self.tasks.get(&task_id).is_some_and(|t| t.status == TaskStatus::Open);
+        let sub = sub_mut(&mut self.subtasks, &task_id, n);
+        if balance != Some(U128(0)) || !open || sub.status != SubtaskStatus::Funded || sub.since != since {
+            let b = balance.map_or("unknown".to_string(), |b| b.0.to_string());
+            env::log_str(&format!("subtask {n} not marked empty: balance {b}, status {:?}", sub.status));
+            return false;
+        }
+        sub.status = SubtaskStatus::Returned;
+        emit("returned", json!({ "task_id": task_id, "n": n, "account_id": sub.account_id, "amount": "0", "empty": true }));
+        true
     }
 
     // ---------- views ----------

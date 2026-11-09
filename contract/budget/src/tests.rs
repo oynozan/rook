@@ -975,3 +975,149 @@ fn signer_cannot_be_orchestrator() {
     owner_yocto(0);
     c.set_signer(acc(ORCH));
 }
+
+// ---------- mark_empty ----------
+
+/// Calls mark_empty as `pred`; the panic message, or None when it sent the balance read.
+fn mark_empty_err(c: &mut Contract, pred: &str, id: &str, n: u32) -> Option<String> {
+    call(pred);
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(c.mark_empty(id.into(), n))))
+        .err()
+        .map(|e| e.downcast::<String>().map(|s| *s).unwrap_or_default())
+}
+
+fn assert_refused(c: &mut Contract, pred: &str, id: &str, n: u32, why: &str) {
+    let err = mark_empty_err(c, pred, id, n).unwrap_or_else(|| panic!("mark_empty({id}, {n}) as {pred} went through"));
+    assert!(err.contains(why), "expected {why:?}, got {err:?}");
+}
+
+/// on_mark_empty with the USDC `ft_balance_of` result: Some(json) succeeded, None failed.
+fn on_balance(c: &mut Contract, id: &str, n: u32, result: Option<&str>) -> bool {
+    let (attempt, since) = (sub(c, id, n).attempt, sub(c, id, n).since);
+    call_with(ME, vec![result.map_or(PromiseResult::Failed, |r| PromiseResult::Successful(r.as_bytes().to_vec()))]);
+    c.on_mark_empty(id.into(), n, attempt, since)
+}
+
+#[test]
+fn mark_empty_refused_unless_funded() {
+    let mut c = setup();
+    let not_funded = "subtask is not funded";
+    assert_refused(&mut c, ORCH, "0", 1, "unknown subtask");
+    assert_refused(&mut c, ORCH, "9", 1, "unknown task");
+    start_fund(&mut c, "0", 1);
+    assert_refused(&mut c, ORCH, "0", 1, not_funded); // Funding
+    callback(true);
+    let _ = c.on_account_created("0".into(), 1, 0);
+    callback(true);
+    c.on_subtask_funded("0".into(), 1, 0);
+    call(ORCH);
+    let _ = c.top_up("0".into(), 1, U128(10));
+    assert_refused(&mut c, ORCH, "0", 1, not_funded); // ToppingUp
+    callback(true);
+    c.on_top_up("0".into(), 1);
+    assert_eq!(give_back(&mut c, &sub_account("0", 1), "0", 1, 10), 0);
+    assert_refused(&mut c, ORCH, "0", 1, not_funded); // Returned
+    start_fund(&mut c, "0", 2);
+    callback(false);
+    let _ = c.on_account_created("0".into(), 2, 0);
+    assert_refused(&mut c, ORCH, "0", 2, not_funded); // Failed
+    check(&c, "0");
+}
+
+#[test]
+fn mark_empty_caller_and_task_status() {
+    let mut c = setup();
+    fund(&mut c, "0", 1);
+    let only = "only the owner or orchestrator";
+    assert_refused(&mut c, SIGNER, "0", 1, only);
+    assert_refused(&mut c, EVE, "0", 1, only);
+    assert_eq!(mark_empty_err(&mut c, OWNER, "0", 1), None, "the owner may");
+    assert_eq!(mark_empty_err(&mut c, ORCH, "0", 1), None, "the orchestrator may");
+    let r = get_created_receipts();
+    assert_eq!(r[0].receiver_id, acc(USDC));
+    assert!(matches!(&r[0].actions[0], MockAction::FunctionCallWeight { method_name, args, attached_deposit, .. }
+        if method_name == b"ft_balance_of" && String::from_utf8_lossy(args).contains(&sub_account("0", 1)) && attached_deposit.is_zero()));
+    // A killed task is still Open: allowed. The owner closes it with subtask 1 Funded: Closing, then Closed.
+    call(OWNER);
+    c.kill_task("0".into());
+    assert_eq!(mark_empty_err(&mut c, ORCH, "0", 1), None, "killed task");
+    call(OWNER);
+    let _ = c.close_task("0".into());
+    assert_refused(&mut c, ORCH, "0", 1, "task is not open"); // Closing
+    assert!(!on_balance(&mut c, "0", 1, Some(r#""0""#)), "a read sent before the close does not mark");
+    assert_eq!(sub(&c, "0", 1).status, SubtaskStatus::Funded);
+    callback(true);
+    assert!(c.on_task_closed("0".into()));
+    assert_refused(&mut c, OWNER, "0", 1, "task is not open"); // Closed
+    check(&c, "0");
+}
+
+#[test]
+fn mark_empty_zero_balance_lets_close_succeed() {
+    let mut c = setup();
+    fund(&mut c, "0", 1);
+    fund(&mut c, "0", 2);
+    assert_eq!(give_back(&mut c, &sub_account("0", 2), "0", 2, 50), 0);
+    // Subtask 1 paid its whole cap: no return can ever come, so close_task is stuck without mark_empty.
+    call(ORCH);
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(c.close_task("0".into())))).is_err());
+    assert_eq!(mark_empty_err(&mut c, ORCH, "0", 1), None);
+    assert!(on_balance(&mut c, "0", 1, Some(r#""0""#)));
+    let log = get_logs().into_iter().find(|l| l.contains(r#""event":"returned""#)).unwrap();
+    assert!(log.contains(r#""amount":"0""#) && log.contains(r#""empty":true"#), "{log}");
+    let (t, s) = (task(&c, "0"), sub(&c, "0", 1));
+    assert_eq!((s.status, s.returned, t.returned, t.unallocated), (SubtaskStatus::Returned, 0, 50, 350));
+    check(&c, "0");
+    call(ORCH);
+    assert!(matches!(c.close_task("0".into()), PromiseOrValue::Promise(_)));
+    callback(true);
+    assert!(c.on_task_closed("0".into()));
+    let t = task(&c, "0");
+    assert_eq!((t.status, t.refunded), (TaskStatus::Closed, 550), "1000 - 300 - 200 + 50 returned");
+    check(&c, "0");
+    // A return that still arrives later is credited, and the task can be closed again.
+    assert_eq!(give_back(&mut c, &sub_account("0", 1), "0", 1, 7), 0);
+    check(&c, "0");
+}
+
+#[test]
+fn mark_empty_nonzero_or_failed_read_changes_nothing() {
+    let mut c = setup();
+    fund(&mut c, "0", 1);
+    let before = serde_json::to_string(&(task(&c, "0"), sub(&c, "0", 1))).unwrap();
+    for result in [Some(r#""1""#), Some(r#""300""#), None, Some("not json"), Some("0")] {
+        assert_eq!(mark_empty_err(&mut c, ORCH, "0", 1), None);
+        assert!(!on_balance(&mut c, "0", 1, result), "{result:?}");
+        assert!(!has_event("returned"));
+        assert_eq!(serde_json::to_string(&(task(&c, "0"), sub(&c, "0", 1))).unwrap(), before, "{result:?}");
+    }
+    check(&c, "0");
+}
+
+#[test]
+fn mark_empty_stale_callbacks_change_nothing() {
+    let mut c = setup();
+    fund(&mut c, "0", 1);
+    // A top-up starts and lands between the balance read and the callback: the 0 is stale.
+    let (attempt, since) = (sub(&c, "0", 1).attempt, sub(&c, "0", 1).since);
+    assert_eq!(mark_empty_err(&mut c, ORCH, "0", 1), None);
+    call_ctx(ORCH, vec![], |b| {
+        b.block_height(5);
+    });
+    let _ = c.top_up("0".into(), 1, U128(10));
+    callback(true);
+    c.on_top_up("0".into(), 1);
+    call_with(ME, vec![PromiseResult::Successful(br#""0""#.to_vec())]);
+    assert!(!c.on_mark_empty("0".into(), 1, attempt, since));
+    assert_eq!(sub(&c, "0", 1).status, SubtaskStatus::Funded);
+    // A return lands between the read and the callback: credited once, not overwritten.
+    assert_eq!(mark_empty_err(&mut c, ORCH, "0", 1), None);
+    assert_eq!(give_back(&mut c, &sub_account("0", 1), "0", 1, 40), 0);
+    assert!(!on_balance(&mut c, "0", 1, Some(r#""0""#)));
+    assert_eq!((sub(&c, "0", 1).returned, task(&c, "0").returned), (40, 40));
+    check(&c, "0");
+    // A callback for another funding attempt is refused, like the funding callbacks.
+    callback(true);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.on_mark_empty("0".into(), 1, 1, since)));
+    assert!(r.is_err(), "attempt 1 does not exist");
+}
