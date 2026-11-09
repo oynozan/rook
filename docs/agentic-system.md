@@ -55,7 +55,7 @@ Every service is reached through `<NAME>_URL` (default `http://127.0.0.1:<port>`
 ## 4. Money
 
 - All amounts are atomic USDC as decimal integer strings (6 decimals): `"2500000"` = 2.50 USDC. Fields end in `_atomic`. Code uses `bigint`; never floats.
-- The user's budget is entered in USDC (`"2.5"`) and converted once.
+- The user's budget is entered in USDC (`"2.5"`) and converted once, or named in the message itself ("make it 1 USDC"), which the planner reads and plans at (5.2 step 1).
 - `reserve_share` defaults to `0.2`: it sets how much the caps may take, `budget − floor(budget × reserve_share)`. Once the caps are set, every budget unit they leave becomes the reserve, up to the contract's 90%: `reserve_bps = min(9000, 100 × floor((budget − allocated) × 100 / budget))` (whole percents), `reserve_atomic = floor(budget × reserve_bps / 10000)`, `allocatable_atomic = budget − reserve_atomic`. The user's budget is what Rook may spend, so none of it sits idle while a subtask is abandoned for want of a top-up (seen on mainnet on 2026-11-09: 0.90 USDC unallocated, a 0.50 re-hire refused). The orchestrator adopts `reserve_bps / 10000` as the task's `reserve_share`, so the funding transfer, the contract and the ledger agree.
 
 ## 5. Planner
