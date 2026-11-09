@@ -1041,8 +1041,11 @@ const STOPPED = (
 );
 const RUN_STATES = { stopped: { label: 'Stopped', active: false, icon: STOPPED } };
 
-/** Collapsed to one line that says what is happening now; the full list is one click away. */
-function Activity({ lines, live, caughtUp, closing, outcome, timed, free }: { lines: FeedLine[]; live: boolean; caughtUp: boolean; closing: boolean; outcome: string; timed: boolean; free: boolean }) {
+/**
+ * Collapsed to one line that says what is happening now; the full list is one click away. `refunding`: the report is
+ * written and only the refund is left, which Rook keeps sending until the contract closes the task.
+ */
+function Activity({ lines, live, caughtUp, closing, refunding, outcome, timed, free }: { lines: FeedLine[]; live: boolean; caughtUp: boolean; closing: boolean; refunding: boolean; outcome: string; timed: boolean; free: boolean }) {
   const [open, setOpen] = useState(false);
   const latest = lines[lines.length - 1];
   const working = new Set<string>(), writing = new Set<string>();
@@ -1055,7 +1058,8 @@ function Activity({ lines, live, caughtUp, closing, outcome, timed, free }: { li
   const rejected = lines.filter((l) => l.flag).length;
 
   let now: Now;
-  if (!live) now = { state: outcome === 'killed' ? 'stopped' : outcome === 'failed' ? 'error' : 'done', label: '', detail: `${lines.length} step${lines.length === 1 ? '' : 's'}${rejected ? `, ${rejected} flagged` : ''}` };
+  if (refunding && caughtUp) now = { state: 'analyzing', label: 'Sending the unspent USDC back' };
+  else if (!live) now = { state: outcome === 'killed' ? 'stopped' : outcome === 'failed' ? 'error' : 'done', label: '', detail: `${lines.length} step${lines.length === 1 ? '' : 's'}${rejected ? `, ${rejected} flagged` : ''}` };
   else if (!latest) now = { state: 'thinking', label: 'Starting the run' };
   else if (!caughtUp) now = latest.now;
   else if (closing) now = { state: 'writing', label: 'Combining the report' };
@@ -1128,6 +1132,9 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   const [fundingBusy, setFundingBusy] = useState(false); // the funding step has the wallet open or a transfer in hand
   const [autoFund, setAutoFund] = useState(false); // approved here with one click: the wallet opens right away
   const status = snap?.task.status;
+  // The report is written and only the refund is left (a close that failed is tried again, for minutes at times): the
+  // run is finished, its report and money card show, and nothing is left to stop.
+  const refundPending = status === 'closing' && !!snap?.final_result;
   const { mode, paymentsOff, noMoney, chain, network } = useMode();
   const contractId = funding?.contract_id ?? mode?.contract_id ?? null;
   // Approved but not yet funded (chain mode): the run starts only once the funding is bound, so this survives a reload.
@@ -1168,7 +1175,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   const planning = planningFrom(events);
   const [shown, setShown] = useState(0);
   const instant = useRef<boolean | null>(null);
-  if (status && instant.current === null) instant.current = TERMINAL.has(status);
+  if (status && instant.current === null) instant.current = TERMINAL.has(status) || refundPending;
   // The run's clock starts when this page sees it start. Joining mid-run, it would show a time that's too short.
   const timed = useRef<boolean | null>(null);
   if (status && timed.current === null) timed.current = status === 'draft' || status === 'planned';
@@ -1180,7 +1187,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
     return () => clearTimeout(t);
   }, [hasSnap, shown, feed.length]);
   const caughtUp = shown >= feed.length;
-  const settled = !!status && TERMINAL.has(status) && caughtUp;
+  const settled = !!status && (TERMINAL.has(status) || refundPending) && caughtUp;
   useEffect(() => { onGrow(); }, [shown, status, settled, onGrow]);
 
   // Keep the sidebar's status honest when the run moves on without an action from this page: every step, so it never
@@ -1310,10 +1317,10 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
                 {reserveUsed > 0 && <span className="text-ink/65">, {usdc(reserveUsed)} from the reserve</span>}
               </>}
             </p>
-            {!TERMINAL.has(task.status) && <ActionButton onClick={() => act('stop')} busy={busy === 'stop'} disabled={fundingBusy}>{busy === 'stop' ? 'Stopping…' : 'Stop'}</ActionButton>}
+            {!TERMINAL.has(task.status) && !refundPending && <ActionButton onClick={() => act('stop')} busy={busy === 'stop'} disabled={fundingBusy}>{busy === 'stop' ? 'Stopping…' : 'Stop'}</ActionButton>}
           </div>
           <Activity lines={visible} live={live} caughtUp={caughtUp} closing={task.status === 'aggregating' || task.status === 'closing' || task.status === 'closed'}
-            outcome={task.status === 'failed' && final_result ? 'closed' : task.status} timed={!!timed.current} free={free} />
+            refunding={refundPending && !free} outcome={task.status === 'failed' && final_result ? 'closed' : task.status} timed={!!timed.current} free={free} />
         </RookMessage>
       )}
 

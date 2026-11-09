@@ -14,6 +14,11 @@ test('a task that moved on says where it is, never "task is killed, cancel needs
   assert.deepEqual(actionRefusal('cancel', 409, 'task is killed, cancel needs planned'), { message: "This task was stopped, so it can't be cancelled.", known: true });
 });
 
+test('Stop after the report is written says the task finished and the refund is on its way, never "try again"', () => {
+  assert.deepEqual(actionRefusal('stop', 409, 'the report is written; Rook is only returning the unspent USDC now, so there is nothing left to stop'),
+    { message: 'This task has already finished. Rook is sending the unspent USDC back to your wallet.', known: true });
+});
+
 test('known refusals: no task for this account, an empty plan, payments off, the open-task limit, the contract minimum', () => {
   assert.equal(words('stop', 404, 'no task t_1'), "Rook has no task at this link for the wallet you're signed in with.");
   assert.equal(words('approve', 409, 'the plan has no subtasks'), "This plan has nothing to run, so it can't be started.");
