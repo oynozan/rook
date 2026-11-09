@@ -285,3 +285,14 @@ test("verdictHistory counts Rook's judged receipts per handle and keeps the 500 
   assert.equal(Object.keys(h).length, 500);
   assert.ok(!('once' in h));
 });
+
+test('numeric_match on a date, year, version or id is removed; quantities (durations too) stay', () => {
+  const nm = (id: string, label: string) => ({ id, kind: 'numeric_match', description: label, spec: { label, min: 0 } });
+  const p = buildPlan(input({
+    draft: [sub('a', { criteria: [nm('c1', 'Date'), nm('c2', 'Release year'), nm('c3', 'Version'), nm('c4', 'Token ID'), nm('c5', 'Active users'), nm('c6', 'Days until launch')] })],
+    selected: [[agent('x')]],
+    quotes: { x: row('100000') },
+  }));
+  for (const c of ['c1', 'c2', 'c3', 'c4']) assert.ok(p.notes.some((n) => n.startsWith(`criterion s1.${c} removed`) && n.includes('date or id')), c);
+  assert.deepEqual(p.subtasks[0].criteria.map((c: any) => c.spec.label), ['Active users', 'Days until launch']); // durations are quantities
+});
