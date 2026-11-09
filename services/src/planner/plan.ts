@@ -203,6 +203,8 @@ function validateCriteria(id: string, pos: number, raw: DraftSubtask['criteria']
         const { min, max } = c.spec;
         if ([min, max].some((b) => b !== undefined && !Number.isFinite(b))) return remove('non-finite bound');
         if (min !== undefined && max !== undefined && min > max) return remove('min is above max');
+        // A date ("2026-10-15") or an id is not one number: the check would fail honest work (seen on mainnet).
+        if (/\b(dates?|dated|year|version|ids?|phone)\b/i.test(c.spec.label)) return remove(`"${c.spec.label}" is a date or id, not a quantity`);
         break;
       }
       case 'cross_check': {
