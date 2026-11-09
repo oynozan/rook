@@ -1,6 +1,23 @@
 // Plain words for the run's activity lines: why Rook skipped an agent, and what Rook's own error events mean. The
 // services word these for logs and the CLI (runner.ts); the page shows these sentences and keeps the raw text as a
-// tooltip. Pure functions, so the page and the tests both use them.
+// tooltip. Also the parts a run delivered. Pure functions, so the page and the tests both use them.
+import type { SubtaskView } from './orchestrator';
+
+export type DeliveredPart = { id: string; title: string; agent: string | null; text: string };
+
+/**
+ * The parts that passed, with what was delivered (paid for, so a run stopped or failed before its report still shows
+ * them): a hired agent's text from its accepted hire, Rook's own (agent null) from the accepted text.
+ */
+export function deliveredParts(subtasks: SubtaskView[], titles: Map<string, string>): DeliveredPart[] {
+  return subtasks.flatMap((s) => {
+    const a = s.accepted;
+    if (s.final_outcome !== 'passed' || !a) return [];
+    const own = a.hire_id === null;
+    const text = own ? a.text : s.hires?.find((h) => h.id === a.hire_id)?.deliverable_text;
+    return text?.trim() ? [{ id: s.id, title: titles.get(s.id) ?? s.title ?? s.id, agent: own ? null : a.agent_handle, text }] : [];
+  });
+}
 
 const payToElsewhere = "it asked to be paid to an account that isn't the marketplace's";
 

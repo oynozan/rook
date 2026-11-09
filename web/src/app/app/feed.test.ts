@@ -1,8 +1,8 @@
 // The run's activity lines in plain words: skip reasons, Rook's own error events (as the services word them in
-// services/src/orchestrator/runner.ts). Run: npx tsx --test src/app/app/*.test.ts
+// services/src/orchestrator/runner.ts), and the parts a stopped run delivered. Run: npx tsx --test src/app/app/*.test.ts
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { alertLine, problemLine, skipReason } from './feed';
+import { alertLine, deliveredParts, problemLine, skipReason } from './feed';
 
 test('skip reasons: the common ones in plain words, a price rise with its unit', () => {
   assert.equal(skipReason('price rose from 0.10 in the approved plan to 0.15'), 'its price went up from 0.10 to 0.15 USDC since you approved the plan');
@@ -43,4 +43,20 @@ test('error events stored before they had a kind are read from their message', (
   assert.equal(problemLine({ message: 'salvage, closeTask: ledger refused: subtask 2 has not returned its leftover' })?.tone, 'alert');
   assert.equal(problemLine({ message: 'send to luigi: after a 502 the agent answered HTTP 402; counted as spent' })?.text, "luigi's payment went through after all, so it counts as spent.");
   assert.equal(problemLine({ message: 'evaluation of luigi failed, subtask abandoned unjudged: down' }, 'Prices')?.text, "Rook couldn't check luigi's work on Prices, so that part is left out.");
+});
+
+test("delivered parts: a hire's text from its accepted hire, Rook's own from the accepted text, only parts that passed", () => {
+  const titles = new Map([['s1', 'Holders'], ['s2', 'Summary'], ['s3', 'Prices']]);
+  const parts = deliveredParts([
+    { id: 's1', n: 1, status: 'returned', final_outcome: 'passed', accepted: { hire_id: 'h2', agent_handle: 'holders-good' },
+      hires: [{ id: 'h1', agent_handle: 'holders-bad', deliverable_text: 'wrong' }, { id: 'h2', agent_handle: 'holders-good', deliverable_text: 'Top holders: ...' }] },
+    { id: 's2', n: 2, status: 'returned', final_outcome: 'passed', accepted: { hire_id: null, agent_handle: 'rook:self-do', text: 'Rook wrote this.' }, hires: [] },
+    { id: 's3', n: 3, status: 'working', final_outcome: null, accepted: null, hires: [{ id: 'h3', agent_handle: 'p', deliverable_text: 'not judged' }] },
+  ], titles);
+  assert.deepEqual(parts, [
+    { id: 's1', title: 'Holders', agent: 'holders-good', text: 'Top holders: ...' },
+    { id: 's2', title: 'Summary', agent: null, text: 'Rook wrote this.' },
+  ]);
+  // An older orchestrator sends only id, n and status: nothing to show, nothing breaks.
+  assert.deepEqual(deliveredParts([{ id: 's1', n: 1, status: 'returned' }], titles), []);
 });

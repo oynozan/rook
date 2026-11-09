@@ -10,7 +10,7 @@ import { WebSearch, type WebSource } from '@/components/ui/web-search';
 import { approve, cancel, confirmFunding, draftTask, forgetTransfer, fundingRefunded, rememberTransfer, stop } from './actions';
 import { go } from './AppShell';
 import { Composer, type ComposerErrors } from './Composer';
-import { alertLine, problemLine, skipReason } from './feed';
+import { alertLine, deliveredParts, problemLine, skipReason } from './feed';
 import {
   closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
   readCloseOutcome, readFundingOutcome, termsOf, txHashOf, whoseTransfer, type CloseResult, type Funding, type FundingResult, type Terms,
@@ -288,13 +288,15 @@ const LINK = 'underline decoration-ink/30 underline-offset-2 hover:decoration-in
 /** What backs a receipt: the agent's A2A task, the evaluator's verdict hash, and the transactions on NEAR. */
 /** What the run spent and refunded, and a receipt per paid hire. The refund shows once the contract closed the task. */
 function MoneyCard({ ledger, receipts, network, simNote }: { ledger: TaskSnapshot['ledger']; receipts: Receipt[]; network: Network; simNote: string }) {
+  // Not closed yet: a payment still in flight holds the refund back; otherwise Rook is still sending it (a close that failed).
+  const inFlight = !!ledger?.subtasks?.some((s) => s.authorized_atomic != null);
   return (
     <div className="rook-in mt-6 rounded-2xl border border-ink/15 p-4" style={{ animationDelay: '500ms' }}>
       {ledger && (
         <p className="tabular-nums">
-          Spent {usdc(ledger.spent_atomic)} USDC, {ledger.closed === false
-            ? 'and the rest is on its way back: the refund lands once every payment still in flight has settled or expired'
-            : `refunded ${usdc(ledger.refunded_atomic)} USDC`}{simNote}.
+          Spent {usdc(ledger.spent_atomic)} USDC, {ledger.closed !== false ? `refunded ${usdc(ledger.refunded_atomic)} USDC`
+            : inFlight ? 'and the rest is on its way back: the refund lands once every payment still in flight has settled or expired'
+            : 'and Rook is still sending the rest back to your wallet'}{simNote}.
         </p>
       )}
       {receipts.length > 0 && (
@@ -1054,13 +1056,16 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   // Never "Running" before the budget is locked: approved with no ledger yet is the funding step, and a task stopped
   // before any funding never ran. Only money says the run started, not any feed line (a kill adds one regardless).
   const unfunded = (task.status === 'approved' || task.status === 'killed') && !moneyMoved(snap, events);
-  const started = !['draft', 'planned', 'cancelled'].includes(task.status) && !unfunded && !(task.status === 'failed' && !feed.length);
+  // A task that failed with nothing to run (planning failed, or every part was dropped) never started, whatever its
+  // feed shows (that failure is an error event too).
+  const started = !['draft', 'planned', 'cancelled'].includes(task.status) && !unfunded && !(task.status === 'failed' && !plan?.subtasks.length);
   const live = started && !settled;
   const spent = visible.reduce((sum, l) => sum + (l.paid ?? 0), 0);
   const reserveUsed = visible.reduce((sum, l) => sum + (l.fromReserve ?? 0), 0);
   const simNote = noMoney ? ' (simulated)' : '';
   const usage = new Map<string, LedgerSub>();
   if (started) for (const s of snap.subtasks ?? []) { const l = ledger?.subtasks?.find((x) => x.n === s.n); if (l) usage.set(s.id, l); }
+  const delivered = deliveredParts(snap.subtasks ?? [], titles);
 
   return (
     <>
@@ -1078,10 +1083,12 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
         </RookMessage>
       )}
 
+      {/* Every part was dropped: the task ended there, with the orchestrator's reason (no agent fits, or over budget). */}
       {plan && !revealing && plan.subtasks.length === 0 && (
         <RookMessage>
-          <p>I couldn&apos;t find anything to hire for at this budget. Try a larger budget or a different task.</p>
-          {plan.dropped.length > 0 && <ul className="mt-2 text-sm text-ink/65">{plan.dropped.map((d) => <li key={d.title}>{d.title}: {d.reason}</li>)}</ul>}
+          <p>Rook couldn&apos;t draft a plan for this task.</p>
+          {task.error && <p className="mt-1 text-sm text-ink/65">{task.error}</p>}
+          {plan.dropped.length > 0 && <ul className="mt-2 text-sm text-ink/65">{plan.dropped.map((d, i) => <li key={i}>{d.title}: {d.reason}</li>)}</ul>}
         </RookMessage>
       )}
 
@@ -1137,7 +1144,8 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
         <RookMessage>
           <div className="flex items-start justify-between gap-x-3 gap-y-2 sm:flex-wrap sm:items-center sm:gap-x-6">
             <p className="min-w-0 tabular-nums max-sm:pt-2.5">
-              <span className="font-medium">{live ? 'Running.' : task.status === 'killed' ? 'Stopped.' : task.status === 'failed' ? 'This run hit a problem.' : 'Finished.'}</span>
+              {/* Failed with a report: the work finished and only the refund hit a problem, which the money card says. */}
+              <span className="font-medium">{live ? 'Running.' : task.status === 'killed' ? 'Stopped.' : task.status === 'failed' && !final_result ? 'This run hit a problem.' : 'Finished.'}</span>
               {free ? ' Rook does every part itself, so nothing is spent.' : <>
                 {' '}Spent {usdc(spent)} of {usdc(task.budget_atomic)} USDC{simNote}
                 {reserveUsed > 0 && <span className="text-ink/65">, {usdc(reserveUsed)} from the reserve</span>}
@@ -1146,7 +1154,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
             {!TERMINAL.has(task.status) && <ActionButton onClick={() => act('stop')} busy={busy === 'stop'} disabled={fundingBusy}>{busy === 'stop' ? 'Stopping…' : 'Stop'}</ActionButton>}
           </div>
           <Activity lines={visible} live={live} caughtUp={caughtUp} closing={task.status === 'aggregating' || task.status === 'closing' || task.status === 'closed'}
-            outcome={task.status} timed={!!timed.current} free={free} />
+            outcome={task.status === 'failed' && final_result ? 'closed' : task.status} timed={!!timed.current} free={free} />
         </RookMessage>
       )}
 
@@ -1157,6 +1165,20 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
           <Report markdown={final_result.final_markdown} />
 
           {!free && <MoneyCard ledger={ledger} receipts={receipts} network={network} simNote={simNote} />}
+        </RookMessage>
+      )}
+
+      {/* Stopped or failed without a report: the parts that passed were paid for, so they are still here to read. */}
+      {!final_result && settled && started && delivered.length > 0 && (
+        <RookMessage>
+          <p className="font-medium">{task.status === 'killed' ? 'Before you stopped it, these parts were delivered and passed every check.' : 'Before the problem, these parts were delivered and passed every check.'}</p>
+          {delivered.map((d) => (
+            <section key={d.id} className="mt-5">
+              <h3 className="text-xl font-medium tracking-[-0.01em]">{d.title}</h3>
+              <p className="text-sm text-ink/65">{d.agent ? <>Delivered by <span className="font-mono">{d.agent}</span>.</> : 'Rook did this part itself.'}</p>
+              <Report markdown={d.text} />
+            </section>
+          ))}
         </RookMessage>
       )}
 
