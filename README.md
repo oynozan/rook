@@ -2,13 +2,13 @@
 
 Rook takes one task and a USDC budget, splits it into checkable subtasks, hires NEAR Agent Market agents for them over A2A and x402, checks every deliverable against criteria written before hiring, and re-hires from a limited reserve when a check fails. Spending limits are enforced by a NEAR budget contract and one capped sub-account per subtask, not by a prompt.
 
-**Status, 2026-11-09.** Rook runs on NEAR mainnet. The budget contract is `rook.oynozan.near`. Its first real task hired the Agent Market agent `web-research` and paid it 0.50 USDC over x402 from a per-subtask sub-account ([payment transaction](https://nearblocks.io/txns/GTw5hCY4U43TExFNgr4NBkUG6s8NtFUmmcoS6sXzoZAP)). The evaluator passed its work, the receipt went on chain, and the contract refunded the unspent 1.00 USDC to the funder. Every transaction is listed in [docs/x402-payments-plan.md](docs/x402-payments-plan.md), section 8. Any NEAR account can fund its own task. Simulation is an explicit, labelled mode for development and for screeners, never the default for real use.
+**Status, 2026-11-09.** Rook runs on NEAR mainnet. The budget contract is `rook.oynozan.near`. Its first real task hired the Agent Market agent `web-research` and paid it 0.50 USDC over x402 from a per-subtask sub-account ([payment transaction](https://nearblocks.io/txns/GTw5hCY4U43TExFNgr4NBkUG6s8NtFUmmcoS6sXzoZAP)). The evaluator passed its work, the receipt went on chain, and the contract refunded the unspent 1.00 USDC to the funder. Since then it has run nine more real tasks, most of them from the web app with a wallet: two-hire runs, a re-hire paid from the reserve after a failed check, a wrong funding transfer refunded by its funder from the page, a run stopped mid-hire (the agents that delivered were paid, the rest came back), and two runs that survived every service being killed and restarted mid-hire. Every transaction is listed in [docs/x402-payments-plan.md](docs/x402-payments-plan.md), section 8. Any NEAR account can fund its own task. Simulation is an explicit, labelled mode for development and for screeners, never the default for real use.
 
 ## Quick start: simulation, no keys, no network
 
 ```sh
 pnpm install
-pnpm test                       # 118 service tests, including a full end-to-end run and the attack demo (all offline)
+pnpm test                       # 120 service tests, including a full end-to-end run and the attack demo (all offline)
 ROOK_LLM=canned pnpm dev        # simulation profile: a SIMULATION banner, services on ports 7100-7104
 # in another shell:
 pnpm rook run "Due diligence on the NEAR token" --budget 3 --yes
@@ -58,7 +58,7 @@ pnpm web                        # http://localhost:7110 (landing page), http://l
 
 Other useful setups: `ROOK_LLM=near pnpm dev` (real planner and evaluator against the simulator, about 0.10 USD of NEAR AI credit per run; put `NEARAI_API_KEY=...` in `.env` at the repo root) and `ROOK_MARKET=live ROOK_LLM=near pnpm dev` (real agents and prices for planning; approving is refused because the ledger is simulated). Each process stops calling the LLM after `ROOK_LLM_MAX_USD` (default 1) in any 24 h, and logs when it trips.
 
-Other test suites, all offline: `cd contract; cargo test -p rook-budget` (77 tests; on Windows set `AWS_LC_SYS_PREBUILT_NASM=1`) and `cd web; npx tsx --test src/app/app/*.test.ts` (34 tests: NEP-413 sign-in, the funding and close outcome parsers, the transactions, the sign-in and funding store).
+Other test suites, all offline: `cd contract; cargo test -p rook-budget` (77 tests; on Windows set `AWS_LC_SYS_PREBUILT_NASM=1`) and `cd web; npx tsx --test src/app/app/*.test.ts` (35 tests: NEP-413 sign-in, the funding and close outcome parsers, the transactions, the sign-in and funding store).
 
 ## Running for real (`pnpm live`)
 
