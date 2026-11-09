@@ -54,6 +54,23 @@ test('quotes that failed or do not match the /x402 recipients are dropped', () =
   assert.ok(p.notes.some((n) => n.includes('evil') && n.includes('/x402')));
 });
 
+test('search results merge round-robin over the terms, so the specific terms keep their share of the 10 slots', async () => {
+  const { filterSearch } = await import('../src/planner/plan.ts');
+  // 'code review' alone had 12 available agents and used to fill all 10 slots; the audit specialists were cut.
+  const generic = Array.from({ length: 12 }, (_, i) => agent(`review-${i}`));
+  const audit = [agent('review-0'), agent('ledgerline-audit'), agent('offline-audit', { available_now: false }), agent('relay-audit-agent'), agent('west-sentinel')];
+  const security = [agent('raen-contract-guard'), agent('ledgerline-audit'), agent('draft-guard', { listing_status: 'draft' }), agent('kaina-sec-agent')];
+  const kept = filterSearch([generic, audit, security]).map((a) => a.handle);
+  assert.deepEqual(kept, [
+    'review-0', 'ledgerline-audit', 'raen-contract-guard', // each term's first unseen agent in turn
+    'review-1', 'relay-audit-agent', 'kaina-sec-agent',
+    'review-2', 'west-sentinel', // 'security' has no unseen agent left
+    'review-3', 'review-4',
+  ]);
+  assert.deepEqual(filterSearch([generic]).map((a) => a.handle), generic.slice(0, 10).map((a) => a.handle)); // one term: as before
+  assert.deepEqual(filterSearch([[], []]), []);
+});
+
 test('a 0 USDC quote is dropped like any unpayable quote, so a hired subtask never gets a cap of 0', () => {
   // Seen live: purchasing-research-agent-v2 quotes amount "0"; it ranked first and made the contract refuse the funding.
   const p = buildPlan(input({

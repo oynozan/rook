@@ -33,14 +33,23 @@ export const DEFAULT_JUDGE = 'Does the deliverable fully answer the brief with s
 const MAX_PER_SUBTASK = 10;
 const MAX_JUDGES = 2;
 
-/** Step 2: merge the per-term search results by handle and keep agents that can be hired now with USDC. */
+/**
+ * Step 2: keep agents that can be hired now with USDC, and merge the per-term results by handle, taking each term's
+ * next unseen agent in turn. The first term is the generic skill and often fills every slot alone, which cut the
+ * specialists the other terms found (a Solidity audit offered only generic code reviewers).
+ */
 export function filterSearch(resultLists: AgentSummary[][]): AgentSummary[] {
+  const lists = resultLists.map((l) => l.filter((a) => a.available_now && a.listing_status === 'live' && a.payable_with?.includes('USDC')));
   const byHandle = new Map<string, AgentSummary>();
-  for (const a of resultLists.flat()) {
-    if (byHandle.has(a.handle)) continue;
-    if (a.available_now && a.listing_status === 'live' && a.payable_with?.includes('USDC')) byHandle.set(a.handle, a);
+  const next = lists.map(() => 0);
+  for (let added = true; added && byHandle.size < MAX_PER_SUBTASK;) {
+    added = false;
+    lists.forEach((l, t) => {
+      while (next[t] < l.length && byHandle.has(l[next[t]].handle)) next[t]++;
+      if (next[t] < l.length && byHandle.size < MAX_PER_SUBTASK) { byHandle.set(l[next[t]].handle, l[next[t]]); added = true; }
+    });
   }
-  return [...byHandle.values()].slice(0, MAX_PER_SUBTASK);
+  return [...byHandle.values()];
 }
 
 /** Step 3 output hygiene: keep only handles that were in that subtask's search results, at most 3. */
