@@ -58,7 +58,7 @@ pnpm web                        # http://localhost:7110 (landing page), http://l
 
 Other useful setups: `ROOK_LLM=near pnpm dev` (real planner and evaluator against the simulator, about 0.10 USD of NEAR AI credit per run; put `NEARAI_API_KEY=...` in `.env` at the repo root) and `ROOK_MARKET=live ROOK_LLM=near pnpm dev` (real agents and prices for planning; approving is refused because the ledger is simulated). Each process stops calling the LLM after `ROOK_LLM_MAX_USD` (default 1) in any 24 h, and logs when it trips.
 
-Other test suites, all offline: `cd contract; cargo test -p rook-budget` (75 tests; on Windows set `AWS_LC_SYS_PREBUILT_NASM=1`) and `cd web; npx tsx --test src/app/app/*.test.ts` (25 tests: NEP-413 sign-in, the funding-outcome parser and transactions, the sign-in store).
+Other test suites, all offline: `cd contract; cargo test -p rook-budget` (77 tests; on Windows set `AWS_LC_SYS_PREBUILT_NASM=1`) and `cd web; npx tsx --test src/app/app/*.test.ts` (25 tests: NEP-413 sign-in, the funding-outcome parser and transactions, the sign-in store).
 
 ## Running for real (`pnpm live`)
 
