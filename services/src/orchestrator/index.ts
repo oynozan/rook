@@ -110,8 +110,8 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
   // With ROOK_DB set, tasks survive restarts. A plan waiting for approval carries on, and so does a chain-mode task
   // waiting for its funding transaction. A chain-mode task bound to a contract task is rebuilt from the contract before
   // the API listens (a rebuild that fails is tried again after it listens), then resumed (or, killed or failed with
-  // money still on chain, unwound). Any other task that was mid-run is marked failed: a sim-ledger task's balances lived
-  // in memory only.
+  // money still on chain, unwound). Any other task that was mid-run is marked failed, or closed when only the close was
+  // left after its report: a sim-ledger task's balances lived in memory only.
   const db = config.dbPath ? openStore(config.dbPath) : null;
   if (db) {
     for (const doc of db.load()) tasks.set(doc.id, fromDoc(doc));
@@ -137,6 +137,14 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         continue;
       }
       if (isTerminal(t.status)) continue;
+      // A simulated ledger lived in memory only: its books from before the restart would show a refund as under way.
+      if (!chain) t.ledger_saved = null;
+      if (t.status === 'closing' && t.final_result) {
+        // Only the close was left, and nothing of it can resume here (a simulated ledger, or a plan that hires no agent,
+        // holds nothing on chain): the report stands, so the task ends closed, never failed.
+        setStatus(t, 'closed');
+        continue;
+      }
       t.error = `Rook's services restarted while this task was ${t.status}, so it stopped there. ${isFree(t)
         ? 'It hired no agent, so nothing was paid.'
         : chain

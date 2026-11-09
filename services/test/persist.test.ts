@@ -65,6 +65,7 @@ test('a sim-ledger task that was mid-run when the services stopped is marked fai
     id: 't_running', prompt: 'p', budget_atomic: '1000000', reserve_share: 0.2, funder: 'funder.sim', owner: null, status: 'running', error: null,
     created_at: ts, updated_at: ts, plan: null, subtasks: [], receipts: [], final_result: null, llm_calls: [],
     events: [{ seq: 1, ts, task_id: 't_running', type: 'task_status', data: { from: null, to: 'draft' } }],
+    ledger_saved: { spent_atomic: '300000', refunded_atomic: '0', closed: false },
   });
   store.close();
 
@@ -72,6 +73,7 @@ test('a sim-ledger task that was mid-run when the services stopped is marked fai
   const s = await call(`${orch.url}/tasks/t_running`);
   assert.equal(s.task.status, 'failed');
   assert.match(s.task.error, /restarted while this task was running.*simulated ledger lived in memory only.*no real money/);
+  assert.equal(s.ledger, null); // books from before the restart would say the refund is still under way
   await orch.close();
 
   // And the change itself was saved: the next start sees it already failed.
@@ -80,6 +82,30 @@ test('a sim-ledger task that was mid-run when the services stopped is marked fai
   check.close(); // an open handle keeps the file locked on Windows, and the cleanup fails with EBUSY
   assert.equal(doc.status, 'failed');
   assert.deepEqual(doc.events.at(-1)?.data, { from: 'running', to: 'failed' });
+});
+
+test('a sim-ledger task restarted while closing with its report ends closed: the report stands, and nothing is said about the simulated money', async () => {
+  const path = freshDb();
+  const ts = new Date().toISOString();
+  const store = openStore(path);
+  store.save({
+    id: 't_closing', prompt: 'p', budget_atomic: '1000000', reserve_share: 0.2, funder: 'funder.sim', owner: null, status: 'closing', error: null,
+    created_at: ts, updated_at: ts, plan: null, subtasks: [], receipts: [], llm_calls: [],
+    final_result: { final_markdown: '# Report', attribution: [], abandoned: [] },
+    events: [{ seq: 1, ts, task_id: 't_closing', type: 'task_status', data: { from: 'aggregating', to: 'closing' } }],
+    ledger_saved: { spent_atomic: '300000', refunded_atomic: '0', closed: false },
+  });
+  store.close();
+
+  const orch = await start(0);
+  const s = await call(`${orch.url}/tasks/t_closing`);
+  assert.deepEqual([s.task.status, s.task.error, s.final_result.final_markdown, s.ledger], ['closed', null, '# Report', null]);
+  await orch.close();
+  const check = openStore(path);
+  const [doc] = check.load();
+  check.close();
+  assert.deepEqual(doc.events.slice(1).map((e) => [e.type, e.data.to]), [['task_status', 'closed']]); // no error, no refund claimed
+  assert.equal(doc.ledger_saved, null);
 });
 
 test('a planned task stored with an empty plan ends failed on load, with the reason in plain words', async () => {
