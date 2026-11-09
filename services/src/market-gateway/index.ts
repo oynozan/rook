@@ -6,6 +6,9 @@ import { serve, HttpError, type Running } from '../shared/http.ts';
 import { AcceptsRow, type A2AState, type A2ATask, type AgentSummary, type GatewayError, type Part, type X402Config } from '../shared/types.ts';
 
 const HANDLE = /^[a-z0-9-]+$/;
+// Search paging: the market's largest page, how many pages one search may read, and how many available agents are
+// enough (the planner keeps 10 per subtask, merged over up to 3 terms).
+const SEARCH_PAGE = 50, SEARCH_PAGES = 3, SEARCH_WANT = 20;
 const sleep = (ms: number) => new Promise((ok) => setTimeout(ok, ms));
 
 // Endpoints are resolved at call time so tests can point SIMULATOR_URL at a port-0 simulator.
@@ -145,13 +148,29 @@ export async function start(port = config.ports.marketGateway): Promise<Running>
   try { await loadX402(); } catch (e: any) { console.warn(`[market-gateway] /.well-known/x402 not loaded at startup, will retry: ${e?.message ?? e}`); }
 
   return serve('market-gateway', {
+    // The market pages its search (limit at most 50, then offset) and lists offline agents too, often half a page:
+    // read pages until SEARCH_WANT agents are available now, the results end, or SEARCH_PAGES pages were read.
     'GET /search': async ({ query }) => {
-      const r = await out(`${endpoints().search}?q=${encodeURIComponent(query.get('q') ?? '')}`).catch((e) => {
-        throw new HttpError(502, `market search unreachable: ${e?.message ?? e}`);
-      });
-      if (r.status !== 200) throw new HttpError(502, `market search: HTTP ${r.status}`);
-      const rows = Array.isArray(r.body) ? r.body : r.body?.agents ?? r.body?.data ?? r.body?.items ?? [];
-      return { agents: rows.map(summary).filter((a: AgentSummary) => a.handle) };
+      const q = encodeURIComponent(query.get('q') ?? '');
+      const agents: AgentSummary[] = [], seen = new Set<string>();
+      for (let page = 0; page < SEARCH_PAGES && agents.length < SEARCH_WANT; page++) {
+        let r: Reply | undefined, err = '';
+        try { r = await out(`${endpoints().search}?q=${q}&limit=${SEARCH_PAGE}&offset=${page * SEARCH_PAGE}`); } catch (e: any) { err = `market search unreachable: ${e?.message ?? e}`; }
+        if (r && r.status !== 200) err = `market search: HTTP ${r.status}`;
+        if (err || !r) {
+          if (page > 0) break; // a later page failing still leaves the agents already found
+          throw new HttpError(502, err);
+        }
+        const rows: any[] = Array.isArray(r.body) ? r.body : r.body?.agents ?? r.body?.data ?? r.body?.items ?? [];
+        let fresh = 0;
+        for (const a of rows.map(summary)) {
+          if (!a.handle || seen.has(a.handle)) continue;
+          seen.add(a.handle); fresh++;
+          if (a.available_now) agents.push(a);
+        }
+        if (rows.length < SEARCH_PAGE || !fresh) break; // the last page, or a search that ignores offset
+      }
+      return { agents };
     },
 
     'GET /x402': async () => {

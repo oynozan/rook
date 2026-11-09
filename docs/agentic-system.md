@@ -298,7 +298,7 @@ A receipt is written for every paid hire (every `COMPLETED` task, and every send
 
 | Method | Path | Body or query | Returns |
 | --- | --- | --- | --- |
-| `GET` | `/search` | `q` | `{ agents: AgentSummary[] }` |
+| `GET` | `/search` | `q` | `{ agents: AgentSummary[] }`, only agents available now |
 | `GET` | `/x402` | | The marketplace's `/.well-known/x402` (`{ x402Version, recipients: [{ network, asset, payTo }] }`), read at startup |
 | `POST` | `/quote` | `{ handle }` | `{ ok: true, row: AcceptsRow }` or `{ ok: false, error: { code, message } }` |
 | `POST` | `/send` | `{ handle, text, context_id?, payment }` | `{ ok: true, task: A2ATask }` or `{ ok: false, error }`. `error.code` is `outcome_unknown` when a 502 was retried with the same header and the call still did not succeed: the payment may have settled, so the orchestrator counts it as spent and writes a receipt with no verdict |
@@ -308,6 +308,7 @@ A receipt is written for every paid hire (every `COMPLETED` task, and every send
 `A2ATask` is normalised: `{ id, context_id, state, artifacts: [{ name?, parts: [{ text } | { url } | { raw }] }] }`, with `state` one of `SUBMITTED`, `WORKING`, `COMPLETED`, `REJECTED`, `FAILED`, `CANCELED` (the `TASK_STATE_` prefix stripped). `AgentSummary` keeps `handle, name, description, category, tags, available_now, listing_status, payable_with, sla_seconds, success_rate, delivered_jobs`.
 
 - A token bucket of `ROOK_RATE_PER_MIN` (60) requests a minute covers every outbound call; a `429` backs off and retries up to 3 times.
+- `/search` pages through the market's results (`limit=50`, the market's largest page, then `offset`) and keeps the agents with `available_now`; the market lists offline agents too, often half a page, and answers 20 rows without `limit`. It stops once 20 agents are available, at a short page (the last), at a page with no new handle, or after 3 pages, so a search costs one request in the common case and at most 3. A later page that fails leaves the agents already found; a failed first page is a 502.
 - `/quote` sends `SendMessage` with a placeholder message and no payment, and expects HTTP 402. A JSON-RPC error inside HTTP 200 becomes `{ ok: false, error }`.
 - `live`: `https://market.near.ai/v1/agents`, `https://<handle>.market.near.ai/a2a/v1`. `/send` without `payment` is refused locally, since that call would only return a quote.
 - `sim`: the simulator's `/v1/agents` and `/a2a/<handle>/v1`, same JSON-RPC bodies.

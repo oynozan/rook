@@ -42,6 +42,50 @@ test('search finds both holders agents; /x402 is the simulator config', async ()
   assert.deepEqual((await call(`${gw.url}/x402`)).recipients, [{ network: 'near:mainnet', asset: 'usdc.sim', payTo: 'treasury.sim' }]);
 });
 
+test('live search reads pages of 50 until 20 agents are available now, skips offline ones, and reads at most 3 pages', async (t) => {
+  const { serve, HttpError } = await import('../src/shared/http.ts');
+  // The market's /v1/agents: limit at most 50, offset, and offline agents listed too. Availability per query:
+  // 'half' every other agent, 'sparse' 1 in 5, 'rare' 1 in 25, 'few' all of only 30 rows, 'stuck' 1 in 5 and offset ignored.
+  // 'flaky' fails after its first page, 'down' at once.
+  const every: Record<string, number> = { half: 2, sparse: 5, rare: 25, few: 1, stuck: 5, flaky: 5, down: 1 };
+  const rows = (q: string) => Array.from({ length: q === 'few' ? 30 : 200 }, (_, i) => ({
+    handle: `${q}-${i}`, name: `${q} ${i}`, available_now: i % every[q] === 0, listing_status: 'live', payable_with: ['USDC'], sla_seconds: 60,
+  }));
+  const asked: string[] = [];
+  const market = await serve('fake-market', {
+    'GET /v1/agents': ({ query }) => {
+      const q = query.get('q')!, limit = Math.min(50, Number(query.get('limit') ?? 20)), offset = q === 'stuck' ? 0 : Number(query.get('offset') ?? 0);
+      asked.push(`${limit}@${query.get('offset')}`);
+      if (q === 'down' || (q === 'flaky' && offset > 0)) throw new HttpError(503, 'busy');
+      return { agents: rows(q).slice(offset, offset + limit) };
+    },
+    'GET /.well-known/x402': () => ({ x402Version: 2, recipients: [] }),
+  }, 0);
+  const saved = { ROOK_MARKET: process.env.ROOK_MARKET, MARKET_BASE_URL: process.env.MARKET_BASE_URL };
+  process.env.ROOK_MARKET = 'live';
+  process.env.MARKET_BASE_URL = market.url;
+  const live = await startGateway(0);
+  t.after(async () => {
+    for (const [k, v] of Object.entries(saved)) if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    await live.close(); await market.close();
+  });
+  const search = async (q: string) => {
+    asked.length = 0;
+    const handles: string[] = (await call(`${live.url}/search?q=${q}`)).agents.map((a: any) => a.handle);
+    return { pages: [...asked], available: handles.every((h) => Number(h.split('-')[1]) % every[q] === 0), count: handles.length };
+  };
+
+  assert.deepEqual(await search('half'), { pages: ['50@0'], available: true, count: 25 }); // one page is enough
+  assert.deepEqual(await search('sparse'), { pages: ['50@0', '50@50'], available: true, count: 20 });
+  assert.deepEqual(await search('rare'), { pages: ['50@0', '50@50', '50@100'], available: true, count: 6 }); // the bound
+  assert.deepEqual(await search('few'), { pages: ['50@0'], available: true, count: 30 }); // a short page is the last
+  assert.deepEqual(await search('stuck'), { pages: ['50@0', '50@50'], available: true, count: 10 }); // same rows again: stop
+  assert.deepEqual(await search('flaky'), { pages: ['50@0', '50@50'], available: true, count: 10 }); // keeps page 1
+  const down = await fetch(`${live.url}/search?q=down`);
+  assert.equal(down.status, 502);
+  assert.match((await down.json()).error, /market search: HTTP 503/);
+});
+
 test('quote, paid send to COMPLETED, replay and mismatched rows refused', async () => {
   const row = await quote('sim-holders-lite');
   assert.equal(row.amount, '150000');
