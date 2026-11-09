@@ -104,6 +104,7 @@ Spending is bounded per task by `ROOK_MAX_BUDGET_USDC` (default 50) and by the c
 | `ROOK_MAX_BUDGET_USDC` | largest budget one task may ask for (default 50); prompts are capped at 4000 characters |
 | `ROOK_DB` | orchestrator: SQLite file for tasks; `pnpm dev` uses `services/data/rook.sqlite` |
 | `ROOK_SESSION_SECRET` | web app: 32+ random characters that sign the sign-in cookie; required in production |
+| `NEXT_PUBLIC_SITE_URL` | web app: the public address, e.g. `https://rook.example`; used for share links, the social card, sitemap and robots (default `http://localhost:7110`) |
 | `ROOK_SIGNIN_RECIPIENT` | web app: the domain the sign-in message names; required in production |
 | `ROOK_DRAFTS_PER_HOUR` | web app: plans one account may draft per hour (default 20), so one account cannot drain the NEAR AI budget |
 | `ROOK_WEB_DB` | web app: SQLite file for spent sign-in nonces, sessions, draft limits and sent funding transfers (default `web/.data/web.sqlite`) |
