@@ -98,6 +98,8 @@ export async function start(port = config.ports.chainGateway): Promise<Running> 
     },
 
     'GET /config': async () => ({ contract_id: contract, network: config.nearNetwork, ...(await viewCall(contract, 'get_config')) }),
+    /** Tasks `account` funded that the contract has not closed yet (it refunds a create_task over max_open_tasks). */
+    'GET /open-tasks': async ({ query }) => ({ open: Number(await viewCall(contract, 'get_open_tasks', { account_id: str(query.get('account'), 'account') })) }),
     'GET /task/:id': async ({ params }) => {
       const [task, subtasks] = await Promise.all([
         viewCall(contract, 'get_task', { task_id: params.id }), viewCall(contract, 'get_subtasks', { task_id: params.id }),

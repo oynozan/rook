@@ -12,3 +12,4 @@ next-env.d.ts
 
 # local one-off chain operations (read keys from .env, never commit)
 /services/.ops/
+/.claude/worktrees/

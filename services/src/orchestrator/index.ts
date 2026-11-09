@@ -123,7 +123,18 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
   // Chain mode: a killed or failed task returns its money after the terminal status; its stream stays open until then.
   // ponytail: a closeTask that keeps failing leaves the stream open until the client goes; the errors still stream.
   const moving = (t: Task) => chain !== null && chain.contractTaskOf(t.id) !== null && ledger.view(t.id)?.closed === false;
-  let chainCfg: { contract_id: string | null; usdc: string | null } | null = null;
+  /** The contract's settings, read once from the chain-gateway (null until it answers). */
+  let chainCfg: ChainCfg | null = null;
+  const contractCfg = async (): Promise<ChainCfg | null> => {
+    if (chain && !chainCfg) {
+      chainCfg = await call(`${config.urls.chainGateway}/config`).then((c: any) => ({
+        contract_id: c.contract_id ?? null, usdc: c.usdc ?? null, owner: c.owner ?? null,
+        min_budget: /^\d+$/.test(String(c.min_budget ?? '')) ? BigInt(c.min_budget) : 0n,
+        max_open_tasks: Number.isInteger(c.max_open_tasks) ? c.max_open_tasks : null,
+      }), () => null);
+    }
+    return chainCfg;
+  };
   const running = await serve('orchestrator', guard({
     'POST /tasks': async ({ body }) => {
       const b = CreateBody.parse(body ?? {});
@@ -133,6 +144,8 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       if (budget <= 0n) throw new HttpError(400, 'budget_usdc must be positive');
       const max = config.maxBudgetAtomic;
       if (budget > max) throw new HttpError(400, `budget ${formatUsdc(budget)} USDC is above this Rook's limit of ${formatUsdc(max)} USDC (ROOK_MAX_BUDGET_USDC)`);
+      const min = (await contractCfg())?.min_budget ?? 0n;
+      if (budget < min) throw new HttpError(400, `budget ${formatUsdc(budget)} USDC is below the contract's minimum of ${formatUsdc(min)} USDC`);
       const t = newTask(b.prompt, budget, b.reserve_share ?? 0.2, b.owner ?? null);
       tasks.set(t.id, t);
       saveTask(t);
@@ -163,13 +176,14 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
      * no money moves"; with the chain ledger, a test run on `network` where funding still moves tokens).
      */
     'GET /mode': async () => {
-      if (chain && !chainCfg) {
-        chainCfg = await call(`${config.urls.chainGateway}/config`).then((c: any) => ({ contract_id: c.contract_id ?? null, usdc: c.usdc ?? null }), () => null);
-      }
+      const c = await contractCfg();
       return {
         market: config.market, llm: config.llm, ledger: config.ledger, network: chain ? config.nearNetwork : 'sim',
-        contract_id: chain ? chainCfg?.contract_id ?? (config.contractId || null) : null, usdc: chain ? chainCfg?.usdc ?? null : null,
+        contract_id: chain ? c?.contract_id ?? (config.contractId || null) : null, usdc: chain ? c?.usdc ?? null : null,
         paying: chain !== null, simulated: config.simulated,
+        // Any signed-in account funds its own task; the contract's limits on that (null without the chain).
+        min_budget_atomic: chain && c ? c.min_budget.toString() : null, max_open_tasks: chain ? c?.max_open_tasks ?? null : null,
+        contract_owner: chain ? c?.owner ?? null : null,
       };
     },
 
@@ -192,7 +206,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       }
       if (chain) {
         // Rook never creates the task on chain: the human funds it with the caps they approve, then calls /funded.
-        const funding = await fundingInstructions(t);
+        const funding = await fundingInstructions(t, await contractCfg());
         setStatus(t, 'approved');
         return { ...taskView(t), funding };
       }
@@ -252,8 +266,8 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       if (isTerminal(t.status)) throw new HttpError(409, `task is already ${t.status}`);
       kill(ledger, t);
       if (!chain) return taskView(t);
-      const cmd = chain.ownerKillCommand(t.id);
-      return { ...taskView(t), human_action: cmd ? `The signer refuses new payments and Rook returns what the sub-accounts hold. To stop the task on the contract too, the contract owner calls kill_task: ${cmd}` : null };
+      const cmd = chain.killCommand(t.id, t.funder);
+      return { ...taskView(t), human_action: cmd ? `The signer refuses new payments and Rook returns what the sub-accounts hold. To stop the task on the contract too, its funder (or the contract owner) calls kill_task: ${cmd}` : null };
     },
 
     /**
@@ -290,17 +304,30 @@ function expected(t: Task) {
   };
 }
 
-/** What the human sends: USDC ft_transfer_call to the contract with the plan's caps in msg. */
-async function fundingInstructions(t: Task) {
+type ChainCfg = { contract_id: string | null; usdc: string | null; owner: string | null; min_budget: bigint; max_open_tasks: number | null };
+
+/**
+ * What the funder sends: USDC ft_transfer_call to the contract with the plan's caps in msg. Any account funds its own
+ * task; `funder` is the signed-in owner who must send it (null for a CLI task: whoever sends it becomes the funder).
+ */
+async function fundingInstructions(t: Task, c: ChainCfg | null) {
   const want = expected(t);
   if (!want.caps.length) throw new HttpError(409, 'every subtask is self_do: nothing to fund on chain');
   if (want.reserve !== t.plan?.budget.reserve_atomic) {
     throw new HttpError(409, `reserve_share ${t.reserve_share} gives ${want.reserve} on chain but ${t.plan?.budget.reserve_atomic} in the plan; use a share with at most 4 decimals`);
   }
+  if (c && BigInt(t.budget_atomic) < c.min_budget) {
+    throw new HttpError(409, `budget ${formatUsdc(BigInt(t.budget_atomic))} USDC is below the contract's minimum of ${formatUsdc(c.min_budget)} USDC`);
+  }
   const cfg = await call(`${config.urls.chainGateway}/config`);
+  if (t.owner && c?.max_open_tasks) {
+    // The contract refunds a transfer over the limit: say so before the wallet opens.
+    const open = await call<{ open: number }>(`${config.urls.chainGateway}/open-tasks?account=${encodeURIComponent(t.owner)}`).then((r) => r.open, () => 0);
+    if (open >= c.max_open_tasks) throw new HttpError(409, `${t.owner} already has ${open} open tasks on the contract (the limit is ${c.max_open_tasks}); wait for one to close`);
+  }
   return {
-    // `owner`: the contract owner, the only account the contract takes create_task from (`funder` kept for older clients).
-    network: cfg.network, contract_id: cfg.contract_id, usdc: cfg.usdc, owner: cfg.owner, funder: cfg.owner, amount_atomic: t.budget_atomic,
+    network: cfg.network, contract_id: cfg.contract_id, usdc: cfg.usdc, funder: t.owner, contract_owner: cfg.owner ?? null,
+    amount_atomic: t.budget_atomic,
     msg: JSON.stringify({ create_task: { reserve_bps: want.reserve_bps, caps: want.caps } }),
   };
 }

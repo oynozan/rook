@@ -187,7 +187,7 @@ test('restart mid-hire: rebuilt from the contract, the hire is polled again by i
   } finally { await orch.close(); }
 });
 
-test('kill in chain mode: the authorization is waited out, the sub-account returned and the task closed; kill_task stays the owner\'s', async () => {
+test('kill in chain mode: the authorization is waited out, the sub-account returned and the task closed; kill_task stays the funder\'s', async () => {
   authTtlMs = 300; // the agent refuses CancelTask, so only the authorization's expiry frees the money
   const orch = await start(0);
   try {
@@ -206,7 +206,7 @@ test('kill in chain mode: the authorization is waited out, the sub-account retur
     // Every step is recorded after the killed status, and the event names the owner's kill_task.
     const evs = await events(orch, id);
     const at = evs.findIndex((e) => e.type === 'task_status' && e.data.to === 'killed');
-    assert.match(evs.find((e) => e.type === 'ledger' && e.data.op === 'kill').data.human_action, /owner's call: near contract call-function .* kill_task json-args '\{"task_id":"b"\}'/);
+    assert.match(evs.find((e) => e.type === 'ledger' && e.data.op === 'kill').data.human_action, /funder's call: near contract call-function .* kill_task json-args '\{"task_id":"b"\}'/);
     assert.deepEqual(evs.slice(at + 1).filter((e) => e.type === 'ledger').map((e) => e.data.op), ['clearing', 'release', 'returnLeftover', 'closeTask']);
     assert.equal(evs.find((e) => e.data.op === 'clearing').data.how, 'wait');
   } finally { await orch.close(); authTtlMs = 60_000; }
@@ -347,4 +347,16 @@ test('a killed task the owner closed on chain with a sub-account still Funded: R
     assert.ok(calls.includes(`return ${account} 200000`) && calls.includes('close g'));
     assert.deepEqual([s.task.status, s.ledger.spent_atomic, sub('g', 1).status, contract.get('g')!.task.status], ['killed', '100000', 'Returned', 'Closed']);
   } finally { await orch.close(); }
+});
+
+test('restore: a contract task deleted by an empty close counts as closed, its whole budget refunded', async () => {
+  const { createChainLedger } = await import('../src/orchestrator/chain-ledger.ts');
+  const l = createChainLedger();
+  const r = await l.restore('T-gone', { contract_task_id: 'gone', nmap: { 1: 1 }, accounts: {}, auths: {} }, { funder: 'alice.test', budget: 1_000_000n, reserve_share: 0.2, saved: null });
+  assert.equal(r.status, 'Closed');
+  assert.match(r.notes[0], /deleted/);
+  const v = l.view('T-gone')!;
+  assert.deepEqual([v.closed, String(v.refunded_atomic), String(v.spent_atomic)], [true, '1000000', '0']);
+  // With a funded sub-account on record, a missing contract task is an error, never a silent close.
+  await assert.rejects(l.restore('T-odd', { contract_task_id: 'gone2', nmap: { 1: 1 }, accounts: { 1: 'tgone2-1.rook.test' }, auths: {} }, { funder: 'alice.test', budget: 1_000_000n, reserve_share: 0.2, saved: null }), /gone but Rook funded/);
 });

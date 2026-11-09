@@ -120,7 +120,8 @@ test('ROOK_SERVICE_TOKEN: every orchestrator route needs x-rook-token; /mode has
   assert.equal((await req('/tasks/t_x/events', undefined, null)).status, 401);
   const m = await req('/mode');
   assert.equal(m.status, 200);
-  assert.deepEqual(m.body, { market: 'sim', llm: 'canned', ledger: 'sim', network: 'sim', contract_id: null, usdc: null, paying: false, simulated: true });
+  assert.deepEqual(m.body, { market: 'sim', llm: 'canned', ledger: 'sim', network: 'sim', contract_id: null, usdc: null, paying: false, simulated: true,
+    min_budget_atomic: null, max_open_tasks: null, contract_owner: null });
 });
 
 test('every service refuses browsers: an Origin or Sec-Fetch-Site header, a Host that is not loopback, a body that is not JSON', async () => {
