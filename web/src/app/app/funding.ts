@@ -179,8 +179,9 @@ export type KeptTransfer = { contract_task_id: string | null; tx_hash: string | 
 
 export const keptTransferKey = (task_id: string) => `rook:funding:${task_id}`;
 
-const TX_HASH = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/;
-const CONTRACT_TASK = /^[0-9a-z]{1,20}$/;
+/** A NEAR transaction hash, and a contract task id, as the page and the web server accept them. */
+export const TX_HASH = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/;
+export const CONTRACT_TASK = /^[0-9a-z]{1,20}$/;
 
 /** A transfer to keep for `account`, as stored; null when there is nothing to keep (the entry goes). */
 export function keptValue(account: string, t: KeptTransfer | null): string | null {

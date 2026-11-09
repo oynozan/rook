@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import { forgetFundingOf, forgetUnreadFunding, fundingSent, giveBackDraftSlot, markFundingRefunded, recordFundingSent, takeDraftSlot } from './db';
 import { checkDraft, draftRefusal } from './draft';
-import { draftShortfall, untilFinal, type Funding } from './funding';
+import { CONTRACT_TASK, draftShortfall, TX_HASH, untilFinal, type Funding } from './funding';
 import { approveTask, cancelTask, createTask, fundedTask, getMode, getTask, killTask, OrchestratorDown, OrchestratorError } from './orchestrator';
 import { actionRefusal, fundingCallFailure, type TaskAction } from './refusals';
 import { currentAccount } from './session';
@@ -103,8 +103,6 @@ export async function fundingInstructions(id: string) { return asOwner('fund', (
 export async function cancel(id: string) { return asOwner('cancel', (owner) => cancelTask(id, owner)); }
 export async function stop(id: string) { return asOwner('stop', (owner) => killTask(id, owner)); }
 
-const TX_HASH = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/;
-const CONTRACT_TASK = /^[0-9a-z]{1,20}$/;
 const txOf = (v: unknown) => (typeof v === 'string' && TX_HASH.test(v) ? v : null);
 
 // Funding records are keyed by task and signed-in account, so writing one needs no orchestrator: a record only ever

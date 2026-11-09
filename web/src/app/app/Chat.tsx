@@ -13,8 +13,8 @@ import { Composer, type ComposerErrors } from './Composer';
 import { alertLine, deliveredParts, problemLine, skipReason } from './feed';
 import {
   balanceProblem, closeTaskTransaction, confirmFailure, contractHasTask, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
-  keptTransferKey, keptValue, moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, restoreKept, termsOf, txHashOf, usdc,
-  whoseTransfer,
+  keptTransferKey, keptValue, moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, restoreKept, termsOf, TX_HASH, txHashOf,
+  usdc, whoseTransfer,
   type CloseResult, type Funding, type FundingResult, type KeptTransfer, type Terms,
 } from './funding';
 import { explorerTx, NETWORK, rpcFor, type Network } from './network';
@@ -360,8 +360,6 @@ function ReceiptProof({ r, network }: { r: Receipt; network: Network }) {
   ].filter(Boolean);
   return items.length ? <p className="mt-0.5 flex flex-wrap gap-x-3 gap-y-0.5 pl-8 text-xs text-ink/60">{items}</p> : null;
 }
-
-const TX_HASH = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/;
 
 /** This tab's sessionStorage. A private window or blocked site data may refuse it: then nothing is kept. */
 const session = {
