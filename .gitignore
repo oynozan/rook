@@ -9,3 +9,6 @@ dist/
 .next/
 next-env.d.ts
 *.tsbuildinfo
+
+# local one-off chain operations (read keys from .env, never commit)
+/services/.ops/

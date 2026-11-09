@@ -15,7 +15,7 @@ RUSTFLAGS="-C target-cpu=mvp -C link-arg=-s" cargo build --workspace --target wa
 
 PowerShell: `$env:RUSTFLAGS="-C target-cpu=mvp -C link-arg=-s"` before the same `cargo build`.
 
-Unit tests (near-sdk `unit-testing`, mocked blockchain, callbacks simulated by setting promise results; 64 tests):
+Unit tests (near-sdk `unit-testing`, mocked blockchain, callbacks simulated by setting promise results; 75 tests):
 
 ```sh
 cargo test -p rook-budget
@@ -35,10 +35,10 @@ for c in rook_budget rook_mock_ft; do wasm-opt $F -Oz --strip-debug --strip-prod
 
 | File | cargo | after `wasm-opt -Oz` | Storage stake (1 NEAR per 100 KB) |
 | --- | --- | --- | --- |
-| `rook_budget` | 331,129 bytes | 266,337 bytes | 2.66 NEAR |
+| `rook_budget` | 340,310 bytes | 273,809 bytes | 2.74 NEAR |
 | `rook_mock_ft` | 181,026 bytes | 150,457 bytes | 1.50 NEAR |
 
-Measured 2026-11-09. `wasm-opt` kept all 25 exports. The optimised binary has not run on a NEAR node yet; the testnet run below is its first.
+Measured 2026-11-09 (after open funding). `wasm-opt` kept all 25 exports. The optimised binary has not run on a NEAR node yet; the testnet run below is its first.
 
 ## Methods (`rook-budget`)
 
@@ -47,23 +47,24 @@ Amounts are USDC atomic units as decimal strings. Task ids are short base-36 str
 | Method | Caller | Gas to attach | Does |
 | --- | --- | --- | --- |
 | `new(owner, orchestrator, signer, usdc)` | deployer (init) | | Sets the four accounts; orchestrator and signer must differ |
-| `ft_on_transfer(sender_id, amount, msg)` | USDC contract only (panics otherwise) | | `{"create_task":{"reserve_bps":2000,"caps":["300000","200000"]}}` from the owner opens a task: reserve at most 9000 bps, 1 to 32 caps, each > 0, summing to at most budget - reserve. Cap n (1-based) is the only amount subtask n can ever be funded with. `{"return":{"task_id":"0","n":1}}` from that subtask's sub-account credits the task (also after the subtask was marked Returned). Anything else, `create_task` from anyone but the owner, or `create_task` while killed: full refund |
+| `ft_on_transfer(sender_id, amount, msg)` | USDC contract only (panics otherwise) | | `{"create_task":{"reserve_bps":2000,"caps":["300000","200000"]}}` from any account opens a task with that account as its funder: budget at least `min_budget` (1 USDC until the owner changes it), at most `max_open_tasks` (5) of the funder's tasks open at once, reserve at most 9000 bps, 1 to 32 caps, each > 0, summing to at most budget - reserve. Cap n (1-based) is the only amount subtask n can ever be funded with. `{"return":{"task_id":"0","n":1}}` from that subtask's sub-account credits the task (also after the subtask was marked Returned). Anything else, a `create_task` that breaks a limit, from a subtask account, or while killed: full refund |
 | `register_subtask_key(task_id, n, public_key)` | signer | 30 Tgas | Sets the full-access key of sub-account n. Task open and not killed, `n` within the approved caps, the subtask new or Failed with attempts left; once per funding attempt (a key left by a previous signer is overwritten). Event `subtask_key_registered` |
 | `fund_subtask(task_id, n)` | orchestrator | 100 Tgas | Panics unless the current signer registered a key for n (the key is used up). Takes the approved `caps[n-1]` from the unallocated budget, creates `t<task_id>-<n>.<contract>` with the registered key and 0.01 NEAR, then in one receipt on USDC: `storage_deposit` (0.00125 NEAR) and `ft_transfer` of the cap (1 yocto). Rolls back on any failure: the subtask becomes Failed and its cap goes back to the pool. A Failed n can be retried (3 attempts in all) after the signer registers a new key; retry k creates `t<task_id>-<n>-<k>.<contract>` and the subtask's `attempt` says which one is current. Refused unless the contract has 0.01625 NEAR free above its storage stake; if the storage deposit cannot be paid when the callback runs, the funding fails and rolls back |
 | `top_up(task_id, n, amount)` | orchestrator | 50 Tgas | Sends `amount` from the task's reserve to a funded sub-account; restores the reserve if the transfer fails |
-| `mark_empty(task_id, n)` | orchestrator or owner | 50 Tgas | For a subtask that is Funded (not Funding or ToppingUp) on a task that is not Closing or Closed (killed is fine): reads USDC `ft_balance_of` of the current attempt's sub-account. The callback `on_mark_empty` marks the subtask Returned with 0 credited and emits `returned` with `"amount":"0","empty":true` only when the balance is exactly `"0"` and the subtask is unchanged (still Funded, same attempt, no top-up started since). Otherwise, including a failed balance read, nothing changes and the call returns `false`; it returns `true` when marked |
+| `mark_empty(task_id, n)` | orchestrator, owner or the task's funder | 50 Tgas | For a subtask that is Funded (not Funding or ToppingUp) on a task that is not Closing or Closed (killed is fine): reads USDC `ft_balance_of` of the current attempt's sub-account. The callback `on_mark_empty` marks the subtask Returned with 0 credited and emits `returned` with `"amount":"0","empty":true` only when the balance is exactly `"0"` and the subtask is unchanged (still Funded, same attempt, no top-up started since). Otherwise, including a failed balance read, nothing changes and the call returns `false`; it returns `true` when marked |
 | `record_receipt(task_id, n, receipt)` | orchestrator | 30 Tgas | Appends `{a2a_task_id, agent_handle, amount, verdict: "pass"/"fail"/null, attestation_hash, payment_hash}`; strings at most 128 bytes, 64 receipts per task. On a closing or closed task, only for a subtask still Funded. Returns the seq |
-| `close_task(task_id)` | orchestrator or owner | 50 Tgas | Needs every subtask Returned or Failed (an emptied sub-account becomes Returned through `mark_empty`), then refunds what the contract holds for the task to the funder. The owner may close a killed task with unreturned subtasks; later returns can be refunded by closing again. If the refund fails, the task goes back to its status before that close (Open, or Closed for a re-close) |
-| `kill()`, `kill_task(task_id)` | owner | | Blocks `register_subtask_key`, `fund_subtask`, `top_up` and new tasks. Returns, `mark_empty` and close still work. No deposit needed, so a wallet sign-in key can kill (it can only stop funding) |
+| `close_task(task_id)` | orchestrator, owner or the task's funder | 50 Tgas | Needs every subtask Returned or Failed (an emptied sub-account becomes Returned through `mark_empty`), then refunds what the contract holds for the task to the funder. The funder or the owner may close a killed task with unreturned subtasks; later returns can be refunded by closing again. A task closed with no subtask ever funded is deleted once its refund lands (`task_closed` carries `"deleted":true`), and a first close frees one of the funder's open-task slots. If the refund fails, the task goes back to its status before that close (Open, or Closed for a re-close) |
+| `kill()` (owner), `kill_task(task_id)` (owner or the task's funder) | | | Blocks `register_subtask_key`, `fund_subtask`, `top_up` and new tasks. Returns, `mark_empty` and close still work. No deposit needed, so a wallet sign-in key can kill (it can only stop funding) |
 | `set_orchestrator(account_id)`, `set_signer(account_id)` | owner, 1 yoctoNEAR | | Key rotation (the two must stay different accounts). `set_signer` also voids every key registered so far for subtasks not yet funded; the new signer registers its own. The deposit means only a full-access key can call it, not a wallet sign-in key |
 | `resolve_stuck(task_id, n?, arrived)` | owner, 1 yoctoNEAR | | Repair for a callback that never completed, allowed 10,000 blocks after the transfer started. With `n`: a subtask stuck in Funding or ToppingUp becomes Funded (`arrived: true`) or rolls back. Without `n`: a task stuck in Closing becomes Closed or rolls back. Read the USDC receipt outcome on chain before choosing `arrived` |
-| `get_config()`, `get_task(task_id)` (with `caps`), `get_subtasks(task_id)` (with each `public_key`), `get_receipts(task_id, from?, limit?)`, `ledger_check(task_id)` | anyone (views) | | `get_receipts` pages at most 50. `ledger_check` recomputes the accounting |
+| `set_limits(min_budget, max_open_tasks)` | owner, 1 yoctoNEAR | | Both positive. Defaults 1 USDC (`"1000000"`) and 5 |
+| `get_config()` (with `min_budget`, `max_open_tasks`), `get_open_tasks(account_id)`, `get_task(task_id)` (with `caps`), `get_subtasks(task_id)` (with each `public_key`), `get_receipts(task_id, from?, limit?)`, `ledger_check(task_id)` | anyone (views) | | `get_receipts` pages at most 50. `ledger_check` recomputes the accounting |
 
 Orchestrator and signer methods take no attached deposit (a function-call key cannot attach NEAR). The contract pays sub-account NEAR and storage deposits from its own balance, so keep it funded: about 0.01125 NEAR per subtask plus its own state storage (about 0.006 NEAR per receipt at the string limits).
 
 **Empty sub-accounts (gap closed 2026-11-09).** NEP-141 refuses a 0-amount transfer, so a sub-account that paid out its whole balance can never send its `return`, and `close_task` used to stay blocked for that task. `mark_empty` closes the gap and replaces the services' workaround of leaving 1 atomic unit in every sub-account. A return that still arrives for a Returned subtask is credited as usual (a Closed task can then be closed again), so a mark that raced an incoming transfer loses nothing. ponytail: the balance is read in a separate receipt; the `since` and status checks catch a top-up or return that started after the read, and a late-arriving return is still credited. Unit tests cover: refused when not Funded, for a wrong caller and on a Closing or Closed task; balance 0 marks Returned, `ledger_check` holds and `close_task` succeeds; a balance above 0, a failed read or a malformed result change nothing; stale callbacks change nothing.
 
-**Trust model.** The owner approves every subtask's cap when it funds the task; the orchestrator and the signer are separate accounts with separate keys (design A).
+**Trust model.** Any account can fund a task; its funder approves every subtask's cap and the reserve in that one transfer, can stop it (`kill_task`) and close it, and is the only account a refund ever goes to. The orchestrator and the signer are separate accounts with separate keys (design A). The contract pays each funded subtask's NEAR (about 0.01625) from its own balance; `min_budget`, `max_open_tasks` and deleting never-funded tasks on close keep strangers from filling its storage.
 
 - Orchestrator key alone: can only fund approved caps into sub-accounts whose key the signer registered, top them up from the task's reserve, record receipts, mark a sub-account that holds 0 USDC as returned, and close (the refund always goes to the funder). It cannot pick a sub-account key or send USDC anywhere else.
 - Signer key alone: can only register keys for unfunded subtasks. It holds the sub-account keys, so it can spend what is already in funded sub-accounts: at most the approved caps plus top-ups. Rotating it with `set_signer` cuts it off from every subtask not yet funded.
@@ -87,7 +88,7 @@ W=target/wasm32-unknown-unknown/release
 near account create-account sponsor-by-faucet-service you.testnet autogenerate-new-keypair save-to-keychain network-config testnet create
 
 # 1. Accounts: budget contract, mock USDC, orchestrator role, signer role (about 7 NEAR in all)
-#    rook: 2.66 NEAR code stake + ~80 subtasks at 0.01625; usdc: 1.5 NEAR code stake; roles: gas only
+#    rook: 2.74 NEAR code stake + ~80 subtasks at 0.01625; usdc: 1.5 NEAR code stake; roles: gas only
 near account create-account fund-myself rook.you.testnet '4 NEAR' autogenerate-new-keypair save-to-keychain sign-as you.testnet network-config testnet sign-with-keychain send
 near account create-account fund-myself usdc.you.testnet '2 NEAR' autogenerate-new-keypair save-to-keychain sign-as you.testnet network-config testnet sign-with-keychain send
 near account create-account fund-myself orch.you.testnet '0.5 NEAR' autogenerate-new-keypair save-to-keychain sign-as you.testnet network-config testnet sign-with-keychain send
@@ -102,7 +103,7 @@ near contract deploy rook.you.testnet use-file $W/rook_budget.opt.wasm with-init
 # 4. Token registration. Read the bound first; attach its "min" (0.00125 NEAR for mainnet USDC)
 near contract call-function as-read-only usdc.you.testnet storage_balance_bounds json-args '{}' network-config testnet now
 near contract call-function as-transaction usdc.you.testnet storage_deposit json-args '{"account_id":"rook.you.testnet","registration_only":true}' prepaid-gas '30 Tgas' attached-deposit '0.00125 NEAR' sign-as you.testnet network-config testnet sign-with-keychain send
-#    A funder other than you.testnet (only once the contract accepts other funders; today create_task is owner-only):
+#    Any other funder:
 #    register it, then send it mUSDC (ft_transfer needs exactly 1 yoctoNEAR)
 near contract call-function as-transaction usdc.you.testnet storage_deposit json-args '{"account_id":"alice.testnet","registration_only":true}' prepaid-gas '30 Tgas' attached-deposit '0.00125 NEAR' sign-as you.testnet network-config testnet sign-with-keychain send
 near contract call-function as-transaction usdc.you.testnet ft_transfer json-args '{"receiver_id":"alice.testnet","amount":"20000000"}' prepaid-gas '30 Tgas' attached-deposit '1 yoctoNEAR' sign-as you.testnet network-config testnet sign-with-keychain send
@@ -178,7 +179,7 @@ Record the results in [docs/x402-payments-plan.md](../docs/x402-payments-plan.md
 
 Every command here spends real NEAR, and step M5 spends real USDC. Nothing runs without the owner's explicit yes. Same commands as testnet with `network-config mainnet`, accounts under the owner's `you.near`, and **no mock token**: the asset is native USDC, `17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1` (the marketplace's x402 asset, read 2026-11-07).
 
-- **M1. Accounts:** `rook.you.near` (short name, about 3 NEAR: 2.66 NEAR code stake for the optimised wasm, or 3.31 NEAR unoptimised, plus 0.01625 NEAR per subtask and receipts), plus `orch.you.near` and `signer.you.near` (0.5 NEAR each).
+- **M1. Accounts:** `rook.you.near` (short name, about 3 NEAR: 2.74 NEAR code stake for the optimised wasm, or 3.40 NEAR unoptimised, plus 0.01625 NEAR per subtask and receipts), plus `orch.you.near` and `signer.you.near` (0.5 NEAR each).
 - **M2. Deploy and init:** `rook_budget.opt.wasm` with `new` and `{"owner":"you.near","orchestrator":"orch.you.near","signer":"signer.you.near","usdc":"17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1"}`.
 - **M3. Register the contract on USDC:** read `storage_balance_bounds` on the USDC id (min = max = 0.00125 NEAR on 2026-11-07), then `storage_deposit` `{"account_id":"rook.you.near","registration_only":true}` with that deposit. The funder already holds USDC, so it is registered.
 - **M4. Role keys:** step 5 with the mainnet names; orchestrator methods `fund_subtask, top_up, record_receipt, close_task, mark_empty`, signer `register_subtask_key`.

@@ -1,10 +1,12 @@
 //! Rook budget contract, design A (docs/build-plan.md "Budget contract", docs/x402-payments-plan.md 4.1).
 //!
-//! The owner funds a task with USDC `ft_transfer_call`, approving one cap per subtask in the same
-//! message. The signer registers a public key for subtask n; the orchestrator then funds sub-account n
-//! with exactly `caps[n-1]` under that key. The signer holds the sub-account key and pays agents from
-//! it, then returns the leftover with `ft_transfer_call` + `{"return":..}`. The owner gets the rest
-//! back on close.
+//! Any account funds its own task with USDC `ft_transfer_call`, approving one cap per subtask in the
+//! same message; that account is the task's funder. The signer registers a public key for subtask n; the
+//! orchestrator then funds sub-account n with exactly `caps[n-1]` under that key. The signer holds the
+//! sub-account key and pays agents from it, then returns the leftover with `ft_transfer_call` +
+//! `{"return":..}`. The funder gets the rest back on close. A budget below `min_budget`, or a task
+//! beyond the funder's `max_open_tasks` open at once, is refunded; a task closed with no subtask ever
+//! funded is deleted, so funding and closing in a loop leaves no state behind.
 //!
 //! Accounting, per task, in USDC atomic units:
 //!
@@ -36,6 +38,8 @@
 //! stays in flight. After `RESOLVE_AFTER_BLOCKS` the owner settles it with `resolve_stuck`.
 //!
 //! Trust model (keys split between two accounts, design A; see contract/README.md):
+//! - Funder: approves its own task's caps and reserve, and can stop (`kill_task`) and close its own
+//!   task, which refunds it. It cannot touch any other task.
 //! - Orchestrator key alone: can only fund approved caps into sub-accounts keyed by the signer, top
 //!   them up from the reserve, record receipts and close (the refund always goes to the funder). It
 //!   cannot send USDC anywhere else.
@@ -84,6 +88,10 @@ const MAX_STR: usize = 128;
 const MAX_PAGE: u32 = 50;
 /// Funding attempts per subtask, first try included: a Failed n can be retried with a new key and account.
 const MAX_ATTEMPTS: u32 = 3;
+/// Smallest task budget until the owner changes it: 1 USDC (6 decimals).
+pub const DEFAULT_MIN_BUDGET: u128 = 1_000_000;
+/// Tasks one funder can have open (not yet Closed) at once, until the owner changes it.
+pub const DEFAULT_MAX_OPEN_TASKS: u32 = 5;
 
 #[near(serializers = [json])]
 #[serde(rename_all = "snake_case")]
@@ -130,7 +138,7 @@ pub struct Task {
     pub returned: u128,
     #[serde(with = "dec")]
     pub refunded: u128,
-    /// Caps the owner approved at create: subtask n can only be funded with `caps[n-1]`.
+    /// Caps the funder approved at create: subtask n can only be funded with `caps[n-1]`.
     pub caps: Vec<U128>,
     pub status: TaskStatus,
     pub killed: bool,
@@ -209,6 +217,8 @@ pub struct Config {
     pub usdc: AccountId,
     pub killed: bool,
     pub tasks: u64,
+    pub min_budget: U128,
+    pub max_open_tasks: u32,
 }
 
 /// u128 as a decimal string in JSON (same wire format as `U128`).
@@ -242,6 +252,10 @@ pub struct Contract {
     accounts: LookupMap<AccountId, (String, u32)>,
     /// (task id, seq) -> receipt.
     receipts: LookupMap<(String, u32), ReceiptEntry>,
+    min_budget: u128,
+    max_open_tasks: u32,
+    /// Funder -> its tasks created and not yet Closed; the entry is removed at 0.
+    open_tasks: LookupMap<AccountId, u32>,
 }
 
 fn emit(event: &str, data: Value) {
@@ -305,6 +319,9 @@ impl Contract {
             keys: LookupMap::new(b"k"),
             accounts: LookupMap::new(b"a"),
             receipts: LookupMap::new(b"r"),
+            min_budget: DEFAULT_MIN_BUDGET,
+            max_open_tasks: DEFAULT_MAX_OPEN_TASKS,
+            open_tasks: LookupMap::new(b"o"),
         }
     }
 
@@ -454,20 +471,22 @@ impl Contract {
     }
 
     /// Sends what the contract holds for the task back to the funder. Attach 50 Tgas.
-    /// Needs every subtask Returned or Failed. The owner may close a killed task with subtasks still
-    /// Funded: what they hold comes back only through returns, after which the task can be closed again.
+    /// Needs every subtask Returned or Failed. The funder or the owner may close a killed task with
+    /// subtasks still Funded: what they hold comes back only through returns, after which the task can be
+    /// closed again. A task closed with no subtask ever funded is deleted once its refund lands.
     pub fn close_task(&mut self, task_id: String) -> PromiseOrValue<U128> {
         let caller = env::predecessor_account_id();
         let by_owner = caller == self.owner;
-        require!(by_owner || caller == self.orchestrator, "only the owner or orchestrator can close");
         let task = task_mut(&mut self.tasks, &task_id);
+        let privileged = by_owner || caller == task.funder;
+        require!(privileged || caller == self.orchestrator, "only the funder, the owner or the orchestrator can close");
         require!(task.status != TaskStatus::Closing, "task is closing");
         let killed = self.killed || task.killed;
         for n in &task.subtasks {
             let sub = self.subtasks.get(&(task_id.clone(), *n)).unwrap();
             match sub.status {
                 SubtaskStatus::Returned | SubtaskStatus::Failed => {}
-                SubtaskStatus::Funded if by_owner && killed => {}
+                SubtaskStatus::Funded if privileged && killed => {}
                 SubtaskStatus::Funded => env::panic_str(&format!("subtask {n} has not returned its leftover")),
                 _ => env::panic_str(&format!("subtask {n} has a transfer in flight")),
             }
@@ -479,8 +498,13 @@ impl Contract {
         task.reserve_remaining = 0;
         task.refunded += refund;
         if refund == 0 {
+            let first_close = task.status == TaskStatus::Open;
             task.status = TaskStatus::Closed;
-            emit("task_closed", json!({ "task_id": task_id, "funder": task.funder, "refund": "0", "ok": true }));
+            let funder = task.funder.clone();
+            emit("task_closed", json!({ "task_id": task_id, "funder": funder, "refund": "0", "ok": true }));
+            if first_close {
+                self.release_open_task(&funder);
+            }
             return PromiseOrValue::Value(U128(0));
         }
         task.closing = Some(Closing { since: env::block_height(), unallocated, reserve, restore: task.status });
@@ -495,11 +519,15 @@ impl Contract {
     /// 0-amount transfer, so an emptied sub-account can never send its `return`, and close_task needs one.
     /// Reads USDC `ft_balance_of`; `on_mark_empty` marks only if it is 0 and the subtask is unchanged
     /// (still Funded, same attempt, no top-up since), else changes nothing and returns false. Works on
-    /// killed tasks, not on a Closing or Closed one. Attach 50 Tgas.
+    /// killed tasks, not on a Closing or Closed one. The orchestrator, the owner or the task's funder.
+    /// Attach 50 Tgas.
     pub fn mark_empty(&mut self, task_id: String, n: u32) -> Promise {
         let caller = env::predecessor_account_id();
-        require!(caller == self.owner || caller == self.orchestrator, "only the owner or orchestrator");
         let task = self.tasks.get(&task_id).unwrap_or_else(|| env::panic_str("unknown task"));
+        require!(
+            caller == self.owner || caller == self.orchestrator || caller == task.funder,
+            "only the funder, the owner or the orchestrator"
+        );
         require!(task.status == TaskStatus::Open, "task is not open");
         let sub = self.subtasks.get(&(task_id.clone(), n)).unwrap_or_else(|| env::panic_str("unknown subtask"));
         require!(sub.status == SubtaskStatus::Funded, "subtask is not funded");
@@ -518,10 +546,23 @@ impl Contract {
         emit("killed", json!({ "task_id": null }));
     }
 
+    /// Stops funding and top-ups for one task. The owner or the task's funder.
     pub fn kill_task(&mut self, task_id: String) {
-        self.assert_owner();
-        task_mut(&mut self.tasks, &task_id).killed = true;
+        let caller = env::predecessor_account_id();
+        let task = task_mut(&mut self.tasks, &task_id);
+        require!(caller == self.owner || caller == task.funder, "only the owner or the task's funder");
+        task.killed = true;
         emit("killed", json!({ "task_id": task_id }));
+    }
+
+    /// Smallest task budget (USDC atomic units) and tasks open at once per funder. Attach 1 yoctoNEAR.
+    #[payable]
+    pub fn set_limits(&mut self, min_budget: U128, max_open_tasks: u32) {
+        assert_one_yocto();
+        self.assert_owner();
+        require!(min_budget.0 > 0 && max_open_tasks > 0, "limits must be positive");
+        self.min_budget = min_budget.0;
+        self.max_open_tasks = max_open_tasks;
     }
 
     /// Key rotation. Attach 1 yoctoNEAR, so only a full-access key can do it (not a wallet sign-in key).
@@ -662,11 +703,18 @@ impl Contract {
             usdc: self.usdc.clone(),
             killed: self.killed,
             tasks: self.next_task,
+            min_budget: U128(self.min_budget),
+            max_open_tasks: self.max_open_tasks,
         }
     }
 
     pub fn get_task(&self, task_id: String) -> Option<Task> {
         self.tasks.get(&task_id).cloned()
+    }
+
+    /// Tasks `account_id` funded that are not Closed yet.
+    pub fn get_open_tasks(&self, account_id: AccountId) -> u32 {
+        self.open_tasks.get(&account_id).copied().unwrap_or(0)
     }
 
     pub fn get_subtasks(&self, task_id: String) -> Vec<Subtask> {
@@ -709,7 +757,7 @@ fn assert_open(task: &Task, contract_killed: bool) {
     require!(task.status == TaskStatus::Open, "task is not open");
 }
 
-/// The cap the owner approved for subtask `n` (1-based).
+/// The cap the funder approved for subtask `n` (1-based).
 fn approved_cap(task: &Task, n: u32) -> u128 {
     let i = (n as usize).checked_sub(1).filter(|i| *i < task.caps.len());
     i.map(|i| task.caps[i].0).unwrap_or_else(|| env::panic_str("n is not an approved subtask"))
@@ -751,11 +799,18 @@ impl Contract {
         if self.killed {
             return Err("contract is killed".into());
         }
-        if funder != self.owner {
-            return Err("only the owner funds tasks".into());
+        if self.accounts.contains_key(&funder) {
+            return Err("a subtask account cannot fund tasks".into());
         }
-        if amount == 0 || reserve_bps > MAX_RESERVE_BPS {
-            return Err(format!("need amount > 0 and reserve_bps <= {MAX_RESERVE_BPS}"));
+        if amount < self.min_budget {
+            return Err(format!("budget below the minimum of {}", self.min_budget));
+        }
+        if reserve_bps > MAX_RESERVE_BPS {
+            return Err(format!("need reserve_bps <= {MAX_RESERVE_BPS}"));
+        }
+        let open = self.open_tasks.get(&funder).copied().unwrap_or(0);
+        if open >= self.max_open_tasks {
+            return Err(format!("{funder} already has {open} open tasks"));
         }
         let reserve = amount.checked_mul(reserve_bps.into()).ok_or("amount too large")? / 10_000;
         if caps.is_empty() || caps.len() > MAX_SUBTASKS || caps.iter().any(|c| c.0 == 0) {
@@ -767,6 +822,7 @@ impl Contract {
         }
         let task_id = base36(self.next_task);
         self.next_task += 1;
+        self.open_tasks.insert(funder.clone(), open + 1);
         emit(
             "task_created",
             json!({ "task_id": task_id, "funder": funder, "budget": amount.to_string(), "reserve": reserve.to_string(), "caps": caps }),
@@ -853,11 +909,35 @@ impl Contract {
             task.unallocated += c.unallocated;
             task.reserve_remaining += c.reserve;
         }
+        let funder = task.funder.clone();
+        // No subtask was ever funded, so no sub-account, return or receipt refers to the task: drop it.
+        let delete = ok && task.subtasks.is_empty();
+        let caps = task.caps.len() as u32;
         emit(
             "task_closed",
-            json!({ "task_id": task_id, "funder": task.funder, "refund": refund.to_string(), "ok": ok }),
+            json!({ "task_id": task_id, "funder": funder, "refund": refund.to_string(), "ok": ok, "deleted": delete }),
         );
+        if ok && c.restore == TaskStatus::Open {
+            self.release_open_task(&funder);
+        }
+        if delete {
+            self.tasks.remove(task_id);
+            for n in 1..=caps {
+                self.keys.remove(&(task_id.to_string(), n));
+            }
+        }
         ok
+    }
+
+    fn release_open_task(&mut self, funder: &AccountId) {
+        match self.open_tasks.get(funder).copied().unwrap_or(0) {
+            0 | 1 => {
+                self.open_tasks.remove(funder);
+            }
+            k => {
+                self.open_tasks.insert(funder.clone(), k - 1);
+            }
+        }
     }
 
     fn fail_funding(&mut self, task_id: &str, n: u32, account_exists: bool, reason: &str) {

@@ -57,7 +57,15 @@ fn pk() -> PublicKey {
     PK.parse().unwrap()
 }
 
+/// Default limits except a 1-unit minimum budget, so tests can use small amounts.
 fn new_contract() -> Contract {
+    let mut c = default_contract();
+    owner_yocto(0);
+    c.set_limits(U128(1), DEFAULT_MAX_OPEN_TASKS);
+    c
+}
+
+fn default_contract() -> Contract {
     call(OWNER);
     Contract::new(acc(OWNER), acc(ORCH), acc(SIGNER), acc(USDC))
 }
@@ -180,7 +188,6 @@ fn ft_on_transfer_refunds_bad_messages() {
     for msg in bad {
         assert_eq!(deposit(&mut c, OWNER, 1000, msg), 1000, "msg {msg}");
     }
-    assert_eq!(deposit(&mut c, EVE, 1000, CREATE), 1000, "only the owner funds tasks");
     assert_eq!(c.get_config().tasks, 0);
 }
 
@@ -528,7 +535,7 @@ fn close_refused_before_returns() {
 }
 
 #[test]
-#[should_panic(expected = "only the owner or orchestrator")]
+#[should_panic(expected = "only the funder, the owner or the orchestrator")]
 fn close_by_stranger_refused() {
     let mut c = setup();
     call(EVE);
@@ -571,6 +578,8 @@ fn close_refunds_the_right_amount() {
 #[should_panic(expected = "task is already closed")]
 fn close_twice_refused() {
     let mut c = setup();
+    fund(&mut c, "0", 1);
+    assert_eq!(give_back(&mut c, &sub_account("0", 1), "0", 1, 300), 0);
     call(ORCH);
     let _ = c.close_task("0".into());
     callback(true);
@@ -1028,7 +1037,7 @@ fn mark_empty_refused_unless_funded() {
 fn mark_empty_caller_and_task_status() {
     let mut c = setup();
     fund(&mut c, "0", 1);
-    let only = "only the owner or orchestrator";
+    let only = "only the funder, the owner or the orchestrator";
     assert_refused(&mut c, SIGNER, "0", 1, only);
     assert_refused(&mut c, EVE, "0", 1, only);
     assert_eq!(mark_empty_err(&mut c, OWNER, "0", 1), None, "the owner may");
@@ -1120,4 +1129,180 @@ fn mark_empty_stale_callbacks_change_nothing() {
     callback(true);
     let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.on_mark_empty("0".into(), 1, 1, since)));
     assert!(r.is_err(), "attempt 1 does not exist");
+}
+
+// ---------- open funding ----------
+
+const ALICE: &str = "alice.testnet";
+
+fn open_tasks(c: &Contract, who: &str) -> u32 {
+    c.get_open_tasks(acc(who))
+}
+
+fn close_ok(c: &mut Contract, pred: &str, id: &str) {
+    call(pred);
+    let _ = c.close_task(id.into());
+    callback(true);
+    assert!(c.on_task_closed(id.into()));
+}
+
+#[test]
+fn any_account_funds_its_own_task() {
+    let mut c = new_contract();
+    assert_eq!(deposit(&mut c, ALICE, 1000, CREATE), 0);
+    let t = task(&c, "0");
+    assert_eq!((t.funder, t.budget), (acc(ALICE), 1000));
+    assert!(get_logs()[0].contains(r#""funder":"alice.testnet""#));
+    assert_eq!((open_tasks(&c, ALICE), open_tasks(&c, OWNER)), (1, 0));
+    // The orchestrator funds it like any other task; the refund on close goes to Alice.
+    fund(&mut c, "0", 1);
+    assert_eq!(give_back(&mut c, &sub_account("0", 1), "0", 1, 100), 0);
+    call(ORCH);
+    let _ = c.close_task("0".into());
+    let r = get_created_receipts();
+    assert!(matches!(&r[0].actions[0], MockAction::FunctionCallWeight { method_name, args, .. }
+        if method_name == b"ft_transfer" && String::from_utf8_lossy(args).contains(ALICE) && String::from_utf8_lossy(args).contains(r#""amount":"800""#)));
+    callback(true);
+    assert!(c.on_task_closed("0".into()));
+    assert_eq!(task(&c, "0").status, TaskStatus::Closed, "a task with a funded subtask is kept");
+    assert_eq!(open_tasks(&c, ALICE), 0);
+    check(&c, "0");
+}
+
+#[test]
+fn budget_below_minimum_refunded() {
+    let mut c = default_contract();
+    let caps = r#"{"create_task":{"reserve_bps":2000,"caps":["500000"]}}"#;
+    assert_eq!(deposit(&mut c, ALICE, 999_999, caps), 999_999);
+    assert_eq!(c.get_config().tasks, 0);
+    assert_eq!(deposit(&mut c, ALICE, 1_000_000, caps), 0, "exactly 1 USDC");
+    let cfg = c.get_config();
+    assert_eq!((cfg.min_budget, cfg.max_open_tasks), (U128(DEFAULT_MIN_BUDGET), DEFAULT_MAX_OPEN_TASKS));
+}
+
+#[test]
+fn open_tasks_per_funder_are_limited() {
+    let mut c = new_contract();
+    for i in 0..DEFAULT_MAX_OPEN_TASKS {
+        assert_eq!(deposit(&mut c, ALICE, 1000, CREATE), 0, "task {i}");
+    }
+    assert_eq!(deposit(&mut c, ALICE, 1000, CREATE), 1000, "one over the limit");
+    assert_eq!(deposit(&mut c, EVE, 1000, CREATE), 0, "another funder is not affected");
+    // A failed refund keeps the task open and counted.
+    call(ALICE);
+    let _ = c.close_task("0".into());
+    callback(false);
+    assert!(!c.on_task_closed("0".into()));
+    assert_eq!((task(&c, "0").status, open_tasks(&c, ALICE)), (TaskStatus::Open, 5));
+    assert_eq!(deposit(&mut c, ALICE, 1000, CREATE), 1000);
+    close_ok(&mut c, ALICE, "0");
+    assert_eq!(open_tasks(&c, ALICE), 4);
+    assert_eq!(deposit(&mut c, ALICE, 1000, CREATE), 0, "a closed task frees its slot");
+}
+
+#[test]
+fn close_with_nothing_funded_deletes_the_task() {
+    let mut c = new_contract();
+    assert_eq!(deposit(&mut c, ALICE, 1000, CREATE), 0);
+    register(&mut c, "0", 1); // a key registered but never used is dropped too
+    close_ok(&mut c, ALICE, "0");
+    let log = get_logs().into_iter().find(|l| l.contains(r#""event":"task_closed""#)).unwrap();
+    assert!(log.contains(r#""deleted":true"#) && log.contains(r#""refund":"1000""#), "{log}");
+    assert!(c.get_task("0".into()).is_none());
+    assert!(c.keys.get(&("0".to_string(), 1)).is_none());
+    assert_eq!((open_tasks(&c, ALICE), c.get_config().tasks), (0, 1));
+    assert!(c.open_tasks.get(&acc(ALICE)).is_none(), "the counter entry is removed at 0");
+    // Ids are never reused.
+    assert_eq!(deposit(&mut c, ALICE, 1000, CREATE), 0);
+    assert!(c.get_task("1".into()).is_some());
+}
+
+#[test]
+fn funder_kills_and_closes_its_task() {
+    let mut c = new_contract();
+    assert_eq!(deposit(&mut c, ALICE, 1000, CREATE), 0);
+    fund(&mut c, "0", 1);
+    fund(&mut c, "0", 2);
+    assert_eq!(give_back(&mut c, &sub_account("0", 1), "0", 1, 100), 0);
+    call(ALICE);
+    c.kill_task("0".into());
+    assert!(task(&c, "0").killed);
+    // Subtask 2 never returns; Alice closes anyway and gets back what the contract holds.
+    close_ok(&mut c, ALICE, "0");
+    assert_eq!((task(&c, "0").refunded, open_tasks(&c, ALICE)), (600, 0));
+    // A late return, then a second close, does not count the task twice.
+    assert_eq!(give_back(&mut c, &sub_account("0", 2), "0", 2, 200), 0);
+    close_ok(&mut c, ALICE, "0");
+    assert_eq!((task(&c, "0").refunded, open_tasks(&c, ALICE)), (800, 0));
+    check(&c, "0");
+}
+
+#[test]
+#[should_panic(expected = "only the owner or the task's funder")]
+fn kill_task_by_stranger_refused() {
+    let mut c = new_contract();
+    assert_eq!(deposit(&mut c, ALICE, 1000, CREATE), 0);
+    call(EVE);
+    c.kill_task("0".into());
+}
+
+#[test]
+#[should_panic(expected = "only the owner or the task's funder")]
+fn kill_task_by_orchestrator_refused() {
+    let mut c = new_contract();
+    assert_eq!(deposit(&mut c, ALICE, 1000, CREATE), 0);
+    call(ORCH);
+    c.kill_task("0".into());
+}
+
+#[test]
+#[should_panic(expected = "only the funder, the owner or the orchestrator")]
+fn other_funder_cannot_close() {
+    let mut c = new_contract();
+    assert_eq!(deposit(&mut c, ALICE, 1000, CREATE), 0);
+    assert_eq!(deposit(&mut c, EVE, 1000, CREATE), 0);
+    call(EVE);
+    let _ = c.close_task("0".into());
+}
+
+#[test]
+fn funder_may_mark_empty() {
+    let mut c = new_contract();
+    assert_eq!(deposit(&mut c, ALICE, 1000, CREATE), 0);
+    fund(&mut c, "0", 1);
+    assert_eq!(mark_empty_err(&mut c, ALICE, "0", 1), None);
+    assert_refused(&mut c, EVE, "0", 1, "only the funder, the owner or the orchestrator");
+}
+
+#[test]
+fn subtask_account_cannot_fund_tasks() {
+    let mut c = setup();
+    fund(&mut c, "0", 1);
+    assert_eq!(deposit(&mut c, &sub_account("0", 1), 300, CREATE), 300);
+    assert_eq!(c.get_config().tasks, 1);
+}
+
+#[test]
+fn set_limits_by_owner_only() {
+    let mut c = default_contract();
+    owner_yocto(0);
+    c.set_limits(U128(5), 2);
+    let cfg = c.get_config();
+    assert_eq!((cfg.min_budget, cfg.max_open_tasks), (U128(5), 2));
+    for (pred, yocto, args, why) in [
+        (EVE, true, (5u128, 2u32), "only the owner"),
+        (ORCH, true, (5, 2), "only the owner"),
+        (OWNER, false, (5, 2), "Requires attached deposit of exactly 1 yoctoNEAR"),
+        (OWNER, true, (0, 2), "limits must be positive"),
+        (OWNER, true, (5, 0), "limits must be positive"),
+    ] {
+        call_ctx(pred, vec![], |b| {
+            if yocto {
+                b.attached_deposit(ONE_YOCTO);
+            }
+        });
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| c.set_limits(U128(args.0), args.1)));
+        let err = r.err().map(|e| e.downcast::<String>().map(|s| *s).unwrap_or_default()).unwrap_or_default();
+        assert!(err.contains(why), "{pred} {args:?}: expected {why:?}, got {err:?}");
+    }
 }
