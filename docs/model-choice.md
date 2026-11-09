@@ -19,8 +19,41 @@ From docs.near.ai/cloud/models, /cloud/private-inference and /cloud/verification
 - **Confidential TEE** models run on NEAR AI's own GPU nodes (NVIDIA H200 confidential computing plus Intel TDX). Their replies are signed by the model's TEE: `signature_kind` `provider_tee`, signed text `<model>:sha256(request):sha256(response)`. This proves the model produced the bytes. Observed: `deepseek-ai/DeepSeek-V4.1-Flash-1017`, `z-ai/glm-5.3-flash`, `Qwen/Qwen3.8-27B`, `Qwen/Qwen3.6-35B-A3B-FP8`.
 - **3P Confidential TEE** models run in a third-party provider's TEE; replies are signed by NEAR AI's gateway TEE only (`gateway`, text `sha256(request):sha256(response)`). Observed: `z-ai/glm-5.3`, `moonshotai/kimi-k2.6`.
 - **Incognito** models (Anthropic, OpenAI, Google) go through the gateway TEE but run on the provider's infrastructure; the TEE guarantee stops at the gateway. Also `gateway`-signed.
-- Full verification of a signature means recovering the ECDSA (EIP-191) signer and matching it to an attestation report from `GET /v1/attestation/report` (Intel TDX quote via DCAP, NVIDIA GPU attestation via NRAS, nonce binding). Rook checks the signed hashes today; signer recovery and attestation are a later step.
+- Full verification of a signature means recovering the ECDSA (EIP-191) signer and matching it to an attestation report from `GET /v1/attestation/report` (Intel TDX quote via DCAP, NVIDIA GPU attestation via NRAS, nonce binding). Rook does this for every planner, evaluator and aggregator call (next section).
 - `reasoning_effort` is model-specific: GLM-5.3 honours it, Anthropic models reject the field, DeepSeek V4.1 rejects `medium`, Kimi ignores it. Rook retries once without it when a model rejects it.
+
+## Verification
+
+Since 2026-11-09 (`services/src/shared/attest.ts`, `llm.ts`; NEAR docs `cloud/verification/cloud-api/model-attestations` and `reference/quote-nonce-signer`). `signature_verified` on an `LlmCall` is true only when all three hold:
+
+1. **Hashes.** The signed text is `sha256(request):sha256(response)` (`gateway`) or `<model>:sha256(request):sha256(response)` (`provider_tee`), built from the exact bytes Rook sent and received.
+2. **`signer_recovered`.** The 65-byte signature (`r‖s‖v`, `v` 27/28 or 0/1) recovers, under EIP-191 `keccak256("\x19Ethereum Signed Message:\n" + byte length + text)`, to the reported `signing_address`.
+3. **`attested` is not `false`.** The signer matches exactly one verified report of its kind: `gateway` the gateway report (`GET /v1/attestation/report` without `model`), `provider_tee` the model's NEAR reports (`model=<id>&provider=near`). `null` means the evidence could not be fetched (network, HTTP error, NRAS down): the signature still counts and the gap stays visible. `attestation_checked_at` is when the matched evidence was verified.
+
+Each report is fetched with a fresh 32-byte nonce, once per process for the gateway and once per model, and requested before the completion so the evidence predates the response. A signer missing from a report more than a minute old triggers one fresh fetch (keys change when an enclave is redeployed); a failed fetch is retried after a minute. Checks per report:
+
+- **Intel TDX quote (v4).** The attestation key signs the quote. The PCK key signs the QE report, and that report binds the attestation key. The QE is Intel's `TD_QE` (MRSIGNER `dc9e2a7c…`, ISVPRODID 2, from Intel PCS). The PCK chain is valid now and ends at the pinned Intel SGX Root CA (SHA-256 `44:A0:19:6B:…:74:D3`).
+- **TD state.** The TD is not in debug mode.
+- **Bindings.** Report data is the signing address, zero-padded to 32 bytes, then our nonce. The echoed `request_nonce` is ours.
+- **Measurements.** MRCONFIGID is `01 ‖ sha256(app_compose) ‖ 15 zero bytes`, and the event log's imr-3 events replay to RTMR3.
+- **GPU evidence (`provider_tee` only).** `nvidia_payload` is present and carries our nonce, and NVIDIA NRAS (`POST https://nras.attestation.nvidia.com/v3/attest/gpu`, public, no key) returns `x-nvidia-overall-att-result: true` for our nonce.
+
+Observed 2026-11-09 (fixtures in `services/test/fixtures/`):
+
+- **Gateway.** Signer `0xb98a…e779`, one TDX report (dstack 0.5.12, 69 KB).
+- **DeepSeek V4.1 Flash.** Signer `0xfe00…337e`, one NEAR model report (TDX plus 8 Hopper GPUs, about 300 KB). NRAS: true.
+- **Anthropic, OpenAI, Google.** The model report answers 503 ("external providers run outside our TEE"). Their calls are `gateway`-signed, so only the gateway is attested.
+- **GLM-5.3.** Its model entries come from Tinfoil (SEV-SNP evidence, no Intel quote) and are not used; its calls are `gateway`-signed.
+
+The first signed call per model in a process adds a report fetch and an NRAS call, run alongside the completion: 1 to 8 s measured.
+
+Not checked yet (`ponytail:` notes in `attest.ts`):
+
+- **DCAP collateral.** Not checked: the platform's TCB status for its FMSPC, Intel advisories, PCK revocation lists and the QE's TCB level, so a known-vulnerable but unrevoked platform passes. Upgrade: `@phala/dcap-qvl` `getCollateralAndVerify(quote)` (NEAR's reference verifier), accepting `UpToDate` only, with Rook's binding checks kept.
+- **Measurement allowlist.** Compose hash, OS image and MRTD are checked for consistency, not against known NEAR releases.
+- **NRAS token.** The NRAS JWT is trusted over TLS; its ES384 signature against NVIDIA's JWKS and the per-GPU claims are not checked.
+- **TLS binding.** Not checked (`include_tls_fingerprint=true` plus the peer certificate's SPKI hash). Node's `fetch` does not expose the peer certificate.
+- **Shared keys.** Instances of a model share one key, so a match shows the key lives in an attested enclave, not which instance served the call.
 
 ## Benchmark
 
