@@ -141,15 +141,16 @@ export async function runTask(ledger: Ledger, t: Task) {
         id: s.id, title: s.title, status: s.final_outcome ?? s.status,
         agent_handle: s.accepted?.agent_handle, deliverable_text: s.accepted?.text,
       }));
+      // In a conversation the aggregator reads the prompt with the messages before it ("make it shorter" changes them).
+      const req = { task_id: t.id, prompt: t.prompt, ...(t.earlier_prompts?.length ? { earlier: t.earlier_prompts } : {}), subtasks };
       let agg: AggregateResult;
       try {
-        agg = await call<AggregateResult>(config.urls.planner + '/aggregate', { task_id: t.id, prompt: t.prompt, subtasks }, { signal });
+        agg = await call<AggregateResult>(config.urls.planner + '/aggregate', req, { signal });
       } catch (e) {
         // The deliverables are paid for and passed: fall back to the deterministic merge rather than lose them.
         signal.throwIfAborted();
         t.llm_calls.push(...paidCalls(e));
         emit(t, 'error', { kind: 'aggregate', message: `aggregate failed, using the deterministic merge: ${msg(e)}` });
-        const req = { task_id: t.id, prompt: t.prompt, subtasks };
         agg = { final_markdown: cannedAggregate(req), attribution: subtasks.filter(isMerged).map((s) => ({ subtask_id: s.id, agent_handle: agentOf(s) })), llm_calls: [] };
       }
       signal.throwIfAborted();
