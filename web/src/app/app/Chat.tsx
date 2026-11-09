@@ -305,12 +305,13 @@ function CandidateLine({ c }: { c: Candidate }) {
 }
 
 function PlanCard({ plan, usage }: { plan: PlanView; usage?: Map<string, LedgerSub> }) {
+  const { mode } = useMode();
   return (
     <ol className="mt-3 rounded-2xl border border-ink/15">
       {plan.subtasks.map((s, i) => (
         <li key={s.id} className="rook-in border-b border-ink/10 last:border-b-0" style={{ animationDelay: `${150 + i * 90}ms` }}>
           <PlanRow subtask={s} usage={usage?.get(s.id)}
-            why={s.self_do ? selfDoWhy(s, budgetToHire(plan, s.id), plan.subtasks.slice(0, i).some((x) => !x.self_do)) : ''} />
+            why={s.self_do ? selfDoWhy(s, budgetToHire(plan, s.id), plan.subtasks.slice(0, i).some((x) => !x.self_do), mode?.max_budget_atomic) : ''} />
         </li>
       ))}
     </ol>
@@ -1258,7 +1259,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
         <RookMessage>
           {free ? (
             <p>
-              Here&apos;s the plan. {allSelfDoWhy(plan.subtasks.map((s) => s.self_do_reason), budgetToHire(plan))}{' '}
+              Here&apos;s the plan. {allSelfDoWhy(plan.subtasks.map((s) => s.self_do_reason), budgetToHire(plan), mode?.max_budget_atomic)}{' '}
               Nothing is hired, so nothing is paid and nothing leaves your wallet.{task.status === 'cancelled' && (task.replaced_by ? ` ${REPLACED}` : ' You cancelled it.')}
             </p>
           ) : (
