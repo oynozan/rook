@@ -53,6 +53,16 @@ export function currentTask(chain: TaskSummary[]): TaskSummary {
   return chain[chain.length - 1];
 }
 
+/**
+ * The plan the newest message revises while that message is still being planned, or null. Rook replaces the plan with
+ * the revision once it's ready, so the plan can't be approved meanwhile (it answers "Wait for the revised plan below.").
+ */
+export function revisedPlan(chain: TaskSummary[]): string | null {
+  if (chain.length < 2 || chain[chain.length - 1].status !== 'draft') return null;
+  const head = currentTask(chain.slice(0, -1));
+  return head.status === 'planned' ? head.id : null;
+}
+
 const RUNNING = new Set(['approved', 'funded', 'running', 'aggregating', 'closing']);
 
 /**

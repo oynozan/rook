@@ -10,7 +10,7 @@ import { WebSearch, type WebSource } from '@/components/ui/web-search';
 import { approve, cancel, confirmFunding, draftTask, forgetContractTask, forgetTransfer, fundingInstructions, fundingRefunded, rememberTransfer, stop, type ActResult } from './actions';
 import { go } from './AppShell';
 import { Composer, type ComposerErrors, type ComposerThread } from './Composer';
-import { conversationOf } from './conversations';
+import { conversationOf, revisedPlan } from './conversations';
 import { parseBudget } from './draft';
 import { alertLine, deliveredParts, problemLine, skipReason } from './feed';
 import {
@@ -1117,7 +1117,8 @@ const UNREACHABLE = "This page couldn't reach Rook. Check your connection and tr
 /** A plan Rook cancelled because a message below it revised it. */
 const REPLACED = 'Replaced by the revised plan below.';
 
-function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; loaded: Loaded; tasks: TaskSummary[] | null; onGrow: () => void; fresh: boolean; onRevealed: (id: string) => void }) {
+/** `revised`: a newer message is revising this plan and is still being planned, so the plan waits for it. */
+function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised }: { id: string; loaded: Loaded; tasks: TaskSummary[] | null; onGrow: () => void; fresh: boolean; onRevealed: (id: string) => void; revised: boolean }) {
   const { snap, events, problem, refetch } = loaded;
   const router = useRouter();
   const wallet = useWallet();
@@ -1271,14 +1272,15 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
           )}
           {task.status === 'planned' && (
             <div className="rook-in mt-4 flex flex-wrap gap-3" style={{ animationDelay: `${250 + plan.subtasks.length * 90}ms` }}>
-              <ActionButton primary onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account || paymentsOff || !!funds.short}
-                title={paymentsOff ? 'Paying live agents is not switched on yet' : !wallet.account ? 'Connect your wallet first' : funds.short ? 'Your wallet holds less USDC than this budget' : undefined}>
+              <ActionButton primary onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account || paymentsOff || !!funds.short || revised}
+                title={paymentsOff ? 'Paying live agents is not switched on yet' : !wallet.account ? 'Connect your wallet first' : funds.short ? 'Your wallet holds less USDC than this budget' : revised ? 'Wait for the revised plan below' : undefined}>
                 {busy === 'approve' ? (funds.checking ? 'Checking your USDC balance…' : chain && !free ? 'Preparing the transfer…' : 'Starting…') : free ? 'Start' : paymentsOff ? 'Approve' : noMoney ? 'Run simulation' : `Fund ${usdc(task.budget_atomic)} USDC and start`}
               </ActionButton>
               {funds.short && <ActionButton onClick={() => void funds.check()} busy={funds.checking}>{funds.checking ? 'Checking…' : 'Check again'}</ActionButton>}
               <ActionButton onClick={() => act('cancel')} busy={busy === 'cancel'}>Cancel</ActionButton>
             </div>
           )}
+          {task.status === 'planned' && revised && <p className="mt-2 text-sm text-ink/60">Your newer message is revising this plan. Wait for the revised plan below.</p>}
           {task.status === 'planned' && !free && !paymentsOff && noMoney && <p className="mt-2 text-sm text-ink/60">A simulated {usdc(task.budget_atomic)} USDC budget: nothing leaves your wallet and no agent is paid.</p>}
           {task.status === 'planned' && funds.short && <p role="alert" className="mt-2 text-sm text-alert">{funds.short}</p>}
           {task.status === 'planned' && !free && !paymentsOff && !noMoney && !funds.short && <p className="mt-2 text-sm text-ink/60">One click: your wallet opens to send the {usdc(task.budget_atomic)} USDC budget to the Rook contract on NEAR {network}, and the run starts once it lands. Each subtask spends at most its cap plus what Rook tops up from the reserve, and whatever isn&apos;t spent comes back to you.</p>}
@@ -1413,6 +1415,7 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
   }), []);
   const conversation = id ? conversationOf(withKnown(tasks, sent, live), id) : null;
   const ids = conversation ? conversation.tasks.map((t) => t.id) : id ? [id] : [];
+  const revised = conversation ? revisedPlan(conversation.tasks) : null;
   const thread: ComposerThread | null = id
     ? { parent: conversation?.latest.id ?? id, current: conversation?.current ?? null, budget_atomic: conversation?.latest.budget_atomic }
     : null;
@@ -1503,7 +1506,7 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
               {/* Every task of the conversation, oldest first, each with its own plan, run and report. */}
               {ids.map((task) => (
                 <TaskThread key={`${task}:${wallet.account}`} id={task} account={wallet.account} hidden={sending?.id === task} onReady={onReady} onSummary={onSummary}
-                  tasks={tasks} onGrow={follow} fresh={justDrafted.current.has(task)} onRevealed={onRevealed} />
+                  tasks={tasks} onGrow={follow} fresh={justDrafted.current.has(task)} onRevealed={onRevealed} revised={revised === task} />
               ))}
               {sending && (
                 <>

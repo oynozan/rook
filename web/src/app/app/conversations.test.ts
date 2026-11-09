@@ -2,7 +2,7 @@
 // Run: npx tsx --test src/app/app/*.test.ts
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { conversationOf, conversations, currentTask, outgoing, placeholderFor, sameTaskAt, waitReason } from './conversations';
+import { conversationOf, conversations, currentTask, outgoing, placeholderFor, revisedPlan, sameTaskAt, waitReason } from './conversations';
 import type { TaskSummary } from './orchestrator';
 
 const task = (id: string, minute: number, o: Partial<TaskSummary> = {}): TaskSummary =>
@@ -58,6 +58,15 @@ test('the task a message acts on: the newest that got a plan, whatever its statu
   // Only replies: the newest. Older services send no has_plan, so nothing is skipped.
   assert.equal(currentTask([reply('a', 1, 'x'), reply('b', 2, 'a')]).id, 'b');
   assert.equal(currentTask([task('a', 1, { status: 'planned' }), task('b', 2, { status: 'failed' })]).id, 'b');
+});
+
+test('a plan whose revision is still being planned: the one the newest message revises, through replies that never got a plan', () => {
+  const plan = task('a', 1, { status: 'planned', has_plan: true });
+  assert.equal(revisedPlan([plan, task('b', 2, { status: 'draft', parent_id: 'a' })]), 'a');
+  assert.equal(revisedPlan([plan, task('b', 2, { status: 'failed', has_plan: false, parent_id: 'a' }), task('c', 3, { status: 'draft', parent_id: 'b' })]), 'a');
+  assert.equal(revisedPlan([plan, task('b', 2, { status: 'planned', has_plan: true, parent_id: 'a' })]), null); // ready: it replaced the plan
+  assert.equal(revisedPlan([task('a', 1, { status: 'closed', has_plan: true }), task('b', 2, { status: 'draft', parent_id: 'a' })]), null); // a follow-up
+  assert.equal(revisedPlan([task('a', 1, { status: 'draft' })]), null); // a first message revises nothing
 });
 
 test('nothing goes while the task it follows is planning or running, in the orchestrator\'s words', () => {
