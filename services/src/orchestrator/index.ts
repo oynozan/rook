@@ -145,9 +145,10 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         if (next) resume.push(next);
         continue;
       }
+      // A simulated ledger lived in memory only: its books still open before the restart (a run, or a stopped task's
+      // refund, under way) would show a refund under way for good. Closed ones show what the task spent and refunded.
+      if (!chain && (t.ledger_saved as { closed?: boolean } | null | undefined)?.closed === false) t.ledger_saved = null;
       if (isTerminal(t.status)) continue;
-      // A simulated ledger lived in memory only: its books from before the restart would show a refund as under way.
-      if (!chain) t.ledger_saved = null;
       if (t.status === 'closing' && t.final_result) {
         // Only the close was left, and nothing of it can resume here (a simulated ledger, or a plan that hires no agent,
         // holds nothing on chain): the report stands, so the task ends closed, never failed.

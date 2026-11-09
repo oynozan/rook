@@ -108,6 +108,28 @@ test('a sim-ledger task restarted while closing with its report ends closed: the
   assert.equal(doc.ledger_saved, null);
 });
 
+test('a stopped or failed sim-ledger task saved while its books were still open shows no books after a restart, never a refund under way', async () => {
+  freshDb();
+  const ts = new Date().toISOString();
+  const store = openStore(process.env.ROOK_DB!);
+  const doc = (id: string, status: 'killed' | 'failed', closed: boolean) => store.save({
+    id, prompt: 'p', budget_atomic: '1000000', reserve_share: 0.2, funder: 'funder.sim', owner: null, status, error: null,
+    created_at: ts, updated_at: ts, plan: null, subtasks: [], receipts: [], final_result: null, llm_calls: [], events: [],
+    ledger_saved: { spent_atomic: '300000', refunded_atomic: closed ? '700000' : '0', closed },
+  });
+  doc('t_killed_open', 'killed', false); // the services stopped during its unwind
+  doc('t_failed_open', 'failed', false);
+  doc('t_killed_closed', 'killed', true);
+  store.close();
+
+  const orch = await start(0);
+  try {
+    for (const id of ['t_killed_open', 't_failed_open']) assert.equal((await call(`${orch.url}/tasks/${id}`)).ledger, null, id);
+    const kept = await call(`${orch.url}/tasks/t_killed_closed`); // its refund happened: shown as it was
+    assert.deepEqual([kept.task.status, kept.ledger.refunded_atomic, kept.ledger.closed], ['killed', '700000', true]);
+  } finally { await orch.close(); }
+});
+
 test('a planned task stored with an empty plan ends failed on load, with the reason in plain words', async () => {
   // Stored before an empty plan ended its task: it kept "Plan ready" and the active dot, with no buttons, for good.
   const path = freshDb();
