@@ -184,6 +184,11 @@ Rook runs on NEAR mainnet. Everything below can be checked on nearblocks.io.
 | Task 5: the same Rook task funded again, on the plan's terms, 1.00 USDC | `HkGE6xjXr9tzABCikpVNjXxLh2RjCDRBraRActtqqU3U` |
 | Task 5: `cited-web-research-brief` paid 0.15 USDC | `DLZPhPaPMYpJx92qwrUM9DWVMmdHhygDc1yPVYc6gG9t` |
 | Its receipt (verdict pass) | `2BQcWcm5n2kVgXprTNCNg96XoEyHVdDEnhhDsMDUUhDm` |
+| Task 6 funded from the web app: 1.50 USDC, caps 0.30, 0.30 and 0.04, reserve 57% | `BH7p9idbF3uCddrTajWeWwJUV62u4jkWBXNT5NjL3u2X` |
+| Task 6, after Stop: subtask 1's agent delivered and its payment landed, 0.15 USDC | `4n6o1G2T68vmMEyrMei1daCPNoXgCyLwxgYgSaYX8qjU` |
+| Its receipt (no verdict: stopped before evaluation) | `FvyDgYUgGfHanoTYjy3HZihaQhK8cQuehsABa5M9WzSs` |
+| Task 6, after Stop: subtask 2's payment, 0.15 USDC | `FWrrH6yWXFq2Cc3UjrNGYdVWwmfoy83kY4SX9TUog3bV` |
+| Its receipt | `FFTV46KLegfr1kLN5J9tjHUw21fErA7JoXcnb5jLt9uc` |
 
 | Contract task | Rook task | Hires | Paid | Refunded | Outcome |
 | --- | --- | --- | --- | --- | --- |
@@ -193,6 +198,7 @@ Rook runs on NEAR mainnet. Everything below can be checked on nearblocks.io.
 | 3 | `t_9fffa66f`, the three latest nearcore releases | `cited-web-research-brief` twice (pass, pass) | 0.30 | 1.20 | the first run from the browser: NEP-413 sign-in, plan, funding transfer from the wallet, report about 4 minutes after funding, both sub-accounts deleted |
 | 4 | `t_17e54e06` (wrong transfer) | none | 0 | 1.00 | the page read the transfer, saw caps 0.29 against the plan's 0.30, refused to run it and offered the refund; the funder's `close_task` returned all of it and the contract deleted the task |
 | 5 | `t_17e54e06`, NEAR circulating supply with a source | `cited-web-research-brief` (pass) | 0.15 | 0.85 | the same Rook task, funded again from the page after the refund; report with the CoinGecko figure |
+| 6 | `t_924d21c2`, latest nearcore release and NEAR staking APR, **stopped** 11 s after the hires went out | `cited-web-research-brief` twice (paid on delivery), `taifoon-research` (ended unpaid) | 0.30 | 1.20 | the kill path: no new hires; the unpaid hire released at once and its sub-account returned 0.04 within 13 s; each sub-account waited out its own authorization (the two agents delivered, 40 s and 2 min after Stop), then returned; the close refunded 1.20 2.5 minutes after Stop |
 
 Task 3 ran in the web app (`web/`, branch `feat/web-real-path`) in a headless Chromium. The wallet was an injected near-connect wallet, the way extension wallets plug in, holding `oynozan.near`'s key: it signed the sign-in message and the funding transfer, and nothing else was stubbed.
 
@@ -208,3 +214,4 @@ Task 3 ran in the web app (`web/`, branch `feat/web-real-path`) in a headless Ch
 6. Task 1's re-hire was refused for want of reserve while 0.90 USDC of the budget sat unallocated. The budget the caps leave now becomes the reserve, up to the contract's 90% (task 2's reserve was 1.25 of 1.50).
 7. Task 3's page first said "no task at this link" once the plan was approved. The web server's dev reload had kept a store connection opened before the `funding` table existed, and the task route turned that error into a 404. The connection is now keyed by schema version, and the route reports its own errors as errors. The page reopened, funded and ran the same task.
 8. Task 4's page said the transfer was not this plan's and offered only Stop: its 1.00 USDC had no way back from the page. A transfer from the signed-in account on other terms now gets "Refund to my wallet" (the funder's `close_task`), after which the plan can be funded again; a stopped task's held funding offers the same.
+9. Task 6's page said "Stopped. Spent 0.30 of 1.50 USDC" and nothing more: not the 1.20 refund, not the two receipts. A stopped or failed run now shows the same money card as a finished one: spent, refunded (or that the refund is on its way while payments are in flight), and a receipt per paid hire.
