@@ -4,8 +4,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  balanceProblem, closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingLoadReason, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
-  moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, termsOf, txHashOf, typedUsdc, usdc, whoseTransfer, untilFinal, type Funding,
+  balanceProblem, closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
+  moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, termsOf, txHashOf, usdc, whoseTransfer, untilFinal, type Funding,
 } from './funding';
 
 const F: Funding = {
@@ -35,11 +35,6 @@ test('USDC amounts show what really moves: at least 2 decimals, up to 6, no floa
   assert.equal(usdc('9007199254740993000000'), '9007199254740993.00');
   assert.equal(usdc(-250000n), '-0.25');
   assert.equal(usdc('abc'), '?');
-  // A budget as typed, before the task exists.
-  assert.equal(typedUsdc('2.999'), '2.999');
-  assert.equal(typedUsdc(' 3 '), '3.00');
-  assert.equal(typedUsdc('03.5'), '3.50');
-  assert.equal(typedUsdc('1,5'), '1,5');
 });
 
 test('the transfer: USDC ft_transfer_call to the contract with the approved msg, 1 yoctoNEAR, 100 Tgas', () => {
@@ -319,16 +314,6 @@ test('the raw texts a failed transfer or refund carries read in plain words', ()
   // Anything else as NEAR gave it, without the panic prefix.
   assert.equal(plainReason('Smart contract panicked: something new'), 'something new');
   assert.equal(plainReason('the contract is short of NEAR for new tasks; try again later'), 'the contract is short of NEAR for new tasks; try again later');
-});
-
-test('funding instructions that did not load say why in a sentence', () => {
-  // The orchestrator couldn't read the contract's settings (chain-gateway down, or NEAR RPC failing).
-  for (const m of ['fetch failed', 'GET http://127.0.0.1:7104/config -> 502', 'NEAR RPC query failed: TIMEOUT_ERROR']) {
-    assert.equal(fundingLoadReason(m), "It couldn't read the Rook contract's settings from NEAR just now.", m);
-  }
-  // Rook's own sentences stay, ending in a full stop.
-  assert.equal(fundingLoadReason("Rook's services aren't running. Start them with pnpm dev, then try again."), "Rook's services aren't running. Start them with pnpm dev, then try again.");
-  assert.equal(fundingLoadReason("This page couldn't reach Rook's web server"), "This page couldn't reach Rook's web server.");
 });
 
 test('wallet cancellations read as a choice', () => {

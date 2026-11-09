@@ -16,7 +16,7 @@ export type Funding = {
 
 /**
  * Atomic USDC (6 decimals) as the amount that really moves: at least 2 decimals, up to 6 (3000000 -> "3.00",
- * 2999000 -> "2.999", 5000 -> "0.005"). No floats, like the services' formatUsdc.
+ * 2999000 -> "2.999", 5000 -> "0.005"). No floats, like the services' formatUsdc. The web app's one USDC formatter.
  */
 export function usdc(atomic: string | number | bigint): string {
   let a: bigint;
@@ -24,22 +24,6 @@ export function usdc(atomic: string | number | bigint): string {
   const neg = a < 0n, v = neg ? -a : a;
   const frac = (v % 1_000_000n).toString().padStart(6, '0').replace(/0{1,4}$/, '');
   return `${neg ? '-' : ''}${v / 1_000_000n}.${frac}`;
-}
-
-/** A budget as typed ("2.999", "3") shown the same way; anything that isn't an amount, as typed. */
-export function typedUsdc(s: string): string {
-  const m = s.trim().match(/^(\d+)(?:\.(\d{1,6}))?$/);
-  return m ? usdc(BigInt(m[1]) * 1_000_000n + BigInt((m[2] ?? '').padEnd(6, '0'))) : s.trim();
-}
-
-/**
- * Why the funding instructions didn't load, as a sentence. The orchestrator reads its contract's settings from NEAR
- * for them, so a chain-gateway or RPC failure says that in plain words; Rook's own sentences (services down, signed
- * out) stay as they are.
- */
-export function fundingLoadReason(message: string): string {
-  if (/fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|-> \d{3}$|NEAR RPC|chain-gateway/i.test(message)) return "It couldn't read the Rook contract's settings from NEAR just now.";
-  return message.replace(/\.?$/, '.');
 }
 
 /** The account whose wallet must send the funding, or null if any account may. */

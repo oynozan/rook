@@ -2,15 +2,7 @@
 // Run: npx tsx --test src/app/app/*.test.ts
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { budgetLimitError, checkDraft, draftRefusal, formatUsdc, parseBudget, PROMPT_MAX } from './draft';
-
-test('formatUsdc: at least 2 decimals, up to the 6 USDC has', () => {
-  assert.equal(formatUsdc(50_000_000n), '50.00');
-  assert.equal(formatUsdc('1500000'), '1.50');
-  assert.equal(formatUsdc(125_000n), '0.125');
-  assert.equal(formatUsdc(1_000_001n), '1.000001');
-  assert.equal(formatUsdc(0n), '0.00');
-});
+import { budgetLimitError, checkDraft, draftRefusal, parseBudget, PROMPT_MAX } from './draft';
 
 test('parseBudget: a dot or a comma as the decimal point, up to 6 decimals', () => {
   const ok = (s: string) => { const b = parseBudget(s); assert.ok(b.ok, s); return [b.atomic, b.usdc]; };
@@ -21,6 +13,8 @@ test('parseBudget: a dot or a comma as the decimal point, up to 6 decimals', () 
   assert.deepEqual(ok('3.'), [3_000_000n, '3.00']);
   assert.deepEqual(ok('.5'), [500_000n, '0.50']);
   assert.deepEqual(ok('007'), [7_000_000n, '7.00']);
+  assert.deepEqual(ok('50'), [50_000_000n, '50.00']); // the page shows this form as the message's budget too
+  assert.deepEqual(ok('1.000001'), [1_000_001n, '1.000001']);
 });
 
 test('parseBudget: each problem gets its own message, never "above 0" for an amount above 0', () => {

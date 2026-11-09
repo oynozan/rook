@@ -1,13 +1,7 @@
 // What the composer sends: checked in the browser before anything is sent, and again by the draftTask action.
+import { usdc } from './funding';
 
 export const PROMPT_MAX = 4000;
-
-/** Atomic USDC (6 decimals) as text: at least 2 decimals, and as many of the 6 as the amount needs ("50.00", "0.125"). */
-export function formatUsdc(atomic: bigint | string): string {
-  const a = BigInt(atomic);
-  const frac = (a % 1_000_000n).toString().padStart(6, '0').replace(/0{1,4}$/, '');
-  return `${a / 1_000_000n}.${frac}`;
-}
 
 export type Budget = { ok: true; atomic: bigint; usdc: string } | { ok: false; error: string };
 
@@ -24,7 +18,7 @@ export function parseBudget(input: string): Budget {
   if (frac.length > 6) return { ok: false, error: 'Use at most 6 decimals.' };
   const atomic = BigInt(whole || '0') * 1_000_000n + BigInt(frac.padEnd(6, '0'));
   if (minus || atomic === 0n) return { ok: false, error: 'Enter an amount above 0.' };
-  return { ok: true, atomic, usdc: formatUsdc(atomic) };
+  return { ok: true, atomic, usdc: usdc(atomic) };
 }
 
 /** The orchestrator's budget limits from GET /mode, in atomic USDC. Either may be missing (older services, or none). */
@@ -34,9 +28,9 @@ const limit = (v: string | null | undefined) => (typeof v === 'string' && /^\d+$
 
 export function budgetLimitError(atomic: bigint, limits: BudgetLimits | null | undefined): string | null {
   const min = limit(limits?.min_budget_atomic), max = limit(limits?.max_budget_atomic);
-  if (max !== null && atomic > max) return `The largest budget is ${formatUsdc(max)} USDC.`;
+  if (max !== null && atomic > max) return `The largest budget is ${usdc(max)} USDC.`;
   // The budget contract refunds a transfer below its minimum, so this is said before any planning is paid for.
-  if (min !== null && atomic < min) return `The smallest budget is ${formatUsdc(min)} USDC.`;
+  if (min !== null && atomic < min) return `The smallest budget is ${usdc(min)} USDC.`;
   return null;
 }
 

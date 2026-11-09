@@ -7,19 +7,20 @@ import { Mark } from '@/components/Navbar';
 import { useSmoothScroll } from '@/components/SmoothScroll';
 import { AiStatus } from '@/components/ui/ai-status';
 import { WebSearch, type WebSource } from '@/components/ui/web-search';
-import { approve, cancel, confirmFunding, draftTask, forgetTransfer, fundingRefunded, rememberTransfer, stop, type ActResult } from './actions';
+import { approve, cancel, confirmFunding, draftTask, forgetTransfer, fundingInstructions, fundingRefunded, rememberTransfer, stop, type ActResult } from './actions';
 import { go } from './AppShell';
 import { Composer, type ComposerErrors } from './Composer';
 import { alertLine, deliveredParts, problemLine, skipReason } from './feed';
 import {
-  balanceProblem, closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingLoadReason, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
-  moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, termsOf, txHashOf, typedUsdc, usdc, whoseTransfer,
+  balanceProblem, closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
+  moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, termsOf, txHashOf, usdc, whoseTransfer,
   type CloseResult, type Funding, type FundingResult, type Terms,
 } from './funding';
 import { explorerTx, NETWORK, rpcFor, type Network } from './network';
 import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary } from './orchestrator';
 import { useMode } from './mode';
 import { allSelfDoWhy, plannerReason, selfDoWhy } from './planner';
+import { FUNDING_NOT_READY } from './refusals';
 import { useEase } from './useEase';
 import { useWallet, WalletAccountMismatch } from './wallet';
 
@@ -421,10 +422,11 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
     setError(null);
     setRefundable(false);
     setPhase('confirming');
-    const out = await confirmFunding(id, { contract_task_id: cid, tx_hash: tx })
-      .catch(() => ({ ok: false as const, message: "This page couldn't reach Rook's web server" }));
+    const out: ActResult = await confirmFunding(id, { contract_task_id: cid, tx_hash: tx })
+      .catch(() => ({ ok: false as const, message: UNREACHABLE }));
     setPhase('idle');
     if (out.ok) return onConfirmed();
+    // The orchestrator's own refusals are fragments, quoted after a lead; Rook's own sentences stand on their own.
     const why = out.message.replace(/\.?$/, '.');
     const next = confirmFailure(out.message);
     onChanged(); // the task may have moved on meanwhile: bound by another confirm, or stopped
@@ -434,10 +436,10 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
     }
     if (next === 'refetch') {
       if (/already funds/.test(out.message)) setMade(null); // another task's contract task: this one can be funded again
-      return setError(`Rook didn't start the run from here: ${why}`);
+      return setError(out.raw ? `Rook didn't start the run from here: ${why}` : why);
     }
     if (next === 'not_final') return setError("NEAR hasn't finished recording your transfer yet. Your USDC is safe in the Rook contract. Confirm again in a few seconds.");
-    setError(`Rook didn't start the run: ${why} Your USDC is safe in the Rook contract. Confirm again to start it.`);
+    setError(out.raw ? `Rook didn't start the run: ${why} Your USDC is safe in the Rook contract. Confirm again to start it.` : `${why} Your USDC is safe in the Rook contract.`);
   }
 
   const lookUp = (tx: string) => lookUpFunding(network, tx, wallet.account ?? '', contract ?? '');
@@ -619,7 +621,7 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
   if (!funding) {
     return (
       <div className="rounded-2xl border border-ink/15 p-4">
-        {trouble ? <p role="alert">Rook couldn&apos;t get the funding transfer ready. {trouble}</p> : <Working label="Getting the funding transfer ready" />}
+        {trouble ? <p role="alert">{trouble}</p> : <Working label="Getting the funding transfer ready" />}
         <div className="mt-4 flex flex-wrap gap-3">
           {trouble && <ActionButton primary onClick={onRetry} disabled={stopping}>Try again</ActionButton>}
           <ActionButton onClick={onStop} busy={stopping}>{stopping ? 'Cancelling…' : 'Cancel'}</ActionButton>
@@ -1057,12 +1059,12 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   useEffect(() => {
     if (!awaitingFunding || sentLive || funding || fundingConfirmed || fundingTrouble !== null || fundingAsked.current) return;
     fundingAsked.current = true; // approve again: the orchestrator repeats the funding instructions for an approved task
-    void approve(id)
-      .catch((): ActResult => ({ ok: false, message: "This page couldn't reach Rook's web server" }))
+    void fundingInstructions(id)
+      .catch((): ActResult => ({ ok: false, message: UNREACHABLE }))
       .then((out) => {
         fundingAsked.current = false;
         if (out.ok && out.funding) return setFunding(out.funding);
-        setFundingTrouble(fundingLoadReason(out.ok ? "Rook's answer didn't include it" : out.message));
+        setFundingTrouble(out.ok ? FUNDING_NOT_READY : out.message);
         refetch(); // the task may have moved on meanwhile (stopped, or funded from another page)
       });
   }, [awaitingFunding, sentLive, funding, fundingConfirmed, fundingTrouble, id, refetch]);
@@ -1349,7 +1351,7 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
               <h1 className="sr-only">{sending?.prompt ?? loaded.snap?.task.prompt ?? 'Task'}</h1>
               {sending ? (
                 <>
-                  <UserMessage animate prompt={sending.prompt} budget={typedUsdc(sending.budget)} />
+                  <UserMessage animate prompt={sending.prompt} budget={sending.budget} />
                   <RookMessage><AgentSearch plan={null} animate={false} onGrow={follow} /></RookMessage>
                 </>
               ) : id && <Thread key={`${id}:${wallet.account}`} id={id} loaded={loaded} tasks={tasks} onGrow={follow} fresh={justDrafted.current.has(id)} onRevealed={onRevealed} />}

@@ -1,22 +1,32 @@
-// What the orchestrator answers to the task page's buttons (approve, cancel, stop), in plain words for the page.
+// What the orchestrator answers to the task page's buttons (approve, cancel, stop), and to the funding step asking for
+// the funding transfer again (fund), in plain words for the page.
 
-export type TaskAction = 'approve' | 'cancel' | 'stop';
+export type TaskAction = 'approve' | 'fund' | 'cancel' | 'stop';
 
 const NOW: Record<string, string> = {
   draft: 'is still being planned', planned: 'is waiting for your approval', approved: 'is already approved',
   funded: 'is already running', running: 'is already running', aggregating: 'is already running', closing: 'is already running',
   closed: 'has already finished', cancelled: 'was cancelled', killed: 'was stopped', failed: 'has already failed',
 };
-const DONE: Record<TaskAction, string> = { approve: 'started', cancel: 'cancelled', stop: 'stopped' };
+const DONE: Record<TaskAction, string> = { approve: 'started', fund: 'funded', cancel: 'cancelled', stop: 'stopped' };
+/** The funding transfer didn't come back, for no reason Rook can name. */
+export const FUNDING_NOT_READY = "Rook couldn't get the funding transfer ready. Try again in a moment.";
 const FAILED: Record<TaskAction, string> = {
   approve: "Rook couldn't get this task started right now. Try again in a moment.",
+  fund: FUNDING_NOT_READY,
   cancel: "Rook couldn't cancel this task right now. Try again in a moment.",
   stop: "Rook couldn't stop this task right now. Try again in a moment.",
 };
 
 /**
- * `status`: the orchestrator's HTTP status, or null when it never answered with one. `known` false: the words are the
- * fallback, and the orchestrator's own message belongs in the server log.
+ * The funding transfer carries the contract's settings, which the orchestrator reads from NEAR through the
+ * chain-gateway: the gateway down, NEAR RPC failing, or the read timing out.
+ */
+const CHAIN_READ = /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|-> \d{3}$|NEAR RPC|^view \S+\.get_|chain-gateway|aborted|timeout/i;
+
+/**
+ * `status`: the orchestrator's HTTP status, or null when it never answered with one. `known` false: a failure on Rook's
+ * side or a refusal these words don't name, so the orchestrator's own message belongs in the server log.
  */
 export function actionRefusal(action: TaskAction, status: number | null, message: string): { message: string; known: boolean } {
   const known = (text: string) => ({ message: text, known: true });
@@ -35,5 +45,19 @@ export function actionRefusal(action: TaskAction, status: number | null, message
     m = /below the contract's minimum of ([\d.]+) USDC/.exec(message);
     if (m) return known(`This task's budget is below the contract's smallest, ${m[1]} USDC. Draft it again with a larger budget.`);
   }
+  if ((action === 'approve' || action === 'fund') && status !== null && status >= 500 && CHAIN_READ.test(message)) {
+    return { message: "Rook couldn't read the Rook contract's settings from NEAR just now, so the funding transfer isn't ready. Try again in a moment.", known: false };
+  }
   return { message: FAILED[action], known: false };
+}
+
+/**
+ * A failed call of the funding step's (confirm, refund). The orchestrator's refusals (4xx) go back as it wrote them,
+ * marked raw: the funding step reads them (funding.ts confirmFailure) and words them. Anything else (a 5xx such as the
+ * chain-gateway down behind it, or a service token that differs) is Rook's own trouble, said in plain words; its text
+ * belongs in the server log.
+ */
+export function fundingCallFailure(status: number | null, message: string): { message: string; raw?: true } {
+  if (status !== null && status >= 400 && status < 500 && status !== 401 && message) return { message, raw: true };
+  return { message: "Rook couldn't check your transfer right now. Try again in a moment." };
 }
