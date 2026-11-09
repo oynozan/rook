@@ -1451,9 +1451,11 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
     return false;
   }
 
-  // A failed send's errors are about that send: not the next page, nor the next account ("Sign in first" stays wrong once
-  // the owner signed in again).
-  useEffect(() => { setErrors(null); }, [id, wallet.account]);
+  // A failed send's errors are about that send: not the next page, nor the next sign-in ("Sign in first" is wrong once
+  // the owner signed in again). A sign-out keeps them: a send refused for a lapsed session signs the page out after the
+  // error is set, and "Sign in with your NEAR wallet first" must stay to say why nothing was sent.
+  useEffect(() => { setErrors(null); }, [id]);
+  useEffect(() => { if (wallet.account) setErrors(null); }, [wallet.account]);
 
   // Follow the conversation as it grows, until the reader scrolls up. Only their input can stop it: a smooth scroll on
   // its way down is also far from the bottom for a moment, and must not count. Moving down to the bottom resumes following;
