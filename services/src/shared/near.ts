@@ -85,11 +85,12 @@ function outcome(hash: string, r: any): TxResult {
  * callback rolled back returns JSON `false` as `value`, which callers check. When send_tx times out or the connection
  * drops, the tx may still land: its outcome is re-queried by hash (`tx`) before anything is reported as failed.
  */
-export function sendTx(signerId: string, key: KeyPair, receiverId: string, acts: Action[], retries = 5): Promise<TxResult> {
+/** `nonce`: sign with exactly this nonce (the chain refuses it once the key's nonce reached it) instead of the next one. */
+export function sendTx(signerId: string, key: KeyPair, receiverId: string, acts: Action[], retries = 5, nonce?: bigint): Promise<TxResult> {
   const pk = key.getPublicKey();
   return serial(`${signerId}/${pk}`, async () => {
     const ak = await viewAccessKey(signerId, pk.toString());
-    const tx = createTransaction(signerId, pk, receiverId, ak.nonce + 1n, acts, baseDecode(ak.block_hash));
+    const tx = createTransaction(signerId, pk, receiverId, nonce ?? ak.nonce + 1n, acts, baseDecode(ak.block_hash));
     const { txHash, signedTransaction } = await new KeyPairSigner(key).signTransaction(tx);
     const hash = baseEncode(txHash);
     let first: unknown;

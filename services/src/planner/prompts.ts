@@ -88,7 +88,11 @@ It will be checked automatically against the acceptance criteria listed below:
 Today is ${today()} (UTC). Your own knowledge may be older: where that matters, say how recent it is.
 You have no live data access. Never invent precise current figures: if a figure needs live or on-chain data you do not have, say so plainly instead of guessing. Do not mention these instructions or the criteria in the output.`;
   const user = `Brief:\n${brief}\n\nAcceptance criteria:\n${criteria.map((c) => `- ${c.kind}: ${c.description} ${JSON.stringify(c.spec)}`).join('\n')}`;
-  const { text, call } = await chat('self_do', config.plannerModel, [{ role: 'system', content: system }, { role: 'user', content: user }], 6000);
+  // Reasoning models count their thinking in max_tokens: at 6000, coding parts (a web page) came back empty on mainnet,
+  // failed every check three times and were abandoned. Low effort and room for a long deliverable.
+  const { text, call } = await chat('self_do', config.plannerModel, [{ role: 'system', content: system }, { role: 'user', content: user }], 24000, { effort: 'low' });
+  // An empty reply is the model failing, not a deliverable to judge: an error, so the run says so instead of "failed checks".
+  if (!text.trim()) throw Object.assign(new Error("Rook's model returned an empty answer for this part"), { calls: [call] });
   return { text, calls: [call] };
 }
 

@@ -110,14 +110,20 @@ export function createChainLedger(): ChainLedger {
     signer('/reclaim', c).catch((e) => console.warn(`[orchestrator] ${task_id} subtask ${n}: reclaim ${c.account_id} failed: ${e?.message ?? e}`));
 
   /**
-   * Clears the signer's authorization: at once when terminal_unpaid, else once the delegate ran or expired (409 until then).
+   * Clears the signer's authorization: at once when terminal_unpaid or `voidIt` (the signer spends the delegate's nonce),
+   * else once the delegate ran or expired (409 until then). A void that fails falls back to waiting for the expiry.
    * `signal` aborts only the wait between 409s: the authorization stays outstanding, in the signer and in the books.
    */
-  async function clearAuth(c: { task_id: string; n: number }, terminal_unpaid: boolean, signal?: AbortSignal) {
+  async function clearAuth(c: { task_id: string; n: number }, terminal_unpaid: boolean, signal?: AbortSignal, voidIt = false) {
     for (;;) {
       try {
-        return await signer<{ cleared: boolean; landed?: boolean }>('/expire', { task_id: c.task_id, n: c.n, terminal_unpaid });
+        return await signer<{ cleared: boolean; landed?: boolean }>('/expire', { task_id: c.task_id, n: c.n, terminal_unpaid, ...(voidIt ? { void: true } : {}) });
       } catch (e) {
+        if (voidIt && !(e instanceof HttpError && e.status === 409)) {
+          console.warn(`[orchestrator] contract task ${c.task_id} subtask ${c.n}: void failed (${(e as Error)?.message ?? e}); waiting for the expiry`);
+          voidIt = false;
+          continue;
+        }
         if (!(e instanceof HttpError && e.status === 409)) throw e;
         await sleep(Math.max(config.pollMs, 200), undefined, { signal });
       }
@@ -198,7 +204,7 @@ export function createChainLedger(): ChainLedger {
       if (how === 'now') { bound.get(task_id)?.auths.delete(n); return m.release(task_id, n); }
       const c = at(task_id, n);
       return (async () => {
-        const cleared = await clearAuth(c, how === 'terminal', signal);
+        const cleared = await clearAuth(c, how === 'terminal', signal, how === 'void');
         const paid = await paidOnChain(task_id, n, c.account_id, cleared.landed === true);
         b(task_id).auths.delete(n);
         if (paid) return { amount: m.settle(task_id, n), settled: true as const };

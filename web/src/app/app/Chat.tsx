@@ -936,7 +936,7 @@ function feedFrom(events: RookEvent[], ctx: FeedContext): FeedLine[] {
         : 'Stopped. Rook pays no more agents.';
       lines.push({ key, text, tone: 'muted', now: { state: 'analyzing', label: 'Stopped' } });
     }
-    else if (type === 'ledger' && data.op === 'clearing') lines.push({ key, text: `Waiting for ${data.agent_handle ?? 'an agent'}'s payment authorization to ${data.how === 'terminal' ? 'clear' : 'settle or expire'} before returning its funds.`, tone: 'muted', now: { state: 'analyzing', label: 'Clearing', detail: data.agent_handle ?? undefined } });
+    else if (type === 'ledger' && data.op === 'clearing') lines.push({ key, text: data.how === 'void' ? `Cancelling the unused payment to ${data.agent_handle ?? 'an agent'} on NEAR before returning its funds.` : `Waiting for ${data.agent_handle ?? 'an agent'}'s payment authorization to ${data.how === 'terminal' ? 'clear' : 'settle or expire'} before returning its funds.`, tone: 'muted', now: { state: 'analyzing', label: 'Clearing', detail: data.agent_handle ?? undefined } });
     else if (type === 'ledger' && data.op === 'restored') lines.push({ key, text: `Rook restarted and picked this task up again from contract task ${data.contract_task_id}.`, tone: 'muted', now: { state: 'analyzing', label: 'Restored' } });
     // A plan that hires no agent held no money: no budget to close, nothing refunded.
     else if (type === 'ledger' && data.op === 'closeTask' && data.amount_atomic != null && !ctx.free) lines.push({ key, text: `Closed the budget: ${usdc(data.amount_atomic)} USDC went back to your wallet${ctx.simNote}.`, tone: 'muted', now: { state: 'analyzing', label: 'Closed' } });

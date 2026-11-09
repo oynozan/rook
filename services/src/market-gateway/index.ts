@@ -215,10 +215,13 @@ export async function start(port = config.ports.marketGateway): Promise<Running>
           saw502 = true;
         }
       } catch (e: any) {
+        // A paid send that fails holds its payment until Rook voids it: say why, for whoever runs Rook.
+        console.warn(`[market-gateway] paid send to ${handle} failed${saw502 ? ' after a 502' : ''}: ${e?.message ?? e}`);
         if (saw502) return fail('outcome_unknown', `after a 502: ${e?.message ?? e}`);
         return fail('unreachable', e?.message ?? String(e));
       }
       const ok = r!.status === 200 && r!.body?.result;
+      if (!ok) console.warn(`[market-gateway] paid send to ${handle}: HTTP ${r!.status} ${JSON.stringify(r!.body ?? null).slice(0, 300)}`);
       // A 502 may have settled the payment before failing, so a later 402 ("already used") or a final 502 does not
       // prove the header is unspent: the orchestrator must count it as possibly charged, not release it.
       if (saw502 && !ok) return fail('outcome_unknown', `after a 502 the agent answered HTTP ${r!.status}: payment may have settled`);

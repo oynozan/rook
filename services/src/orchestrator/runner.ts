@@ -209,13 +209,14 @@ async function closeBooks(ledger: Ledger, t: Task): Promise<bigint> {
 }
 
 /** How a stopped hire's authorization can be cleared: `terminal` when its A2A task ended unpaid or took CancelTask. */
-async function unpaidHow(hire: Hire | null): Promise<'terminal' | 'wait'> {
-  if (!hire?.a2a_task_id) return 'wait'; // the header may have reached the agent; its task id never came back
+async function unpaidHow(hire: Hire | null): Promise<'terminal' | 'wait' | 'void'> {
+  if (!hire?.a2a_task_id) return 'void'; // the header may have reached the agent, but no deliverable can come back
   const r = await call<GatewayResult<{ task: A2ATask }>>(gw(`/task?handle=${encodeURIComponent(hire.agent_handle)}&id=${encodeURIComponent(hire.a2a_task_id)}`)).catch(() => null);
   const state = r?.ok ? r.task.state : null;
   if (state === 'REJECTED' || state === 'FAILED' || state === 'CANCELED') return 'terminal';
   if (state === 'COMPLETED') return 'wait'; // delivered: its payment settles, so wait for it to land
-  return (await cancelTask(hire.agent_handle, hire.a2a_task_id)) ? 'terminal' : 'wait';
+  // Stopped, and the agent refused CancelTask: its window may be a day, so Rook voids the payment rather than wait it out.
+  return (await cancelTask(hire.agent_handle, hire.a2a_task_id)) ? 'terminal' : 'void';
 }
 
 /**
@@ -402,7 +403,7 @@ async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Defer
   if (!pending && authorizedNow(ledger, t, s)) {
     // An authorization with no saved hire (stored before hires were saved ahead of /send): nothing else is signed for
     // this subtask until it lands or expires. Its agent and deliverable are unknown, so a landed payment only counts as spent.
-    const r = await ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n, 'wait', signal));
+    const r = await ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n, 'void', signal));
     if (typeof r === 'object' && r.settled) emit(t, 'error', { kind: 'paid_anyway', message: 'a payment authorized before the restart, for a hire Rook has no record of, landed on chain; counted as spent' }, s.id);
   }
   for (;;) {
@@ -517,7 +518,7 @@ async function quote(ledger: Ledger, t: Task, s: Sub, c: Candidate): Promise<Acc
  * Ends the hire unpaid; true when the chain shows the payment landed anyway, and then it counts as paid. A kill stops
  * the wait for the chain (the run's signal): unwind then clears that authorization on its own.
  */
-async function endUnpaid(ledger: Ledger, t: Task, s: Sub, hire: Hire, how: 'terminal' | 'wait') {
+async function endUnpaid(ledger: Ledger, t: Task, s: Sub, hire: Hire, how: 'terminal' | 'wait' | 'void') {
   const r = await ledgerOp(t, 'release', s, async () => {
     const out = await ledger.release(t.id, s.n, how, t.abort.signal);
     if (typeof out === 'object' && out.settled) { hire.paid = true; hire.state = 'OUTCOME_UNKNOWN'; hire.ended_at = now(); }
@@ -579,9 +580,10 @@ async function hire1(ledger: Ledger, t: Task, s: Sub, c: Candidate, row: Accepts
     }
     if (!sent.ok && sent.error.code === 'outcome_unknown') {
       // The gateway saw a 502 and cannot tell whether the payment settled: never release it as unpaid. In chain mode
-      // settle waits for the chain's answer; booked unpaid (0) only when the payment never showed.
+      // Rook voids it (no task id came back, so no deliverable can): paid only when the payment landed first.
       const paid = await ledgerOp(t, 'settle', s, async () => {
-        const a = await ledger.settle(t.id, s.n, signal);
+        const r = onChain(ledger) ? await ledger.release(t.id, s.n, 'void', signal) : null;
+        const a = r === null ? await ledger.settle(t.id, s.n, signal) : typeof r === 'object' && r.settled ? r.amount : 0n;
         if (a > 0n) { hire.paid = true; hire.state = 'OUTCOME_UNKNOWN'; } else hire.state = 'SEND_FAILED';
         hire.ended_at = now();
         return a;
@@ -591,9 +593,9 @@ async function hire1(ledger: Ledger, t: Task, s: Sub, c: Candidate, row: Accepts
       return hire;
     }
     if (!sent.ok) {
-      // A 402 means the agent refused the payment: nothing can settle. Anything else waits for the expiry on chain,
-      // and a payment that landed meanwhile (the agent accepted it before the connection failed) counts as paid.
-      if (await endUnpaid(ledger, t, s, hire, sent.error.code === 402 ? 'terminal' : 'wait')) return hire;
+      // A 402 means the agent refused the payment: nothing can settle. Anything else may have reached the market, but no
+      // task id came back, so no deliverable can: Rook voids it, and a payment that landed first counts as paid.
+      if (await endUnpaid(ledger, t, s, hire, sent.error.code === 402 ? 'terminal' : 'void')) return hire;
       hire.state = 'SEND_FAILED'; hire.ended_at = now();
       rejectQuote(t, s, c.handle, `send failed: ${sent.error.code} ${sent.error.message}`);
       return null;
@@ -613,8 +615,8 @@ async function resumeHire(ledger: Ledger, t: Task, s: Sub, hire: Hire): Promise<
   const c = s.candidates.find((x) => x.handle === hire.agent_handle);
   await acquire(t.abort.signal);
   try {
-    if (!hire.a2a_task_id || !c) { // the header may have reached the agent, but its task id never came back
-      if (await endUnpaid(ledger, t, s, hire, 'wait')) return hire;
+    if (!hire.a2a_task_id || !c) { // the header may have reached the agent, but its task id never came back: void it
+      if (await endUnpaid(ledger, t, s, hire, 'void')) return hire;
       hire.state = 'SEND_FAILED'; hire.ended_at = now();
       return null;
     }

@@ -151,21 +151,36 @@ export async function start(port = config.ports.signer): Promise<Running> {
 
     /**
      * Clears the outstanding authorization once it can no longer settle: it landed (the sub-account key's nonce reached
-     * the delegate's), the A2A task ended unpaid (terminal_unpaid), or it expired. `landed` tells Rook it was paid.
+     * the delegate's), the A2A task ended unpaid (terminal_unpaid), it expired, or `void`: Rook gives up on a payment no
+     * deliverable can come back for (no task id came back, or the task was stopped), and spends the delegate's nonce.
+     * Whichever reaches the chain first wins; `landed` tells Rook it was paid.
      */
     'POST /expire': async ({ body }) => {
       const slot = `${body?.task_id}/${Number(body?.n)}`;
       const out = auths.get(slot);
       if (!out) return { cleared: false, outstanding: false };
       // The nonce shows the delegate ran, not that its ft_transfer succeeded: the orchestrator books by the balance.
-      const landed = (await viewAccessKey(out.account_id, out.public_key)).nonce >= BigInt(out.nonce);
+      let landed = (await viewAccessKey(out.account_id, out.public_key)).nonce >= BigInt(out.nonce);
+      let voided: string | undefined;
       if (!landed && body?.terminal_unpaid !== true) {
         const { height } = await latestBlock();
-        if (height <= out.expires_at_block) refuse(`authorization still valid until block ${out.expires_at_block} (now ${height})`);
+        if (height <= out.expires_at_block) {
+          if (body?.void !== true) refuse(`authorization still valid until block ${out.expires_at_block} (now ${height})`);
+          // Void: a no-op transaction from the sub-account takes the delegate's own nonce, so the delegate can never run.
+          const { cfg, key } = await subtask(String(body.task_id), Number(body.n), out.account_id);
+          try {
+            const r = await sendTx(out.account_id, key, cfg.usdc, [functionCall('ft_balance_of', { account_id: out.account_id }, 5, 0n)], 5, BigInt(out.nonce));
+            voided = r.hash;
+          } catch (e: any) {
+            // Refused for its nonce: the delegate ran first. Anything else leaves the authorization outstanding.
+            if (!/nonce/i.test(String(e?.message ?? e))) throw e;
+            landed = true;
+          }
+        }
       }
       auths.delete(slot);
       save();
-      return { cleared: true, payment_hash: out.payment_hash, landed };
+      return { cleared: true, payment_hash: out.payment_hash, landed, ...(voided ? { void_tx: voided } : {}) };
     },
 
     /** {task_id}: refuse every further /sign for that contract task. Without task_id: for every task. */

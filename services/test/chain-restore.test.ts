@@ -57,12 +57,13 @@ before(async () => {
     'POST /expire': ({ body }) => {
       const a = acct(body.task_id, body.n), out = auths.get(a);
       if (!out) return { cleared: false, outstanding: false };
-      if (!out.landed && !body.terminal_unpaid && Date.now() <= out.until) {
+      // void: the signer spends the delegate's nonce, so it clears at once (landed when the payment ran first).
+      if (!out.landed && !body.terminal_unpaid && !body.void && Date.now() <= out.until) {
         expireWaits.set(a, (expireWaits.get(a) ?? 0) + 1);
         throw new HttpError(409, 'still valid');
       }
       auths.delete(a);
-      calls.push(`expire ${a} landed=${out.landed}${body.terminal_unpaid ? ' terminal' : ''}`);
+      calls.push(`expire ${a} landed=${out.landed}${body.terminal_unpaid ? ' terminal' : ''}${body.void ? ' void' : ''}`);
       return { cleared: true, landed: out.landed };
     },
     'POST /return': ({ body }) => {
@@ -219,8 +220,9 @@ test('restart mid-hire: rebuilt from the contract, the hire is polled again by i
   } finally { await orch.close(); }
 });
 
-test('kill in chain mode: the authorization is waited out, the sub-account returned and the task closed; kill_task stays the funder\'s, in the CLI\'s /kill answer', async () => {
-  authTtlMs = 300; // the agent refuses CancelTask, so only the authorization's expiry frees the money
+test("kill in chain mode: an agent that refuses CancelTask has its payment voided, the sub-account returned and the task closed; kill_task stays the funder's, in the CLI's /kill answer", async () => {
+  // The agent refuses CancelTask. Its authorization is valid for a minute here (often a day on mainnet), and the kill
+  // must not wait that out: the signer voids it, so the money comes back at once.
   const orch = await start(0);
   try {
     const id = await fundedAndWorking(orch, 'stubborn', 'b');
@@ -233,15 +235,15 @@ test('kill in chain mode: the authorization is waited out, the sub-account retur
     assert.equal(s.task.status, 'killed');
     assert.deepEqual([s.ledger.spent_atomic, s.ledger.refunded_atomic, s.receipts.length], ['0', '1000000', 0]);
     assert.ok(calls.includes('signer-kill b'));
-    assert.ok(calls.indexOf(`expire ${acct('b', 1)} landed=false`) < calls.indexOf(`return ${acct('b', 1)} 100000`));
+    assert.ok(calls.indexOf(`expire ${acct('b', 1)} landed=false void`) < calls.indexOf(`return ${acct('b', 1)} 100000`));
     assert.ok(calls.includes('close b'));
     // Every step is recorded after the killed status. The event only says the money comes back: no command in the stream.
     const evs = await events(orch, id);
     const at = evs.findIndex((e) => e.type === 'task_status' && e.data.to === 'killed');
     assert.deepEqual(evs.find((e) => e.type === 'ledger' && e.data.op === 'kill').data, { op: 'kill', returning: true });
     assert.deepEqual(evs.slice(at + 1).filter((e) => e.type === 'ledger').map((e) => e.data.op), ['clearing', 'release', 'returnLeftover', 'closeTask']);
-    assert.equal(evs.find((e) => e.data.op === 'clearing').data.how, 'wait');
-  } finally { await orch.close(); authTtlMs = 60_000; }
+    assert.equal(evs.find((e) => e.data.op === 'clearing').data.how, 'void');
+  } finally { await orch.close(); }
 });
 
 test('a kill while fund_subtask is in flight still brings that sub-account back', async () => {
@@ -448,13 +450,13 @@ test('a task whose contract task was refunded and deleted before Rook funded any
   } finally { await orch.close(); }
 });
 
-test('unwind: an authorization waited out on one sub-account does not hold back the other sub-account\'s return', async () => {
+test("unwind: an authorization with no hire on record is voided, not waited out, and each sub-account returns on its own", async () => {
   process.env.ROOK_DB = join(dir, 'two-subs.sqlite');
   const [a1, a2] = [acct('h', 1), acct('h', 2)];
   openContractTask('h', ['300000', '200000']);
   contract.get('h')!.subs.push(fundedSub('h', 1, '300000'), fundedSub('h', 2, '200000'));
   bal.set(a1, 300_000n); bal.set(a2, 200_000n);
-  auths.set(a1, { amount: 100_000n, landed: false, until: Date.now() + 1500 }); // its hire is not on record: waited out
+  auths.set(a1, { amount: 100_000n, landed: false, until: Date.now() + 60_000 }); // its hire is not on record: voided
   const ts = new Date().toISOString();
   const s = (n: number, cap: string) => ({
     id: `s${n}`, title: 'T', brief: 'b', search_terms: [], criteria: [], cap_atomic: cap, deadline_s: 60, self_do: false, candidates: [],
@@ -472,8 +474,8 @@ test('unwind: an authorization waited out on one sub-account does not hold back 
   try {
     const x = await until(async () => { const v = await snap(orch, 't_two'); return v.ledger?.closed ? v : false; });
     const at = (c: string) => { const i = calls.indexOf(c); assert.ok(i >= 0, `${c} missing:\n${calls.join('\n')}`); return i; };
-    assert.ok(at(`return ${a2} 200000`) < at(`expire ${a1} landed=false`));
-    assert.ok(at(`expire ${a1} landed=false`) < at(`return ${a1} 300000`) && at(`return ${a1} 300000`) < at('close h'));
+    assert.ok(at(`return ${a2} 200000`) < at('close h'));
+    assert.ok(at(`expire ${a1} landed=false void`) < at(`return ${a1} 300000`) && at(`return ${a1} 300000`) < at('close h'));
     assert.deepEqual([x.ledger.spent_atomic, x.ledger.refunded_atomic], ['0', '1000000']);
   } finally { await orch.close(); }
 });
@@ -522,9 +524,9 @@ test('a kill while the run waits for a delivered hire\'s payment that never land
   } finally { await orch.close(); }
 });
 
-test('a kill while a send\'s outcome is unknown: the unwind takes over the authorization and the hire ends killed', async () => {
+test('a send whose outcome is unknown is voided at once in chain mode: no payment showed, so it is unpaid and the money comes back', async () => {
+  // No task id came back, so no deliverable can: Rook does not wait out the authorization (often a day on mainnet).
   process.env.ROOK_DB = join(dir, 'unsure.sqlite');
-  authTtlMs = 1500; // no payment ever shows, so only the authorization's expiry frees the money
   const orch = await start(0);
   try {
     const t = await call(`${orch.url}/tasks`, { prompt: 'unsure', budget_usdc: '1' });
@@ -532,18 +534,12 @@ test('a kill while a send\'s outcome is unknown: the unwind takes over the autho
     openContractTask('u', [PRICE.unsure]);
     await call(`${orch.url}/tasks/${t.id}/funded`, { contract_task_id: 'u' });
     const account = acct('u', 1);
-    await until(async () => (expireWaits.get(account) ?? 0) > 0); // the run waits for the chain to tell whether it paid
-    await call(`${orch.url}/tasks/${t.id}/kill`, {});
     const s = await until(async () => { const x = await snap(orch, t.id); return x.ledger?.closed ? x : false; });
-    assert.deepEqual(s.subtasks[0].hires.map((h: any) => [h.agent_handle, h.state, h.paid, h.ended_at !== null]), [['unsure', 'KILLED', false, true]]);
-    assert.ok(calls.indexOf(`expire ${account} landed=false`) < calls.indexOf(`return ${account} 100000`) && calls.includes('close u'));
+    assert.equal(expireWaits.get(account) ?? 0, 0); // never waited for the expiry
+    assert.deepEqual(s.subtasks[0].hires.map((h: any) => [h.agent_handle, h.state, h.paid]), [['unsure', 'SEND_FAILED', false]]);
+    assert.ok(calls.indexOf(`expire ${account} landed=false void`) < calls.indexOf(`return ${account} 100000`) && calls.includes('close u'));
     assert.deepEqual([s.ledger.spent_atomic, s.ledger.refunded_atomic], ['0', '1000000']);
-    // The run stopped waiting at the kill, so the unwind, not the run, waited out and cleared the authorization.
-    const evs = await events(orch, t.id);
-    const killedAt = evs.findIndex((e) => e.type === 'task_status' && e.data.to === 'killed');
-    assert.deepEqual(evs.slice(killedAt + 1).filter((e) => e.type === 'ledger').map((e) => e.data.op), ['clearing', 'release', 'returnLeftover', 'closeTask']);
-    assert.equal(evs.find((e) => e.data.op === 'clearing').data.how, 'wait');
-  } finally { await orch.close(); authTtlMs = 60_000; }
+  } finally { await orch.close(); }
 });
 
 test('after the funder closed a killed task, an emptied sub-account is marked empty and Rook books the task closed', async () => {

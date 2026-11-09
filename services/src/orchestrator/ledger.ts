@@ -24,10 +24,12 @@ type Acct = {
 type Awaitable<T> = T | Promise<T>;
 /**
  * How an authorization ends unpaid. `terminal`: the agent reported REJECTED/FAILED/CANCELED (or the header never left
- * Rook); `wait`: it may still settle, so wait until it expires; `now`: drop it from Rook's books immediately (kill,
- * shutdown) while the signer keeps refusing a new one until it expires.
+ * Rook); `wait`: it may still settle, so wait until it expires; `void`: Rook gives up on it (no task id came back, or the
+ * run was stopped and the agent refused CancelTask), so the signer spends the delegate's nonce and it can never settle;
+ * `now`: drop it from Rook's books immediately (kill, shutdown) while the signer keeps refusing a new one until it expires.
+ * An agent's window is often a day (87 000 s): waiting it out held a sub-account's money that long (mainnet).
  */
-export type ReleaseHow = 'terminal' | 'wait' | 'now';
+export type ReleaseHow = 'terminal' | 'wait' | 'void' | 'now';
 export type LedgerView = NonNullable<ReturnType<ReturnType<typeof createLedger>['view']>> & Record<string, unknown>;
 export type ReceiptEvidence = { receipt_tx: string | null; evidence?: { account_id: string; ft_balance_atomic: string } };
 
