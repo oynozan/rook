@@ -40,16 +40,16 @@ export function conversationOf(tasks: TaskSummary[], id: string): Conversation |
   return conversations(tasks).find((c) => c.tasks.some((t) => t.id === id)) ?? null;
 }
 
+/** A failed or stopped message that never got a plan to run (a reply that isn't a task, a failed draft). Older services can't tell. */
+const planless = (t: TaskSummary) => (t.status === 'failed' || t.status === 'killed') && t.has_plan === false;
+
 /**
- * The task a new message acts on (`chain` oldest first): the newest, or the plan above it when only messages that never
- * got a plan came after it (a reply that isn't a task). Rook revises that plan (services/src/orchestrator/store.ts
- * openPlan), so the sidebar shows it as ready and the composer offers to change it.
+ * The task a new message acts on (`chain` oldest first): the newest one that isn't planless, whatever its status, so a
+ * reply that wasn't a task never hides the plan, run or report above it (services/src/orchestrator/store.ts headOf).
+ * The sidebar shows its state, and the composer offers to change it, follow up on it, or wait for it.
  */
 export function currentTask(chain: TaskSummary[]): TaskSummary {
-  for (let i = chain.length - 1; i >= 0; i--) {
-    if (chain[i].status === 'planned') return chain[i];
-    if (chain[i].status !== 'failed' && chain[i].status !== 'killed') break;
-  }
+  for (let i = chain.length - 1; i >= 0; i--) if (!planless(chain[i])) return chain[i];
   return chain[chain.length - 1];
 }
 

@@ -10,10 +10,11 @@ export const serviceHeaders = (): Record<string, string> =>
   process.env.ROOK_SERVICE_TOKEN ? { 'x-rook-token': process.env.ROOK_SERVICE_TOKEN } : {};
 
 /**
- * parent_id: the task this one follows in its conversation; null starts a conversation. Older orchestrators send no
- * parent_id (every task starts its own) and no budget_atomic.
+ * parent_id: the task this one follows in its conversation; null starts a conversation. has_plan: it got a plan with
+ * something to run (false for a reply that wasn't a task, or a failed draft). Older orchestrators send no parent_id
+ * (every task starts its own), no budget_atomic and no has_plan.
  */
-export type TaskSummary = { id: string; status: string; prompt: string; created_at: string; parent_id?: string | null; budget_atomic?: string };
+export type TaskSummary = { id: string; status: string; prompt: string; created_at: string; parent_id?: string | null; budget_atomic?: string; has_plan?: boolean };
 
 /**
  * An agent the planner can hire, in the order Rook hires them: lowest expected cost first (price divided by the chance it

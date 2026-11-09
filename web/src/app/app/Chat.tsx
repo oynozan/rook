@@ -1357,7 +1357,8 @@ type ThreadProps = Omit<Parameters<typeof Thread>[0], 'loaded'>;
 
 /**
  * One task of the conversation, loaded and followed on its own. It tells the page what it learns (`onSummary`: status,
- * budget, parent), and when it has loaded (`onReady`). `hidden`: a message just sent still shows as sent until then.
+ * budget, parent, whether it got a plan), and when it has loaded (`onReady`). `hidden`: a message just sent still shows
+ * as sent until then.
  */
 function TaskThread({ account, hidden, onReady, onSummary, ...props }: ThreadProps & {
   account: string | null; hidden: boolean; onReady: (id: string) => void; onSummary: (id: string, t: TaskSummary | null) => void;
@@ -1368,9 +1369,10 @@ function TaskThread({ account, hidden, onReady, onSummary, ...props }: ThreadPro
   useEffect(() => { if (snap || problem) onReady(id); }, [snap, problem, id, onReady]);
   const t = snap?.task;
   const [status, prompt, created, parent, budget] = [t?.status, t?.prompt, t?.created_at, t?.parent_id ?? null, t?.budget_atomic];
+  const hasPlan = !!snap?.plan?.subtasks.length;
   useEffect(() => {
-    if (status && prompt !== undefined && created) onSummary(id, { id, status, prompt, created_at: created, parent_id: parent, budget_atomic: budget });
-  }, [id, status, prompt, created, parent, budget, onSummary]);
+    if (status && prompt !== undefined && created) onSummary(id, { id, status, prompt, created_at: created, parent_id: parent, budget_atomic: budget, has_plan: hasPlan });
+  }, [id, status, prompt, created, parent, budget, hasPlan, onSummary]);
   useEffect(() => () => onSummary(id, null), [id, onSummary]);
   return hidden ? null : <Thread {...props} loaded={loaded} />;
 }

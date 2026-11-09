@@ -37,15 +37,27 @@ test('a conversation follows its links, not the clock; a task whose parent is no
   assert.deepEqual(conversations([task('orphan', 1, { parent_id: 'gone' })]).map((c) => [c.id, ids(c.tasks)]), [['orphan', ['orphan']]]);
 });
 
-test('the task a message acts on: the newest, or the plan above replies that never got a plan', () => {
-  assert.equal(currentTask([task('a', 1), task('b', 2, { status: 'planned' })]).id, 'b');
+test('the task a message acts on: the newest that got a plan, whatever its status, above replies that never got one', () => {
+  const reply = (id: string, minute: number, parent: string) => task(id, minute, { status: 'failed', has_plan: false, parent_id: parent });
+  assert.equal(currentTask([task('a', 1), task('b', 2, { status: 'planned', has_plan: true })]).id, 'b');
   // "go ahead" under a plan fails as not a task; the plan above it is still what a message changes.
-  const replied = [task('a', 1, { status: 'planned' }), task('b', 2, { status: 'failed', parent_id: 'a' }), task('c', 3, { status: 'failed', parent_id: 'b' })];
+  const replied = [task('a', 1, { status: 'planned', has_plan: true }), reply('b', 2, 'a'), reply('c', 3, 'b')];
   assert.equal(currentTask(replied).id, 'a');
   assert.equal(conversations(replied)[0].current.status, 'planned'); // the sidebar says "Plan ready", not "Failed"
-  // A finished run in between: the newest it is.
-  assert.equal(currentTask([task('a', 1, { status: 'planned' }), task('b', 2, { status: 'closed' }), task('c', 3, { status: 'failed' })]).id, 'c');
-  assert.equal(currentTask([task('a', 1, { status: 'cancelled' }), task('b', 2, { status: 'failed' })]).id, 'b');
+  // Then the plan runs from its button: the run is what the sidebar shows, and nothing is sent until it ends.
+  const running = [task('a', 1, { status: 'running', has_plan: true }), reply('b', 2, 'a')];
+  assert.equal(conversations(running)[0].current.status, 'running');
+  assert.equal(placeholderFor(currentTask(running), '1.00'), 'Wait for this run to finish, or stop it, before sending more.');
+  // Once it closed, a message follows up on it.
+  const closed = [task('a', 1, { status: 'closed', has_plan: true }), reply('b', 2, 'a')];
+  assert.equal(conversations(closed)[0].current.id, 'a');
+  assert.equal(placeholderFor(currentTask(closed), '3.00'), 'Ask a follow-up, like going deeper on one part');
+  // A run that failed or was stopped had a plan: it is the newest, not a reply.
+  assert.equal(currentTask([task('a', 1, { status: 'closed', has_plan: true }), task('b', 2, { status: 'failed', has_plan: true })]).id, 'b');
+  assert.equal(currentTask([task('a', 1, { status: 'planned', has_plan: true }), task('b', 2, { status: 'killed', has_plan: true })]).id, 'b');
+  // Only replies: the newest. Older services send no has_plan, so nothing is skipped.
+  assert.equal(currentTask([reply('a', 1, 'x'), reply('b', 2, 'a')]).id, 'b');
+  assert.equal(currentTask([task('a', 1, { status: 'planned' }), task('b', 2, { status: 'failed' })]).id, 'b');
 });
 
 test('nothing goes while the task it follows is planning or running, in the orchestrator\'s words', () => {
