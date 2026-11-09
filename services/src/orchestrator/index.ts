@@ -159,7 +159,8 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
 
     /**
      * Which market, model and ledger this orchestrator runs with, so a client can label things honestly. No secrets.
-     * `network` is 'sim' unless the ledger is the chain; `simulated`: any part is (show "simulation, no money moves").
+     * `network` is 'sim' unless the ledger is the chain; `simulated`: any part is (with the sim ledger, show "simulation,
+     * no money moves"; with the chain ledger, a test run on `network` where funding still moves tokens).
      */
     'GET /mode': async () => {
       if (chain && !chainCfg) {

@@ -257,8 +257,10 @@ async function create(pos: string[], flags: Record<string, string | true>) {
 }
 
 function printMode(m: any) {
-  if (m.simulated) console.log(yellow(`SIMULATION, no real money moves (market ${m.market}, ledger ${m.ledger}, llm ${m.llm})`));
-  else console.log(`${alert(' LIVE ')} real agents paid in USDC on NEAR ${m.network}, contract ${m.contract_id}`);
+  if (!m.simulated) console.log(`${alert(' LIVE ')} real agents paid in USDC on NEAR ${m.network}, contract ${m.contract_id}`);
+  // The chain ledger moves money even when the market or the LLM is simulated.
+  else if (m.ledger === 'chain') console.log(yellow(`TEST RUN on NEAR ${m.network}: funding moves ${m.network === 'mainnet' ? 'real USDC' : 'testnet tokens'}, contract ${m.contract_id} (market ${m.market}, llm ${m.llm})`));
+  else console.log(yellow(`SIMULATION, no real money moves (market ${m.market}, ledger ${m.ledger}, llm ${m.llm})`));
 }
 
 /** NEAR AI spend of the simulator's agents (process total), or null when no simulator answers. */

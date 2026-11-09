@@ -78,6 +78,21 @@ test('/payment finds the sub-account\'s transfer to payTo once the lagging index
   await assert.rejects(q({ amount: '1.5' }), /amount must be an integer/);
 });
 
+test('/payment with index: a re-hire at the same price gets its own transfer, never an earlier hire\'s', async () => {
+  // Hire B started a minute after hire A's payment, so A's transfer is inside B's `after` window (2 minutes of skew).
+  const q = (index: number, amount = '300000') =>
+    call(`${gw.url}/payment?${new URLSearchParams({ account: SUB, to: PAY_TO, amount, after: new Date(T0 + 60_000).toISOString(), index: String(index) })}`);
+  const funded = ftRow({ involved_account_id: 'rook.test', delta_amount: '600000', transaction_hash: 'Fund', block_timestamp: ns(T0) });
+  const payA = ftRow({ transaction_hash: 'PayA', block_timestamp: ns(T0 + 4000) });
+  indexed = [payA, funded]; // B's transfer is not indexed yet
+  assert.deepEqual(await q(1), { found: false, tries: 3, error: null });
+  indexed = [ftRow({ transaction_hash: 'PayB', block_timestamp: ns(T0 + 70_000) }), payA, funded]; // newest first, as NearBlocks lists them
+  assert.equal((await q(0)).tx_hash, 'PayA'); // A's own lookup never takes the later hire's transfer
+  assert.equal((await q(1)).tx_hash, 'PayB');
+  assert.equal((await q(1, '150000')).found, false); // the next transfer is of another amount: not this hire's
+  await assert.rejects(q(-1), /index must be/);
+});
+
 const header = (maxTimeoutSeconds: number) =>
   Buffer.from(JSON.stringify({ x402Version: 2, accepted: { scheme: 'exact', network: 'near:mainnet', asset: USDC, amount: '1', payTo: PAY_TO, maxTimeoutSeconds }, payload: {} })).toString('base64');
 const send = (handle: string, maxTimeoutSeconds: number) => call(`${mgw.url}/send`, { handle, text: 'Holders\nReport them.', payment: header(maxTimeoutSeconds) });

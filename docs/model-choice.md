@@ -28,7 +28,7 @@ Since 2026-11-09 (`services/src/shared/attest.ts`, `llm.ts`; NEAR docs `cloud/ve
 
 1. **Hashes.** The signed text is `sha256(request):sha256(response)` (`gateway`) or `<model>:sha256(request):sha256(response)` (`provider_tee`), built from the exact bytes Rook sent and received.
 2. **`signer_recovered`.** The 65-byte signature (`r‖s‖v`, `v` 27/28 or 0/1) recovers, under EIP-191 `keccak256("\x19Ethereum Signed Message:\n" + byte length + text)`, to the reported `signing_address`.
-3. **`attested` is not `false`.** The signer matches exactly one verified report of its kind: `gateway` the gateway report (`GET /v1/attestation/report` without `model`), `provider_tee` the model's NEAR reports (`model=<id>&provider=near`). `null` means the evidence could not be fetched (network, HTTP error, NRAS down): the signature still counts and the gap stays visible. `attestation_checked_at` is when the matched evidence was verified.
+3. **`attested` is not `false`.** The signer matches a verified report of its kind (instances of a model share one key, so several reports naming it count as one signer): `gateway` the gateway report (`GET /v1/attestation/report` without `model`), `provider_tee` the model's NEAR reports (`model=<id>&provider=near`). `null` means the evidence could not be fetched (network, HTTP error, NRAS down): the signature still counts and the gap stays visible. `attestation_checked_at` is when the matched evidence was verified.
 
 Each report is fetched with a fresh 32-byte nonce, once per process for the gateway and once per model, and requested before the completion so the evidence predates the response. A signer missing from a report more than a minute old triggers one fresh fetch (keys change when an enclave is redeployed); a failed fetch is retried after a minute. Checks per report:
 
@@ -50,7 +50,7 @@ The first signed call per model in a process adds a report fetch and an NRAS cal
 Not checked yet (`ponytail:` notes in `attest.ts`):
 
 - **DCAP collateral.** Not checked: the platform's TCB status for its FMSPC, Intel advisories, PCK revocation lists and the QE's TCB level, so a known-vulnerable but unrevoked platform passes. Upgrade: `@phala/dcap-qvl` `getCollateralAndVerify(quote)` (NEAR's reference verifier), accepting `UpToDate` only, with Rook's binding checks kept.
-- **Measurement allowlist.** Compose hash, OS image and MRTD are checked for consistency, not against known NEAR releases.
+- **Measurements.** Only MRCONFIGID (against `app_compose`) and RTMR3 (against the imr-3 event log) are checked, for consistency. MRTD, RTMR0-2, `tcb_info.mrtd` and `os_image_hash` are not read, and nothing is pinned to known NEAR releases, so any non-debug TDX VM on genuine Intel hardware (any firmware or kernel, a rented cloud TDX VM included) whose report the endpoint serves would pass.
 - **NRAS token.** The NRAS JWT is trusted over TLS; its ES384 signature against NVIDIA's JWKS and the per-GPU claims are not checked.
 - **TLS binding.** Not checked (`include_tls_fingerprint=true` plus the peer certificate's SPKI hash). Node's `fetch` does not expose the peer certificate.
 - **Shared keys.** Instances of a model share one key, so a match shows the key lives in an attested enclave, not which instance served the call.

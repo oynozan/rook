@@ -32,6 +32,8 @@ export type AuthMeta = { payment_hash: string; amount: string; expires_at_block:
 export type ChainBinding = { contract_task_id: string; nmap: Record<string, number>; accounts: Record<string, string>; auths: Record<string, AuthMeta> };
 type Bound = { cid: string; nmap: Map<number, number>; accounts: Map<number, string>; auths: Map<number, AuthMeta> };
 const toMap = <V>(o: Record<string, V> | undefined) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k), v] as [number, V]));
+/** Balance reads after a landed delegate before its payment is booked unpaid (about a second apart live). */
+const LANDED_READS = 15;
 
 export type ChainLedger = Ledger & {
   bind(task_id: string, contract_task_id: string, nmap: Map<number, number>): void;
@@ -39,8 +41,11 @@ export type ChainLedger = Ledger & {
   binding(task_id: string): ChainBinding | null;
   /** Rebuilds the books from the contract; `saved` is the ledger view stored with the task (to tell landed payments). */
   restore(task_id: string, b: ChainBinding, t: { funder: string; budget: bigint; reserve_share: number; saved: any }): Promise<{ status: string; killed: boolean; notes: string[] }>;
-  /** The hire's settled transfer as an indexer shows it (chain-gateway /payment, retried there); null when not found. */
-  paymentTx(task_id: string, n: number, p: { amount_atomic: string; pay_to: string; after: string }): Promise<{ payment_tx: string; payment_explorer_url: string } | null>;
+  /**
+   * The hire's settled transfer as an indexer shows it (chain-gateway /payment, retried there); null when not found.
+   * `index`: how many of the sub-account's payments to pay_to came before this one.
+   */
+  paymentTx(task_id: string, n: number, p: { amount_atomic: string; pay_to: string; after: string; index?: number }): Promise<{ payment_tx: string; payment_explorer_url: string } | null>;
   ownerKillCommand(task_id: string): string | null;
   recordReceipt(task_id: string, n: number, receipt: Receipt): Promise<ReceiptEvidence & { receipt_explorer_url: string | null }>;
 };
@@ -68,10 +73,18 @@ export function createChainLedger(): ChainLedger {
   }
   const sub = (id: string, n: number) => m.view(id)?.subtasks.find((s) => s.n === n);
   const balanceOf = async (account: string) => BigInt((await retry(() => gateway<{ balance: string }>(`/balance?account=${encodeURIComponent(account)}`))).balance);
-  /** Subtask n's outstanding authorization was paid: its sub-account holds at least that much less than the books say. */
-  const paidOnChain = async (id: string, n: number, account: string) => {
-    const v = sub(id, n)!;
-    return (await balanceOf(account)) <= v.balance_atomic - (v.authorized_atomic ?? 0n);
+  /**
+   * Subtask n's outstanding authorization was paid: its sub-account holds at least that much less than the books say.
+   * `landed`: the signer saw the delegate run (its key's nonce). Its ft_transfer runs on the token's shard a block or
+   * more later, so the balance is read again for a few seconds before the payment is booked unpaid.
+   */
+  const paidOnChain = async (id: string, n: number, account: string, landed = false) => {
+    for (let i = 1; ; i++) {
+      const v = sub(id, n)!;
+      if ((await balanceOf(account)) <= v.balance_atomic - (v.authorized_atomic ?? 0n)) return true;
+      if (!landed || i >= LANDED_READS) return false;
+      await sleep(Math.min(Math.max(config.pollMs, 100), 1000));
+    }
   };
 
   /** Clears the signer's authorization: at once when terminal_unpaid, else once the delegate ran or expired (409 until then). */
@@ -138,8 +151,8 @@ export function createChainLedger(): ChainLedger {
      */
     async settle(task_id, n) {
       const c = at(task_id, n);
-      await clearAuth(c, false);
-      const paid = await paidOnChain(task_id, n, c.account_id);
+      const cleared = await clearAuth(c, false);
+      const paid = await paidOnChain(task_id, n, c.account_id, cleared.landed === true);
       b(task_id).auths.delete(n);
       if (paid) return m.settle(task_id, n);
       m.release(task_id, n);
@@ -151,8 +164,8 @@ export function createChainLedger(): ChainLedger {
       if (how === 'now') { bound.get(task_id)?.auths.delete(n); return m.release(task_id, n); }
       const c = at(task_id, n);
       return (async () => {
-        await clearAuth(c, how === 'terminal');
-        const paid = await paidOnChain(task_id, n, c.account_id);
+        const cleared = await clearAuth(c, how === 'terminal');
+        const paid = await paidOnChain(task_id, n, c.account_id, cleared.landed === true);
         b(task_id).auths.delete(n);
         if (paid) return { amount: m.settle(task_id, n), settled: true as const };
         return m.release(task_id, n);
@@ -217,7 +230,7 @@ export function createChainLedger(): ChainLedger {
 
     async paymentTx(task_id, n, p) {
       const c = at(task_id, n);
-      const q = new URLSearchParams({ account: c.account_id, to: p.pay_to, amount: p.amount_atomic, after: p.after });
+      const q = new URLSearchParams({ account: c.account_id, to: p.pay_to, amount: p.amount_atomic, after: p.after, ...(p.index === undefined ? {} : { index: String(p.index) }) });
       const r = await gateway<{ found: boolean; tx_hash?: string; explorer_url?: string }>(`/payment?${q}`);
       return r.found && r.tx_hash ? { payment_tx: r.tx_hash, payment_explorer_url: r.explorer_url ?? '' } : null;
     },
