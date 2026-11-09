@@ -40,18 +40,24 @@ function useTask(id: string | null): Loaded {
   const [events, setEvents] = useState<RookEvent[]>([]);
   const [problem, setProblem] = useState<Loaded['problem']>(null);
 
-  const refetch = useCallback(() => {
-    if (!id) return;
-    fetch(`/api/tasks/${encodeURIComponent(id)}`, { cache: 'no-store' })
-      .then(async (r) => {
-        if (r.status === 404) return setProblem('missing');
-        if (r.status === 401) return setProblem('signin');
-        if (!r.ok) return setProblem('down');
-        setProblem(null);
-        setSnap(await r.json());
-      })
-      .catch(() => setProblem('down'));
+  /** Loads the task; resolves with it, 'down' when Rook couldn't be reached, or null when it isn't this account's. */
+  const load = useCallback(async (): Promise<TaskSnapshot | 'down' | null> => {
+    if (!id) return null;
+    try {
+      const r = await fetch(`/api/tasks/${encodeURIComponent(id)}`, { cache: 'no-store' });
+      if (r.status === 404) { setProblem('missing'); return null; }
+      if (r.status === 401) { setProblem('signin'); return null; }
+      if (!r.ok) { setProblem('down'); return 'down'; }
+      const s: TaskSnapshot = await r.json();
+      setProblem(null);
+      setSnap(s);
+      return s;
+    } catch {
+      setProblem('down');
+      return 'down';
+    }
   }, [id]);
+  const refetch = useCallback(() => { void load(); }, [load]);
 
   useEffect(() => {
     setSnap(null);
@@ -61,6 +67,7 @@ function useTask(id: string | null): Loaded {
     refetch();
     const seen = new Set<number>();
     let ended = false; // the task reached a terminal status
+    let soon: ReturnType<typeof setTimeout> | undefined;
     const types = ['task_status', 'subtask_status', 'planning', 'plan', 'quote_rejected', 'hire_sent', 'a2a_state', 'evaluation', 'security_alert', 'ledger', 'receipt', 'final', 'error'];
     const onEvent = (m: MessageEvent) => {
       // The browser fires its own 'error' event, with no data, when the connection drops or is refused (signed out,
@@ -70,35 +77,52 @@ function useTask(id: string | null): Loaded {
       try { e = JSON.parse(m.data); } catch { return; }
       if (seen.has(e.seq)) return;
       seen.add(e.seq);
+      fresh++;
       setEvents((all) => [...all, e]);
       if (e.type === 'task_status' && TERMINAL.has(e.data.to)) ended = true;
       if (e.type === 'task_status' || e.type === 'final' || (ended && e.type === 'ledger')) refetch();
+      // During the run a payment, top-up or return changes what each subtask has spent: load the books again, at most
+      // once a second, so the plan's rows keep up with the header.
+      else if (e.type === 'receipt' || e.type === 'ledger') soon ??= setTimeout(() => { soon = undefined; refetch(); }, 1000);
     };
     let source: EventSource | null = null;
     let retry: ReturnType<typeof setTimeout> | undefined;
     let delay = 1000;
     let gone = false; // this page left the task
+    let fresh = 0, openedAt = 0; // events new to this page, and when the current stream opened
+    const again = () => {
+      if (gone) return;
+      retry = setTimeout(open, delay);
+      delay = Math.min(delay * 2, 15_000);
+    };
     const open = () => {
       const es = new EventSource(`/api/tasks/${encodeURIComponent(id)}/events`);
       source = es;
+      fresh = 0;
       types.forEach((t) => es.addEventListener(t, onEvent as EventListener));
-      es.addEventListener('open', () => { delay = 1000; });
+      es.addEventListener('open', () => { delay = 1000; openedAt = Date.now(); });
       es.addEventListener('error', () => {
-        // The stream ends after the terminal status, or in chain mode once a killed or failed task's money is back. Stop
-        // there, or EventSource reconnects forever. (Rook's own 'error' events arrive while the connection is OPEN.)
-        if (ended && es.readyState !== EventSource.OPEN) { es.close(); refetch(); return; }
+        // The stream ends after the terminal status, or once a killed or failed task's money is back. Stop there, or
+        // EventSource reconnects forever. (Rook's own 'error' events arrive while the connection is OPEN.) A drop
+        // before the money is back (a restart, the network) isn't that end: follow on while the books are open. A
+        // stream that brought nothing new and ended at once was Rook saying nothing moves any more.
+        if (ended && es.readyState !== EventSource.OPEN) {
+          es.close();
+          const held = fresh > 0 || Date.now() - openedAt > 2000;
+          void load().then((s) => { if (s === 'down' || (held && s?.ledger?.closed === false)) again(); });
+          return;
+        }
         // Any reply but 200 (the services restarting answer 503) closes an EventSource for good: open a new one, with
         // backoff. It replays from the start, and `seen` drops what this page already has.
         if (es.readyState === EventSource.CLOSED && !gone) {
           refetch();
-          retry = setTimeout(open, delay);
-          delay = Math.min(delay * 2, 15_000);
+          again();
         }
       });
     };
     open();
-    return () => { gone = true; clearTimeout(retry); source?.close(); };
-  }, [id, refetch]);
+    return () => { gone = true; clearTimeout(retry); clearTimeout(soon); source?.close(); };
+  }, [id, refetch, load]);
 
   // Chain mode: the indexer shows a payment's transaction up to a minute after its receipt, often after the stream
   // ended, so a finished task with a paid receipt still missing payment_tx is looked at again a few times.
