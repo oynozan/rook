@@ -346,10 +346,11 @@ type Step2 = (() => Promise<void>) | null;
 /**
  * Restart, chain mode, step 1 (before the API listens): rebuild Rook's books for `t` from the contract. Returns step 2,
  * which finishes it: resume the run, or unwind what a killed or failed task still holds. Null: nothing left to do, the
- * task is another contract's, or its contract task's numbers don't fit Rook's books. A rebuild that fails (the chain gateway or NEAR not answering, a transfer still in
- * flight) is tried again in step 2, once the API listens, waiting longer each time as the unwind does, until it works;
- * only a shutdown stops it, and the next start tries again. Each problem is reported once. Meanwhile the task is
- * `restoring`: a Stop says its money comes back, and its event stream stays open until it has.
+ * task is another contract's, or its contract task's numbers don't fit Rook's books. A rebuild that fails (the chain
+ * gateway or NEAR not answering, a transfer still in flight) is tried again in step 2, once the API listens, waiting
+ * longer each time as the unwind does, until it works; only a shutdown stops it, and the next start tries again. Each
+ * problem is reported once. Meanwhile the task is `restoring`: a Stop says its money comes back, and its event stream
+ * stays open until it has.
  */
 export async function restoreTask(ledger: ChainLedger, t: Task): Promise<Step2> {
   const said = { last: '' };
