@@ -466,6 +466,20 @@ test('a restore that fails at start is tried again once the API listens, until a
   } finally { await orch.close(); failing.clear(); }
 });
 
+test('a task restarted while closing with its report, whose contract task the funder killed meanwhile, finishes the close and ends closed', async () => {
+  process.env.ROOK_DB = join(dir, 'closing-killed.sqlite');
+  storeClosing('t_closing_killed', 'ck');
+  contract.get('ck')!.task.killed = true; // the funder's kill_task while Rook was down
+  const orch = await start(0);
+  try {
+    const s = await until(async () => { const x = await snap(orch, 't_closing_killed'); return x.ledger?.closed ? x : false; });
+    assert.deepEqual([s.task.status, s.final_result.final_markdown, s.ledger.spent_atomic, s.ledger.refunded_atomic], ['closed', 'report', '200000', '800000']);
+    assert.ok(calls.includes(`return ${acct('ck', 1)} 100000`) && calls.includes('close ck'));
+    const evs = await events(orch, 't_closing_killed');
+    assert.ok(!evs.some((e) => (e.type === 'task_status' && e.data.to === 'killed') || (e.type === 'ledger' && e.data.op === 'kill')));
+  } finally { await orch.close(); }
+});
+
 test('a task stopped while its restore is being tried again: once the books are rebuilt, what it holds comes back', async () => {
   process.env.ROOK_DB = join(dir, 'restore-kill.sqlite');
   openContractTask('rk', ['300000']);

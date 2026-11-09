@@ -383,7 +383,9 @@ async function rebuild(ledger: ChainLedger, t: Task, said: { last: string }): Pr
     setStatus(t, 'cancelled');
     return null;
   }
-  if (r.killed) return async () => kill(ledger, t); // the owner killed it on the contract meanwhile
+  // The owner killed it on the contract meanwhile. Once the report is written the work is done and paid for: the run
+  // resumes to finish the close (the contract still takes the returns and close_task), and the task ends closed.
+  if (r.killed && !t.final_result) return async () => kill(ledger, t);
   return () => runTask(ledger, t);
 }
 
