@@ -217,6 +217,24 @@ test('fetches the outcome by hash with the tx method, retrying while the node ha
   await assert.rejects(fetchTxOutcome('http://rpc', 'H', 'ops.near', never, 3), /INVALID_TRANSACTION/);
 });
 
+test('a NEAR RPC that never answers the transaction read is given up on, never waited on forever', async () => {
+  let calls = 0;
+  const signals: unknown[] = [];
+  const hung = (async (_url: string, init: RequestInit) => {
+    signals.push(init.signal);
+    if (++calls === 1) throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+    return new Response(JSON.stringify({ result: { receipts_outcome: [] } }));
+  }) as unknown as typeof fetch;
+  assert.deepEqual(await fetchTxOutcome('http://rpc', 'H', 'ops.near', hung, 2), { receipts_outcome: [] });
+  assert.equal(calls, 2); // the timed-out ask was made again
+  assert.ok(signals.every((s) => s instanceof AbortSignal));
+  const always = (async () => { throw new DOMException('The operation was aborted due to timeout', 'TimeoutError'); }) as unknown as typeof fetch;
+  await assert.rejects(fetchTxOutcome('http://rpc', 'H', 'ops.near', always, 2), /no answer in time/);
+  // Any other failure to reach the node ends the read at once, as before.
+  const down = (async () => { throw new TypeError('fetch failed'); }) as unknown as typeof fetch;
+  await assert.rejects(fetchTxOutcome('http://rpc', 'H', 'ops.near', down, 3), /fetch failed/);
+});
+
 test('confirming retries only while the just-created contract task is not final yet', async () => {
   let n = 0;
   const lagging = async () => (++n < 3 ? { ok: false, message: 'no contract task 1a' } : { ok: true });
@@ -262,6 +280,15 @@ test("reads the wallet's USDC balance and registration from NEAR before the wall
   assert.deepEqual(await readUsdcBalance('http://rpc', F.usdc, 'alice.near', rpc({ ft_balance_of: '5', storage_balance_of: new Error('MethodNotFound') })), { balance: 5n, registered: true });
   // Can't read the balance: the caller lets the transfer go ahead.
   await assert.rejects(readUsdcBalance('http://rpc', F.usdc, 'alice.near', rpc({ ft_balance_of: new Error('UNKNOWN_ACCOUNT'), storage_balance_of: null })), /UNKNOWN_ACCOUNT/);
+  // Every read has a deadline: an RPC that hangs fails the check (so the transfer goes ahead) instead of holding it.
+  const signals: unknown[] = [];
+  const hung = (async (_url: string, init: RequestInit) => {
+    signals.push(init.signal);
+    throw new DOMException('The operation was aborted due to timeout', 'TimeoutError');
+  }) as unknown as typeof fetch;
+  await assert.rejects(readUsdcBalance('http://rpc', F.usdc, 'alice.near', hung), /timeout/);
+  assert.equal(signals.length, 2);
+  assert.ok(signals.every((s) => s instanceof AbortSignal));
 
   // What the page says, before any signature.
   assert.equal(balanceProblem(held, '3000000', 'alice.near'), 'Your wallet holds 2.13 USDC; this plan needs 3.00 USDC. Add USDC or draft it again with a smaller budget.');

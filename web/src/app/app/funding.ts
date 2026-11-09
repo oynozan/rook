@@ -247,24 +247,31 @@ export function readCloseOutcome(outcome: unknown, contractId: string, taskId: s
 
 export type UsdcBalance = { balance: bigint; registered: boolean };
 
+/** How long one NEAR RPC view may take. A read that hangs fails instead, so no step waits on it forever. */
+const VIEW_MS = 5_000;
+
+/** A contract's view method, read from a NEAR RPC at optimistic finality (the wallet's own view). Throws when it can't read. */
+async function viewFunction(rpc: string, contract: string, method_name: string, args: object, fetchImpl: typeof fetch): Promise<unknown> {
+  const r = await fetchImpl(rpc, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 'rook-view', method: 'query', params: {
+      request_type: 'call_function', finality: 'optimistic', account_id: contract, method_name, args_base64: btoa(JSON.stringify(args)),
+    } }),
+    signal: AbortSignal.timeout(VIEW_MS),
+  });
+  const j = await r.json().catch(() => null);
+  const bytes = j?.result?.result;
+  if (!Array.isArray(bytes)) throw new Error(`NEAR RPC could not call ${method_name}: ${j?.error?.cause?.name ?? j?.result?.error ?? `HTTP ${r.status}`}`);
+  return JSON.parse(new TextDecoder().decode(Uint8Array.from(bytes)));
+}
+
 /**
  * What `account` holds of the USDC token (ft_balance_of), and whether the token knows the account at all
  * (storage_balance_of is null for an account never registered), read from a NEAR RPC. Throws when it can't read.
  */
 export async function readUsdcBalance(rpc: string, token: string, account: string, fetchImpl: typeof fetch = fetch): Promise<UsdcBalance> {
-  const view = async (method_name: string): Promise<unknown> => {
-    const r = await fetchImpl(rpc, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 'rook-balance', method: 'query', params: {
-        request_type: 'call_function', finality: 'optimistic', account_id: token, method_name, args_base64: btoa(JSON.stringify({ account_id: account })),
-      } }),
-    });
-    const j = await r.json().catch(() => null);
-    const bytes = j?.result?.result;
-    if (!Array.isArray(bytes)) throw new Error(`NEAR RPC could not call ${method_name}: ${j?.error?.cause?.name ?? j?.result?.error ?? `HTTP ${r.status}`}`);
-    return JSON.parse(new TextDecoder().decode(Uint8Array.from(bytes)));
-  };
+  const view = (method_name: string) => viewFunction(rpc, token, method_name, { account_id: account }, fetchImpl);
   // A token that can't answer storage_balance_of says nothing about registration: only its balance counts then.
   const [balance, storage] = await Promise.all([view('ft_balance_of'), view('storage_balance_of').catch(() => undefined)]);
   if (typeof balance !== 'string' || !/^\d+$/.test(balance)) throw new Error('ft_balance_of returned no amount');
@@ -304,16 +311,30 @@ export function plainReason(reason: string): string {
   return r;
 }
 
-/** The final outcome of a transaction by hash, from a NEAR RPC. Retries while the node hasn't seen it yet. */
+/** How long one ask for a transaction may take: the node itself gives up waiting for execution after about 10 s. */
+const TX_READ_MS = 20_000;
+
+/**
+ * The final outcome of a transaction by hash, from a NEAR RPC. Retries while the node hasn't seen it yet, or doesn't
+ * answer in time.
+ */
 export async function fetchTxOutcome(rpc: string, txHash: string, sender: string, fetchImpl: typeof fetch = fetch, tries = 5): Promise<unknown> {
   let last = 'no answer';
   for (let i = 0; i < tries; i++) {
     if (i) await new Promise((ok) => setTimeout(ok, 2000));
-    const r = await fetchImpl(rpc, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ jsonrpc: '2.0', id: 'rook-funding', method: 'tx', params: { tx_hash: txHash, sender_account_id: sender, wait_until: 'EXECUTED_OPTIMISTIC' } }),
-    });
+    let r: Response;
+    try {
+      r = await fetchImpl(rpc, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 'rook-funding', method: 'tx', params: { tx_hash: txHash, sender_account_id: sender, wait_until: 'EXECUTED_OPTIMISTIC' } }),
+        signal: AbortSignal.timeout(TX_READ_MS),
+      });
+    } catch (e) {
+      if ((e as Error)?.name !== 'TimeoutError') throw e;
+      last = 'no answer in time';
+      continue;
+    }
     const j = await r.json().catch(() => null);
     if (j?.result) return j.result;
     last = j?.error?.cause?.name ?? j?.error?.message ?? `HTTP ${r.status}`;
