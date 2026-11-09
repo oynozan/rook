@@ -20,7 +20,7 @@ import {
 import { explorerTx, NETWORK, rpcFor, type Network } from './network';
 import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary } from './orchestrator';
 import { useMode } from './mode';
-import { allSelfDoWhy, plannerReason, selfDoWhy } from './planner';
+import { allSelfDoWhy, budgetToHire, plannerReason, selfDoWhy } from './planner';
 import { FUNDING_NOT_READY } from './refusals';
 import { useEase } from './useEase';
 import { useWallet, WalletAccountMismatch } from './wallet';
@@ -221,17 +221,18 @@ function Reveal({ open, children }: { open: boolean; children: ReactNode }) {
  * What a subtask can cost: Rook's own work, or a cap in USDC (the planner drops 0 USDC quotes, so a hired subtask's cap
  * is never 0). During a run, what it has spent of its cap.
  */
-function CapLabel({ subtask: s, usage }: { subtask: PlanView['subtasks'][number]; usage?: LedgerSub }) {
+function CapLabel({ subtask: s, usage, why }: { subtask: PlanView['subtasks'][number]; usage?: LedgerSub; why: string }) {
   const topped = usage ? BigInt(usage.topped_up_atomic) : 0n;
   return (
-    <span title={s.self_do ? selfDoWhy(s.self_do_reason) : usage ? 'Spent of this subtask\'s cap, plus any top-up from the reserve' : undefined}
+    <span title={s.self_do ? why : usage ? 'Spent of this subtask\'s cap, plus any top-up from the reserve' : undefined}
       className={`shrink-0 pl-3 text-sm text-ink/65 sm:pl-0 ${s.self_do ? '' : 'font-mono tabular-nums'}`}>
       {s.self_do ? 'Rook does this' : usage ? `${usdc(usage.spent_atomic)} of ${usdc(usage.cap_atomic)}${topped > 0n ? ` +${usdc(topped)} reserve` : ''}` : `Cap ${usdc(s.cap_atomic)}`}
     </span>
   );
 }
 
-function PlanRow({ subtask: s, usage }: { subtask: PlanView['subtasks'][number]; usage?: LedgerSub }) {
+/** `why`: why Rook does a self_do part itself (selfDoWhy). */
+function PlanRow({ subtask: s, usage, why }: { subtask: PlanView['subtasks'][number]; usage?: LedgerSub; why: string }) {
   const [open, setOpen] = useState(false);
   return (
     <>
@@ -245,12 +246,12 @@ function PlanRow({ subtask: s, usage }: { subtask: PlanView['subtasks'][number];
           <span className={`text-ink/55 transition-transform duration-200 motion-reduce:transition-none ${open ? 'rotate-90' : ''}`} aria-hidden="true">›</span>
           <span className="font-medium">{s.title}</span>
         </span>
-        <CapLabel subtask={s} usage={usage} />
+        <CapLabel subtask={s} usage={usage} why={why} />
       </button>
       <Reveal open={open}>
         <div className="px-4 pt-1 pb-4 pl-8 text-ink/80">
           {/* The label's tooltip says the same, but a phone shows no tooltips. */}
-          {s.self_do && <p className="mb-3 text-sm text-ink/65">{selfDoWhy(s.self_do_reason)}</p>}
+          {s.self_do && <p className="mb-3 text-sm text-ink/65">{why}</p>}
           {s.brief && (
             // The planner's own words for the agent; plain text, never markup.
             <details className="mb-3">
@@ -306,7 +307,8 @@ function PlanCard({ plan, usage }: { plan: PlanView; usage?: Map<string, LedgerS
     <ol className="mt-3 rounded-2xl border border-ink/15">
       {plan.subtasks.map((s, i) => (
         <li key={s.id} className="rook-in border-b border-ink/10 last:border-b-0" style={{ animationDelay: `${150 + i * 90}ms` }}>
-          <PlanRow subtask={s} usage={usage?.get(s.id)} />
+          <PlanRow subtask={s} usage={usage?.get(s.id)}
+            why={s.self_do ? selfDoWhy(s, budgetToHire(plan, s.id), plan.subtasks.slice(0, i).some((x) => !x.self_do)) : ''} />
         </li>
       ))}
     </ol>
@@ -1241,7 +1243,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
         <RookMessage>
           {free ? (
             <p>
-              Here&apos;s the plan. {allSelfDoWhy(plan.subtasks.map((s) => s.self_do_reason))}{' '}
+              Here&apos;s the plan. {allSelfDoWhy(plan.subtasks.map((s) => s.self_do_reason), budgetToHire(plan))}{' '}
               Nothing is hired, so nothing is paid and nothing leaves your wallet.{task.status === 'cancelled' && ' You cancelled it.'}
             </p>
           ) : (

@@ -40,6 +40,8 @@ export type PlanView = {
     id: string; title: string; brief?: string; cap_atomic: string; deadline_s?: number; self_do: boolean;
     /** Why a self_do subtask is Rook's own: no agent fits it, or the ones found cost more than the budget allows. Older plans leave it out. */
     self_do_reason?: 'no_agent' | 'over_budget';
+    /** over_budget: the cheapest quote found (atomic USDC), what one hire would have cost. Older plans leave it out. */
+    self_do_need_atomic?: string;
     criteria: { id: string; description: string }[];
     candidates: Candidate[];
   }[];

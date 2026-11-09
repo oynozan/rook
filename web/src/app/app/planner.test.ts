@@ -1,7 +1,8 @@
 // The planner's reports in plain words. Run: npx tsx --test src/app/app/*.test.ts
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { allSelfDoWhy, plannerReason, selfDoWhy } from './planner';
+import type { PlanView } from './orchestrator';
+import { allSelfDoWhy, budgetToHire, plannerReason, selfDoWhy } from './planner';
 
 test("a planner failure reads in plain words, never the services' raw text", () => {
   // The strings the orchestrator stores (services/src/orchestrator/index.ts: "planner: " + the planner's error).
@@ -44,10 +45,44 @@ test("a planner failure reads in plain words, never the services' raw text", () 
 });
 
 test('a part Rook does itself says the true reason: no fitting agent, or a budget too small for the agents found', () => {
-  assert.match(selfDoWhy('no_agent'), /^No agent on the market fits this part/);
-  assert.match(selfDoWhy('over_budget'), /cost more than this budget allows.*A larger budget would hire one\.$/);
+  assert.match(selfDoWhy({ self_do_reason: 'no_agent' }), /^No agent on the market fits this part/);
+  // Not "more than this budget allows" next to a reserve: what is left for the part is what didn't fit.
+  assert.equal(selfDoWhy({ self_do_reason: 'over_budget' }),
+    'The agents found for this part cost more than this budget has left for it after the reserve and the parts before it, so Rook does it with its own model. A larger budget would hire one.');
+  // Newer services say what the cheapest agent asks: the page names it, and the budget that would hire it.
+  assert.equal(selfDoWhy({ self_do_reason: 'over_budget', self_do_need_atomic: '850000' }, 1_070_000n, false),
+    'The cheapest agent found for this part asks 0.85 USDC, more than this budget has left for it after the reserve, so Rook does it with its own model. A budget of about 1.07 USDC would hire one.');
+  assert.match(selfDoWhy({ self_do_reason: 'over_budget', self_do_need_atomic: '300000' }, 1_130_000n, true), /more than this budget has left for it after the reserve and the parts before it, so/);
+  assert.match(selfDoWhy({ self_do_reason: 'over_budget', self_do_need_atomic: '850000' }, null), /asks 0\.85 USDC.*A larger budget would hire one\.$/);
   // Older plans don't say: no reason is claimed.
-  assert.equal(selfDoWhy(undefined), 'No agent is hired: Rook does this part with its own model.');
+  assert.equal(selfDoWhy({}), 'No agent is hired: Rook does this part with its own model.');
+});
+
+test('the budget that would hire the over-budget parts: what is left after the 20% reserve covers the caps and their cheapest quotes', () => {
+  const sub = (id: string, extra: Partial<PlanView['subtasks'][number]>) => ({ id, title: id, cap_atomic: '0', self_do: true, criteria: [], candidates: [], ...extra });
+  const hired = (id: string, cap: string) => sub(id, { cap_atomic: cap, self_do: false });
+  const over = (id: string, need?: string) => sub(id, { self_do_reason: 'over_budget', ...(need ? { self_do_need_atomic: need } : {}) });
+  const plan = (subtasks: PlanView['subtasks'], allocated: string) => ({ subtasks, budget: { reserve_atomic: '0', allocated_atomic: allocated } });
+
+  // One part, nothing hired: 0.85 needs a budget whose 80% is at least 0.85, so 1.0625, rounded up to the cent.
+  assert.equal(budgetToHire(plan([over('s1', '850000')], '0')), 1_070_000n);
+  assert.equal(budgetToHire(plan([over('s1', '850000')], '0'), 's1'), 1_070_000n);
+  // Budget 1.00, two parts hired at 0.30 and a third whose cheapest agent asks 0.30: 0.90 must be left, so 1.13
+  // (1.125 rounded up; 1.13 leaves 0.904).
+  const three = plan([hired('s1', '300000'), hired('s2', '300000'), over('s3', '300000')], '600000');
+  assert.equal(budgetToHire(three, 's3'), 1_130_000n);
+  // In plan order: a part counts the over-budget parts before it, the plan counts them all.
+  const two = plan([over('s1', '400000'), hired('s2', '200000'), over('s3', '400000')], '200000');
+  assert.equal(budgetToHire(two, 's1'), 750_000n); // 0.20 + 0.40 = 0.60 left: 0.75
+  assert.equal(budgetToHire(two, 's3'), 1_250_000n); // 0.20 + 0.40 + 0.40 = 1.00 left: 1.25
+  assert.equal(budgetToHire(two), 1_250_000n);
+  // Exact cents stay as they are: 0.80 left is 1.00.
+  assert.equal(budgetToHire(plan([over('s1', '800000')], '0')), 1_000_000n);
+  // Nothing to name: no over-budget part, a part that isn't one, or a quote an older service didn't send.
+  assert.equal(budgetToHire(plan([hired('s1', '300000'), sub('s2', { self_do_reason: 'no_agent' })], '300000')), null);
+  assert.equal(budgetToHire(three, 's1'), null);
+  assert.equal(budgetToHire(plan([over('s1'), over('s2', '100000')], '0')), null);
+  assert.equal(budgetToHire(plan([over('s1'), over('s2', '100000')], '0'), 's2'), null);
 });
 
 test('a plan Rook does all by itself blames the market or the budget only when that is the reason', () => {
@@ -56,6 +91,9 @@ test('a plan Rook does all by itself blames the market or the budget only when t
   assert.match(over, /cost more than this budget allows/);
   assert.match(over, /larger budget/);
   assert.doesNotMatch(over, /No agent on the market fits/);
+  // With what the agents ask, the budget that would hire them is named.
+  assert.match(allSelfDoWhy(['over_budget'], 1_070_000n), /Draft it again with a budget of about 1\.07 USDC to hire them\.$/);
+  assert.match(allSelfDoWhy(['no_agent', 'over_budget'], 2_500_000n), /Draft it again with a budget of about 2\.50 USDC to hire agents for those\.$/);
   // Mixed: both, briefly.
   const mixed = allSelfDoWhy(['no_agent', 'over_budget']);
   assert.match(mixed, /fits some of these parts/);
