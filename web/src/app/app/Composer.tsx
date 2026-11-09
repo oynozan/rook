@@ -1,6 +1,7 @@
 'use client';
 
-import { useRef, useState } from 'react';
+import { usePathname } from 'next/navigation';
+import { useEffect, useRef, useState } from 'react';
 import { checkDraft, parseBudget } from './draft';
 import { useMode } from './mode';
 import { useWallet } from './wallet';
@@ -25,8 +26,11 @@ export function Composer({ onSend, errors, sending, compact }: {
   const wallet = useWallet();
   const { mode } = useMode();
   const locked = !wallet.account;
-  // Problems found here, before anything is sent. They show instead of the last send's errors, until the next send.
+  // Problems found here, before anything is sent. They show instead of the last send's errors, until the next send, a
+  // sign-in or another page.
   const [found, setFound] = useState<ComposerErrors | null>(null);
+  const pathname = usePathname();
+  useEffect(() => { setFound(null); }, [locked, pathname]);
   const shown = found ?? errors;
   const invalid = !!(shown?.prompt || shown?.budget);
   const form = useRef<HTMLFormElement>(null);
@@ -35,7 +39,8 @@ export function Composer({ onSend, errors, sending, compact }: {
   const folded = !focused && !prompt && !shown?.budget;
 
   async function submit() {
-    if (locked || sending) return;
+    if (sending) return;
+    if (locked) return setFound({ message: 'Connect your NEAR wallet to send this task.' }); // the text stays
     // Checked here first, so a task that can't be sent never shows in the thread. The action checks again.
     const check = checkDraft({ prompt, budget }, mode);
     if (!check.ok) return setFound({ prompt: check.prompt, budget: check.budget });
@@ -98,14 +103,15 @@ export function Composer({ onSend, errors, sending, compact }: {
         <button
             type="submit"
             aria-label="Send task"
-            disabled={sending || locked}
+            disabled={sending}
+            aria-disabled={locked || undefined} // still pressable: it says to connect first (a tooltip never shows on a phone)
             title={locked ? 'Connect your wallet first' : undefined}
             className={`group absolute right-2 bottom-2 grid size-11 place-items-center rounded-full sm:right-3 sm:bottom-3 transition-colors duration-200 motion-reduce:transition-none ${locked ? 'cursor-not-allowed bg-ink/10 text-ink/55'
                 : sending ? 'cursor-wait bg-accent-hover text-on-accent'
                   : 'cursor-pointer bg-accent text-on-accent hover:bg-accent-hover focus-visible:bg-accent-hover active:translate-y-px'
               }`}
           >
-            <svg className="size-5 shrink-0 transition-transform duration-250 group-enabled:group-hover:translate-x-0.75 group-focus-visible:translate-x-0.75 motion-reduce:translate-x-0! motion-reduce:transition-none" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true">
+            <svg className="size-5 shrink-0 transition-transform duration-250 group-enabled:group-hover:translate-x-0.75 group-focus-visible:translate-x-0.75 group-aria-disabled:translate-x-0! motion-reduce:translate-x-0! motion-reduce:transition-none" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.75" aria-hidden="true">
                 <path d="M2 8h11M9 3.5 13.5 8 9 12.5" />
             </svg>
         </button>

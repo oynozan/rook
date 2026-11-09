@@ -1175,6 +1175,7 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
   useEffect(() => {
     if (sending?.id && sending.id === id && (loaded.snap?.task.id === id || loaded.problem)) setSending(null);
   }, [sending, id, loaded.snap, loaded.problem]);
+  useEffect(() => { setErrors(null); }, [id]); // a failed send's errors are about that send, not the next page
 
   // Follow the conversation as it grows, until the reader scrolls up. Only their input can stop it: a smooth scroll on
   // its way down is also far from the bottom for a moment, and must not count. Moving down to the bottom resumes following;
