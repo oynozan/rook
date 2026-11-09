@@ -82,6 +82,28 @@ test('a sim-ledger task that was mid-run when the services stopped is marked fai
   assert.deepEqual(doc.events.at(-1)?.data, { from: 'running', to: 'failed' });
 });
 
+test('a planned task stored with an empty plan ends failed on load, with the reason in plain words', async () => {
+  // Stored before an empty plan ended its task: it kept "Plan ready" and the active dot, with no buttons, for good.
+  const path = freshDb();
+  const ts = new Date().toISOString();
+  const store = openStore(path);
+  store.save({
+    id: 't_empty', prompt: 'p', budget_atomic: '1000000', reserve_share: 0.2, funder: null, owner: null, status: 'planned', error: null,
+    created_at: ts, updated_at: ts, subtasks: [], receipts: [], final_result: null, llm_calls: [],
+    plan: { subtasks: [], dropped: [{ title: 'Holders', reason: 'over budget' }], notes: [], llm_calls: [], budget: plan.budget },
+    events: [{ seq: 1, ts, task_id: 't_empty', type: 'task_status', data: { from: null, to: 'draft' } }],
+  });
+  store.close();
+
+  const orch = await start(0);
+  const s = await call(`${orch.url}/tasks/t_empty`);
+  assert.deepEqual([s.task.status, s.task.error], ['failed', 'Every part costs more than this budget allows; try a larger budget.']);
+  assert.deepEqual(s.plan.dropped, [{ title: 'Holders', reason: 'over budget' }]); // the plan is kept for its drop list
+  const evs = (await fetch(`${orch.url}/tasks/t_empty/events`).then((r) => r.text())).split('\n').filter((l) => l.startsWith('data: ')).map((l) => JSON.parse(l.slice(6)));
+  assert.deepEqual(evs.slice(1).map((e) => [e.type, e.data.kind ?? e.data.to]), [['error', 'no_plan'], ['task_status', 'failed']]);
+  await orch.close();
+});
+
 test('a finished task keeps what it spent and refunded, though the in-memory ledger forgot it', async () => {
   const path = freshDb();
   const ts = new Date().toISOString();

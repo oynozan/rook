@@ -103,6 +103,13 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     });
     const resume: (() => Promise<void>)[] = [];
     for (const t of tasks.values()) {
+      if (t.status === 'planned' && !t.subtasks.length) {
+        // Stored before an empty plan ended its task: nothing can be approved, so it ends as a new one would.
+        t.error = emptyPlanReason(t.plan?.dropped ?? []);
+        emit(t, 'error', { kind: 'no_plan', message: t.error });
+        setStatus(t, 'failed');
+        continue;
+      }
       const waiting = t.status === 'planned' || (chain !== null && t.status === 'approved' && !t.chain && !isFree(t));
       if (waiting || t.status === 'closed' || t.status === 'cancelled') continue;
       if (chain && t.chain && !(t.ledger_saved as { closed?: boolean } | undefined)?.closed) {
