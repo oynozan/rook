@@ -207,7 +207,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       }
       if (chain) {
         // Rook never creates the task on chain: the human funds it with the caps they approve, then calls /funded.
-        const funding = await fundingInstructions(t, await contractCfg());
+        const funding = await fundingInstructions(t, await contractCfg(), !!reprint);
         setStatus(t, 'approved');
         return { ...taskView(t), funding };
       }
@@ -310,8 +310,10 @@ type ChainCfg = { contract_id: string | null; usdc: string | null; owner: string
 /**
  * What the funder sends: USDC ft_transfer_call to the contract with the plan's caps in msg. Any account funds its own
  * task; `funder` is the signed-in owner who must send it (null for a CLI task: whoever sends it becomes the funder).
+ * `reprint`: the task was approved before, so the funder's transfer may already have been sent and count toward the
+ * open-task limit; the instructions must still come back (the web app asks again after a reload).
  */
-async function fundingInstructions(t: Task, c: ChainCfg | null) {
+async function fundingInstructions(t: Task, c: ChainCfg | null, reprint = false) {
   const want = expected(t);
   if (!want.caps.length) throw new HttpError(409, 'every subtask is self_do: nothing to fund on chain');
   if (want.reserve !== t.plan?.budget.reserve_atomic) {
@@ -321,7 +323,7 @@ async function fundingInstructions(t: Task, c: ChainCfg | null) {
     throw new HttpError(409, `budget ${formatUsdc(BigInt(t.budget_atomic))} USDC is below the contract's minimum of ${formatUsdc(c.min_budget)} USDC`);
   }
   const cfg = await call(`${config.urls.chainGateway}/config`);
-  if (t.owner && c?.max_open_tasks) {
+  if (t.owner && c?.max_open_tasks && !reprint) {
     // The contract refunds a transfer over the limit: say so before the wallet opens.
     const open = await call<{ open: number }>(`${config.urls.chainGateway}/open-tasks?account=${encodeURIComponent(t.owner)}`).then((r) => r.open, () => 0);
     if (open >= c.max_open_tasks) throw new HttpError(409, `${t.owner} already has ${open} open tasks on the contract (the limit is ${c.max_open_tasks}); wait for one to close`);

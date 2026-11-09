@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
+  closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
   readCloseOutcome, readFundingOutcome, termsOf, txHashOf, untilFinal, type Funding,
 } from './funding';
 
@@ -33,6 +33,12 @@ test('terms: caps and the reserve the contract will compute', () => {
   assert.equal(fundingTerms({ ...F, msg: '{"return":{}}' }), null);
   assert.equal(fundingTerms({ ...F, msg: 'nope' }), null);
   assert.equal(fundingTerms({ ...F, msg: JSON.stringify({ create_task: { reserve_bps: 2000, caps: [1000000] } }) }), null);
+});
+
+test('from: open funding names the signed-in funder; older orchestrators only sent the contract owner', () => {
+  assert.equal(fundingFrom({ ...F, owner: undefined, funder: 'alice.near', contract_owner: 'ops.near' }), 'alice.near');
+  assert.equal(fundingFrom(F), 'ops.near');
+  assert.equal(fundingFrom({ ...F, owner: undefined, funder: null }), null); // a CLI task: whoever sends it funds it
 });
 
 test('close_task from the funder refunds a task Rook never ran: no deposit, 50 Tgas', () => {

@@ -12,7 +12,7 @@ import {
   TERMINAL, type A2AState, type A2ATask, type AcceptsRow, type AggregateResult, type Candidate, type Evaluation,
   type GatewayResult, type LlmCall, type Part, type TaskStatus, type X402Config,
 } from '../shared/types.ts';
-import type { ChainLedger } from './chain-ledger.ts';
+import { OtherContract, type ChainLedger } from './chain-ledger.ts';
 import { LedgerError, type Ledger, type Recipient } from './ledger.ts';
 import { emit, isTerminal, now, saveTask, setStatus, setSub, type Hire, type ReceiptView, type Sub, type Task } from './store.ts';
 
@@ -187,7 +187,9 @@ async function unpaidHow(hire: Hire | null): Promise<'terminal' | 'wait'> {
  * Returns what a stopped task (killed, failed, or found stopped after a restart) still holds: clears each outstanding
  * authorization (at once when the agent's task ended unpaid, else once it landed or expired; a payment that landed
  * gets booked with a receipt), returns every funded sub-account (/return, or mark_empty at 0), then closes the task so
- * the contract refunds the funder. Its events record after the terminal status. `afterRun`: wait for the run's loops.
+ * the contract refunds the funder. Each sub-account clears and returns on its own, so one authorization that runs for
+ * hours holds back only its own money; the close waits for all. Its events record after the terminal status.
+ * `afterRun`: wait for the run's loops.
  */
 export async function unwind(ledger: Ledger, t: Task, why: string, afterRun = false): Promise<void> {
   if (t.unwinding) return t.unwinding;
@@ -205,21 +207,20 @@ export async function unwind(ledger: Ledger, t: Task, why: string, afterRun = fa
     for (const f of t.inflight.values()) { f.hire.state = t.status === 'killed' ? 'KILLED' : 'CANCELED'; f.hire.ended_at ??= now(); }
     t.inflight.clear();
     await Promise.all(t.subtasks.map(async (s) => {
-      if (!authorizedNow(ledger, t, s)) return;
-      const hire = authHire(ledger, t, s); // never an older hire: its A2A state says nothing about this authorization
-      if (!chain && hire?.a2a_task_id) cancelBestEffort(hire.agent_handle, hire.a2a_task_id);
-      const how = chain ? await unpaidHow(hire) : 'now';
-      if (chain) emit(t, 'ledger', { op: 'clearing', n: s.n, how, agent_handle: hire?.agent_handle ?? null, expires_at: hire?.expires_at ?? null }, s.id);
-      const r = await step('release', s, () => ledger.release(t.id, s.n, how));
-      if (r && typeof r === 'object' && 'settled' in r && hire) { // it landed anyway: paid, so it gets a receipt
-        hire.paid = true; hire.state = 'OUTCOME_UNKNOWN'; hire.ended_at ??= now();
-        if (!t.receipts.some((x) => x.hire_id === hire.id)) await writeReceipt(ledger, t, s, hire, null);
+      if (authorizedNow(ledger, t, s)) {
+        const hire = authHire(ledger, t, s); // never an older hire: its A2A state says nothing about this authorization
+        if (!chain && hire?.a2a_task_id) cancelBestEffort(hire.agent_handle, hire.a2a_task_id);
+        const how = chain ? await unpaidHow(hire) : 'now';
+        if (chain) emit(t, 'ledger', { op: 'clearing', n: s.n, how, agent_handle: hire?.agent_handle ?? null, expires_at: hire?.expires_at ?? null }, s.id);
+        const r = await step('release', s, () => ledger.release(t.id, s.n, how));
+        if (r && typeof r === 'object' && 'settled' in r && hire) { // it landed anyway: paid, so it gets a receipt
+          hire.paid = true; hire.state = 'OUTCOME_UNKNOWN'; hire.ended_at ??= now();
+          if (!t.receipts.some((x) => x.hire_id === hire.id)) await writeReceipt(ledger, t, s, hire, null);
+        }
       }
-    }));
-    for (const s of t.subtasks) {
-      if (s.self_do || ledger.view(t.id)!.subtasks.find((x) => x.n === s.n)?.returned_atomic !== null) continue;
+      if (s.self_do || ledger.view(t.id)!.subtasks.find((x) => x.n === s.n)?.returned_atomic !== null) return;
       if ((await step('returnLeftover', s, () => ledger.returnLeftover(t.id, s.n))) !== null) setSub(t, s, 'returned');
-    }
+    }));
     if (!ledger.view(t.id)!.closed) await step('closeTask', null, () => ledger.closeTask(t.id));
   })();
   t.unwinding = p;
@@ -265,14 +266,23 @@ export async function restoreTask(ledger: ChainLedger, t: Task): Promise<(() => 
   try {
     r = await ledger.restore(t.id, t.chain!, { funder: t.funder ?? '', budget: BigInt(t.budget_atomic), reserve_share: t.reserve_share, saved: t.ledger_saved });
   } catch (e) {
-    emit(t, 'error', { message: `after a restart Rook could not rebuild contract task ${cid}: ${msg(e)}. Nothing was changed; start the services again once the chain gateway answers.` }, undefined, true);
+    const next = e instanceof OtherContract
+      ? 'It is left as it is, for a Rook that runs that contract.'
+      : 'Nothing was changed; start the services again once the chain gateway answers.';
+    emit(t, 'error', { message: `after a restart Rook could not rebuild contract task ${cid}: ${msg(e)}. ${next}` }, undefined, true);
     return null;
   }
   for (const note of r.notes) emit(t, 'error', { message: `restore: ${note}` }, undefined, true);
-  // Closed on chain with Rook's books still open: the owner closed a killed task while sub-accounts were still Funded.
-  // Returns still reach a Closed task and a second close_task refunds them, so it is unwound like any other.
+  // Closed on chain with Rook's books still open: the funder or the owner closed a killed task while sub-accounts
+  // were still Funded. Returns still reach a Closed task and Rook's close_task refunds them, so it is unwound like any other.
   if (isTerminal(t.status)) return r.status === 'Closed' && ledger.view(t.id)?.closed ? null : () => unwind(ledger, t, 'after restart');
   emit(t, 'ledger', { op: 'restored', contract_task_id: cid, contract_status: r.status });
+  if (r.deleted) {
+    // The funder took the whole budget back before Rook funded any subtask: there is nothing to run or to return.
+    emit(t, 'ledger', { op: 'refunded_before_run', contract_task_id: cid, note: `contract task ${cid} was refunded to its funder and deleted before Rook funded any subtask, so the run does not start` });
+    setStatus(t, 'cancelled');
+    return null;
+  }
   if (r.killed) return async () => kill(ledger, t); // the owner killed it on the contract meanwhile
   return () => runTask(ledger, t);
 }

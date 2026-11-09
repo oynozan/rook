@@ -14,8 +14,10 @@ if (process.env.ROOK_DEV_CHILD === '1') {
 }
 // Fail fast on a configuration this service must not run with (live profile, canned LLM outside full simulation).
 // Tests call start() directly and skip this.
-const { checkProfile } = await import('../src/shared/config.ts');
+const { checkProfile, foreignKeys } = await import('../src/shared/config.ts');
 try { checkProfile(name); } catch (e: any) { console.error(e.message); process.exit(1); }
+// Started on its own, config read the whole real-mode env file: keep only this service's role key, never the admin key.
+for (const k of foreignKeys(name)) delete process.env[k];
 // The real orchestrator keeps tasks across restarts; tests call start() directly and stay in memory.
 if (name === 'orchestrator') process.env.ROOK_DB ??= fileURLToPath(new URL('../data/rook.sqlite', import.meta.url)); // .pathname gives /C:/... on Windows
 const { start } = await import(`../src/${name}/index.ts`);

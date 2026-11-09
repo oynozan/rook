@@ -2,6 +2,7 @@
 // No I/O and no LLM here: index.ts gathers search results, selections and quotes, then calls buildPlan.
 import { Ajv } from 'ajv';
 import { z } from 'zod';
+import { config } from '../shared/config.ts';
 import { AcceptsRow, Criterion, type AgentHistory, type AgentSummary, type Candidate, type Plan, type PlanSubtask, type X402Config } from '../shared/types.ts';
 import { formatUsdc, share } from '../shared/money.ts';
 
@@ -156,6 +157,12 @@ function quotedCandidates(agents: AgentSummary[], quotes: Record<string, QuoteRe
     const r = row.success ? row.data : undefined;
     if (!r || r.scheme !== 'exact' || !recipients.some((x) => x.network === r.network && x.asset === r.asset && x.payTo === r.payTo)) {
       notes.push(`"${title}": quote from ${a.handle} dropped: row does not match the /x402 recipients`);
+      continue;
+    }
+    // The orchestrator and the signer refuse a longer payment window at hire time, so the plan never lists such an agent.
+    const max = config.maxPaymentTimeoutS;
+    if (!Number.isInteger(r.maxTimeoutSeconds) || r.maxTimeoutSeconds < 1 || r.maxTimeoutSeconds > max) {
+      notes.push(`"${title}": quote from ${a.handle} dropped: payment window ${r.maxTimeoutSeconds} s is not from 1 to ${max} s (ROOK_MAX_PAYMENT_TIMEOUT_S)`);
       continue;
     }
     out.push({

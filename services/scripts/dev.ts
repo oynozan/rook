@@ -5,7 +5,7 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { checkProfile, config } from '../src/shared/config.ts';
+import { checkProfile, config, foreignKeys } from '../src/shared/config.ts';
 
 if (process.argv.includes('--live')) process.env.ROOK_PROFILE = 'live';
 try { checkProfile(); } catch (e: any) { console.error(e.message); process.exit(1); }
@@ -86,12 +86,13 @@ process.on('SIGINT', () => stopAll(0));
 process.on('SIGTERM', () => stopAll(0));
 process.on('exit', () => { for (const c of children) if (c.exitCode === null) c.kill(); });
 
-/** Each role's NEAR key goes only to the service that uses it (design A key split, x402-payments-plan.md 4.6). */
+/**
+ * Each role's NEAR key goes only to the service that uses it (design A key split, x402-payments-plan.md 4.6), and the
+ * admin key (set in this shell for scripts/deploy.ts, say) to none.
+ */
 function childEnv(name: string) {
   const env: NodeJS.ProcessEnv = { ...process.env, ROOK_DEV_CHILD: '1' };
-  for (const k of Object.keys(env)) {
-    if ((k.startsWith('ROOK_SIGNER_') && name !== 'signer') || (k.startsWith('ROOK_ORCHESTRATOR_') && name !== 'chain-gateway')) delete env[k];
-  }
+  for (const k of foreignKeys(name, env)) delete env[k];
   return env;
 }
 

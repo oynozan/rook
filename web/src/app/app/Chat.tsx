@@ -11,7 +11,7 @@ import { approve, cancel, confirmFunding, draftTask, forgetTransfer, fundingRefu
 import { go } from './AppShell';
 import { Composer, type ComposerErrors } from './Composer';
 import {
-  closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
+  closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
   readCloseOutcome, readFundingOutcome, termsOf, txHashOf, type CloseResult, type Funding, type FundingResult, type Terms,
 } from './funding';
 import { explorerTx, NETWORK, rpcFor, type Network } from './network';
@@ -263,27 +263,6 @@ function PlanCard({ plan, usage }: { plan: PlanView; usage?: Map<string, LedgerS
   );
 }
 
-/** Says plainly whether money moves, on every screen of the app. */
-function ModeBanner() {
-  const { mode, simulated, noMoney, network } = useMode();
-  if (!mode) return null;
-  const money = network === 'mainnet' ? 'real USDC' : 'testnet tokens';
-  const parts = [
-    mode.market === 'sim' ? 'simulated agents' : 'live market agents and prices',
-    mode.llm === 'canned' && 'scripted planner and checks',
-    mode.ledger === 'sim' && 'in-memory budget',
-  ].filter(Boolean).join(', ');
-  const [title, detail] = !simulated ? [`Live on NEAR ${network}`, `funding a plan moves ${money}`]
-    : noMoney ? ['Simulation: no real money moves', parts]
-    : [`Test run on NEAR ${network}`, `${parts}; funding moves ${money}`];
-  return (
-    <p className="mx-auto mt-2 flex w-fit max-w-[calc(100%-2rem)] shrink-0 items-baseline gap-2 rounded-full border border-ink/15 px-3 py-1 text-sm">
-      <span aria-hidden="true" className={`size-2 shrink-0 self-center rounded-full ${noMoney ? 'bg-accent' : 'bg-alert'}`} />
-      <span><span className="font-medium">{title}</span><span className="text-ink/65">: {detail}</span></span>
-    </p>
-  );
-}
-
 const short = (s: string) => (s.length > 14 ? `${s.slice(0, 6)}…${s.slice(-4)}` : s);
 const LINK = 'underline decoration-ink/30 underline-offset-2 hover:decoration-ink';
 
@@ -462,7 +441,8 @@ function FundingStep({ id, plan, budget, funding, sent, contractId, onConfirmed,
   const autoFired = useRef(false);
   useEffect(() => {
     if (!autoStart || autoFired.current || !funding || done || pendingTx || phase !== 'idle') return;
-    if (!fundingTerms(funding) || funding.network !== NETWORK || !wallet.account || (funding.funder && wallet.account !== funding.funder)) return;
+    const from = fundingFrom(funding);
+    if (!fundingTerms(funding) || funding.network !== NETWORK || !wallet.account || (from && wallet.account !== from)) return;
     autoFired.current = true;
     void fund();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fires once per approval; fund reads the current state
@@ -519,11 +499,13 @@ function FundingStep({ id, plan, budget, funding, sent, contractId, onConfirmed,
   }
   if (!funding) return <Working label="Getting the funding transfer ready" />;
 
+  const from = fundingFrom(funding);
   const terms = fundingTerms(funding);
   const hired = plan.subtasks.filter((s) => !s.self_do);
   const wrongNetwork = funding.network !== NETWORK;
+  const otherAccount = !!from && !!wallet.account && wallet.account !== from;
   const capsTotal = terms?.caps.reduce((sum, c) => sum + BigInt(c), 0n) ?? 0n;
-  const ready = !!terms && !wrongNetwork && !!wallet.account && (!funding.funder || wallet.account === funding.funder);
+  const ready = !!terms && !wrongNetwork && !!wallet.account && !otherAccount;
   const unallocated = terms ? BigInt(funding.amount_atomic) - BigInt(terms.reserve_atomic) - capsTotal : 0n;
   const row = 'flex items-baseline justify-between gap-4 py-1';
 
@@ -547,8 +529,10 @@ function FundingStep({ id, plan, budget, funding, sent, contractId, onConfirmed,
       </dl>
       {!terms && <p className="mt-3 text-alert">Rook sent funding instructions this page can&apos;t read, so it won&apos;t offer the transfer.</p>}
       {wrongNetwork && <p className="mt-3 text-alert">Rook&apos;s contract is on NEAR {funding.network}, but this app connects wallets on NEAR {NETWORK}. Run the web app with NEXT_PUBLIC_NEAR_NETWORK={funding.network}.</p>}
-      {funding.funder && wallet.account && wallet.account !== funding.funder && (
-        <p className="mt-3 text-alert">This task is yours as <span className="font-mono">{funding.funder}</span>, but your wallet is connected as <span className="font-mono">{wallet.account}</span>. Switch accounts in your wallet: the account that sends the budget is the one the contract refunds.</p>
+      {otherAccount && (
+        <p className="mt-3 text-ink/80">
+          This task belongs to <span className="font-mono">{from}</span>, so that account&apos;s wallet funds it. You&apos;re signed in as <span className="font-mono">{wallet.account}</span>.
+        </p>
       )}
       <div className="mt-4 flex flex-wrap gap-3">
         <ActionButton primary onClick={fund} busy={phase !== 'idle'} disabled={!ready || pasted !== null}
@@ -1118,7 +1102,6 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
 
   return (
     <div className="flex h-full flex-col">
-      <ModeBanner />
       <div className={`flex min-h-0 flex-1 flex-col ${home ? 'sm:justify-center' : ''}`}>
         {home ? (
           <div className="mx-auto flex w-full max-w-208 flex-col items-center justify-center px-5 max-sm:flex-1 md:px-8">
@@ -1143,9 +1126,9 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
               lastTouchY.current = y;
             }}
             onKeyDown={(e) => { if (['ArrowUp', 'PageUp', 'Home'].includes(e.key)) letGo(e.timeStamp); }}
-            className="min-h-0 flex-1 overflow-y-auto max-sm:mask-[linear-gradient(to_bottom,transparent,#000_12px,#000_calc(100%-12px),transparent)]"
+            className="min-h-0 flex-1 overflow-y-auto mask-[linear-gradient(to_bottom,transparent,#000_12px,#000_calc(100%-12px),transparent)] sm:mask-[linear-gradient(to_bottom,transparent,#000_48px,#000_calc(100%-12px),transparent)]"
           >
-            <div className="mx-auto w-full max-w-208 space-y-6 px-4 pt-3 pb-6 sm:px-5 sm:pt-4 sm:pb-8 md:px-8">
+            <div className="mx-auto w-full max-w-208 space-y-6 px-4 pt-3 pb-6 sm:px-5 sm:pt-16 sm:pb-8 md:px-8">
               <h1 className="sr-only">{sending?.prompt ?? loaded.snap?.task.prompt ?? 'Task'}</h1>
               {sending ? (
                 <>

@@ -7,7 +7,8 @@ export type ComposerErrors = { prompt?: string; budget?: string; message?: strin
 
 function reserveLabel(budget: string) {
   const n = Number(budget);
-  return budget.trim() && n > 0 ? `${(n * 0.2).toFixed(2)} held for re-hires` : '20% held for re-hires';
+  // The plan keeps at least 20% for re-hires, and whatever its caps leave on top of that.
+  return budget.trim() && n > 0 ? `at least ${(n * 0.2).toFixed(2)} held for re-hires` : 'at least 20% held for re-hires';
 }
 
 /** Stays mounted through a conversation. Clears as soon as a task is sent, and gives the text back if the send fails. */

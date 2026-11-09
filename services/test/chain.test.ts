@@ -64,6 +64,10 @@ function sendTx(id: unknown, b64: string) {
   chain.keys.set(ak, BigInt(tx.nonce));
   let value: unknown = null, failure: unknown;
   for (const a of tx.actions) {
+    if (a.deleteAccount) {
+      chain.txs.push({ signer: tx.signerId, key: pk.toString(), receiver: tx.receiverId, method: 'delete_account', args: { beneficiary_id: a.deleteAccount.beneficiaryId }, gas: 0n, deposit: 0n });
+      continue;
+    }
     const fc = a.functionCall;
     const args = JSON.parse(Buffer.from(fc.args).toString('utf8'));
     chain.txs.push({ signer: tx.signerId, key: pk.toString(), receiver: tx.receiverId, method: fc.methodName, args, gas: BigInt(fc.gas), deposit: BigInt(fc.deposit) });
@@ -287,6 +291,29 @@ test('chain-gateway /mark-empty: mark_empty with 50 Tgas from the orchestrator k
   assert.equal(chain.subtasks.find((s) => s.n === 1).status, 'Returned');
   assert.match(yes.explorer_url, /^https:\/\/testnet\.nearblocks\.io\/txns\//);
   chain.subtasks.find((s) => s.n === 1).status = 'Funded';
+});
+
+test('/reclaim deletes a failed funding attempt\'s account (created, no USDC) to the contract; never one holding USDC or never created', async () => {
+  // Subtask 2's first attempt failed after create_account (a kill landed before the transfer): Failed, 0.06 NEAR, no USDC.
+  const account = `t0-2.${CONTRACT}`, public_key = chain.pending.get('0/2')!;
+  const failed = { n: 2, account_id: account, public_key, cap: '200000', status: 'Failed', attempt: 0, account_exists: false };
+  chain.subtasks.push(failed);
+  const reclaim = (body: object = { task_id: '0', n: 2, account_id: account }) => call(`${signer.url}/reclaim`, body);
+  try {
+    await refused(reclaim(), /Failed and its account was never created/);
+    failed.account_exists = true;
+    chain.keys.set(`${account}/${public_key}`, 1n); // created with the key registered for the attempt
+    chain.balances.set(account, 5n);
+    await refused(reclaim(), /still holds USDC/);
+    chain.balances.set(account, 0n);
+    const r = await reclaim();
+    assert.equal(r.beneficiary, CONTRACT);
+    assert.deepEqual(chain.txs.slice(-2).map((x) => [x.signer, x.key, x.receiver, x.method, x.args]), [
+      [account, public_key, USDC, 'storage_unregister', { force: false }],
+      [account, public_key, account, 'delete_account', { beneficiary_id: CONTRACT }],
+    ]);
+    await refused(reclaim({ task_id: '0', n: 1, account_id: ACCOUNT }), /subtask 1 is Funded, not Returned/);
+  } finally { chain.subtasks.splice(chain.subtasks.indexOf(failed), 1); }
 });
 
 test('simulator: a delegate nonce is used only once its task settles; expired delegates and empty briefs use nothing', async () => {

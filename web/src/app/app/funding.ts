@@ -5,13 +5,17 @@ import type { Network } from './network';
 import type { PlanView } from './orchestrator';
 
 /**
- * What POST /tasks/:id/approve returns in chain mode. Any signed-in account funds its own task: `funder` is that account
- * (the wallet must send from it). `contract_owner` is only informative.
+ * What POST /tasks/:id/approve returns in chain mode. Any account funds its own task: `funder` is the signed-in account
+ * that must send the transfer (null for a CLI task). Orchestrators from before open funding sent the contract owner as
+ * both `owner` and `funder`, so `funder` is right for both.
  */
 export type Funding = {
   contract_id: string; usdc: string; network: Network; amount_atomic: string; msg: string;
-  funder?: string | null; contract_owner?: string | null;
+  funder?: string | null; contract_owner?: string | null; owner?: string;
 };
+
+/** The account whose wallet must send the funding, or null if any account may. */
+export const fundingFrom = (f: Funding) => f.funder ?? f.owner ?? null;
 
 /** The caps and reserve the transfer's msg carries: what the contract will enforce. Null if the msg isn't a create_task. */
 export function fundingTerms(f: Funding): { reserve_bps: number; caps: string[]; reserve_atomic: string } | null {

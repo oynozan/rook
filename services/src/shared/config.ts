@@ -83,8 +83,12 @@ export const config = {
     return u;
   },
   get contractId() { return env('ROOK_CONTRACT_ID', ''); },
-  /** Longest payment validity Rook signs or accepts, in blocks (about seconds): a quote asking more is refused. */
-  get maxPaymentTimeoutS() { return num('ROOK_MAX_PAYMENT_TIMEOUT_S', 90_000); },
+  /**
+   * Longest payment validity Rook signs or accepts, in blocks (about seconds): a quote asking more is refused, and the
+   * planner drops it. 15 000 (about 4 h) admits agents whose SLA is up to about 4 h (the window is SLA + 600 s); an
+   * authorization holds its sub-account's money and a hiring slot until it lands or expires, so never a day.
+   */
+  get maxPaymentTimeoutS() { return num('ROOK_MAX_PAYMENT_TIMEOUT_S', 15_000); },
 
   /** `live`: `pnpm live`, nothing simulated (checkProfile). Anything else: the simulation profile of `pnpm dev`. */
   get profile() { return process.env.ROOK_PROFILE === 'live' ? 'live' as const : 'sim' as const; },
@@ -104,6 +108,17 @@ const ROLE_KEYS: Record<string, string[]> = {
   signer: ['ROOK_SIGNER_ACCOUNT', 'ROOK_SIGNER_KEY'],
   'chain-gateway': ['ROOK_ORCHESTRATOR_ACCOUNT', 'ROOK_ORCHESTRATOR_KEY'],
 };
+const ROLE_PREFIX: Record<string, string> = { signer: 'ROOK_SIGNER_', 'chain-gateway': 'ROOK_ORCHESTRATOR_' };
+
+/**
+ * The variables in `env` that `service` must not hold: the admin key (scripts/deploy.ts only; it can replace the
+ * signer and the orchestrator) and every other role's ROOK_SIGNER_* / ROOK_ORCHESTRATOR_* variables. scripts/dev.ts
+ * leaves them out of each child's env, and scripts/service.ts deletes them once config has loaded, so a service
+ * started on its own (which reads the whole real-mode env file) still holds only its own key.
+ */
+export function foreignKeys(service: string, env: NodeJS.ProcessEnv = process.env): string[] {
+  return Object.keys(env).filter((k) => ADMIN_KEY.test(k) || Object.entries(ROLE_PREFIX).some(([s, p]) => s !== service && k.startsWith(p)));
+}
 
 /**
  * What stops this configuration from starting; empty when it may start. `service`: check what that one service
