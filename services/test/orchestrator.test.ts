@@ -507,7 +507,7 @@ test('a message is refused while the task it follows is planning or running, aft
   // A conversation is a chain: once a task has a follow-up, only the newest task takes the next message.
   const next = await send(drafting.id, 'bob.near');
   assert.equal(next.status, 'planned');
-  await assert.rejects(send(drafting.id, 'bob.near'), refused(409, 'This conversation has a newer message: reload the page and send from there.'));
+  await assert.rejects(send(drafting.id, 'bob.near'), refused(409, 'This conversation has a newer message: send after the newest one.'));
 
   // Approved and running: wait or stop. Stopped: a follow-up is fine, and it changes no plan.
   plan = { subtasks: [sub('s1', 'Hang', '200000', [cand('hang', '100000', 60)])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] };

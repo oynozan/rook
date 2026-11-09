@@ -192,7 +192,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         // Chain mode, approved and not funded yet: no run has started, the funding step waits for the wallet.
         if (head.status === 'approved' && chain && !isFree(head) && !chain.contractTaskOf(head.id)) throw new HttpError(409, 'Fund or cancel the plan above before sending more.');
         if (head.status !== 'planned' && !isTerminal(head.status)) throw new HttpError(409, 'Wait for this run to finish, or stop it, before sending more.');
-        if ([...tasks.values()].some((x) => x.parent_id === parent.id)) throw new HttpError(409, 'This conversation has a newer message: reload the page and send from there.');
+        if ([...tasks.values()].some((x) => x.parent_id === parent.id)) throw new HttpError(409, 'This conversation has a newer message: send after the newest one.');
       }
       const revises = openPlan(above);
       const conversation = parent ? conversationFor(above, revises) : undefined;
