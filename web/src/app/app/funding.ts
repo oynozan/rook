@@ -1,8 +1,8 @@
 // Funding a task from the browser (SHARED API DECISION 4): the human's USDC ft_transfer_call to the budget contract,
 // then reading the contract's NEP-297 "task_created" event from the outcome. Pure functions, no Next.js or Node imports,
 // so the browser and the tests both use them.
-import type { Network } from './network';
-import type { PlanView } from './orchestrator';
+import { rpcFor, type Network } from './network';
+import type { Mode, PlanView } from './orchestrator';
 
 /**
  * What POST /tasks/:id/approve returns in chain mode. Any account funds its own task: `funder` is the signed-in account
@@ -306,12 +306,29 @@ export async function contractHasTask(rpc: string, contract: string, task_id: st
   return (await viewFunction(rpc, contract, 'get_task', { task_id }, fetchImpl)) !== null;
 }
 
-/** Why the wallet can't send `amount_atomic`, said before it opens (the transfer would only fail), or null if it can. */
-export function balanceProblem(b: UsdcBalance, amount_atomic: string, account: string): string | null {
+/**
+ * Why the wallet can't send `amount_atomic`, or null if it can. Said before the wallet opens (the transfer would only
+ * fail), and earlier still: `at` 'plan' for a plan waiting for approval or funding, 'budget' for the budget a task is
+ * about to be drafted with.
+ */
+export function balanceProblem(b: UsdcBalance, amount_atomic: string, account: string, at: 'plan' | 'budget' = 'plan'): string | null {
   const need = BigInt(amount_atomic);
   if (b.balance >= need) return null;
-  if (!b.registered) return `Your account ${account} isn't registered with the USDC contract on NEAR, so it holds no USDC. Add USDC to it, then fund this plan.`;
-  return `Your wallet holds ${usdc(b.balance)} USDC; this plan needs ${usdc(need)} USDC. Add USDC or draft it again with a smaller budget.`;
+  if (!b.registered) return `Your account ${account} isn't registered with the USDC contract on NEAR, so it holds no USDC. Add USDC to it, then ${at === 'plan' ? 'fund this plan' : 'send the task'}.`;
+  if (at === 'plan') return `Your wallet holds ${usdc(b.balance)} USDC; this plan needs ${usdc(need)} USDC. Add USDC or draft it again with a smaller budget.`;
+  if (b.balance === 0n) return 'Your wallet holds no USDC, and the budget is sent from it. Add USDC first.';
+  return `Your wallet holds ${usdc(b.balance)} USDC, less than this budget. Lower the budget, or add USDC first.`;
+}
+
+/**
+ * Chain mode, before a task is drafted: why the signed-in `account` can't fund a `budget_atomic` budget, so no planning
+ * is paid for a plan its wallet can't fund. Null when it can, without the chain ledger, or when NEAR can't tell (the plan
+ * and the funding step check again).
+ */
+export async function draftShortfall(mode: Pick<Mode, 'ledger' | 'usdc' | 'network'> | null, account: string, budget_atomic: bigint, fetchImpl: typeof fetch = fetch): Promise<string | null> {
+  if (mode?.ledger !== 'chain' || !mode.usdc || (mode.network !== 'mainnet' && mode.network !== 'testnet')) return null;
+  return readUsdcBalance(rpcFor(mode.network), mode.usdc, account, fetchImpl)
+    .then((b) => balanceProblem(b, budget_atomic.toString(), account, 'budget'), () => null);
 }
 
 /**

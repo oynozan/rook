@@ -378,6 +378,33 @@ type Sent = NonNullable<TaskSnapshot['funding_sent']>;
 const lookUpFunding = (network: Network, tx: string, account: string, contractId: string) =>
   fetchTxOutcome(rpcFor(network), tx, account).then((o) => readFundingOutcome(o, contractId), (): FundingResult => ({ kind: 'unknown' }));
 
+/**
+ * Whether the signed-in wallet holds `amount` (atomic USDC; null: nothing to check), read from NEAR when it is set and
+ * again on `check`. `short` is the sentence for a wallet that can't send it. A balance NEAR can't show right now holds
+ * nothing back: the funding step checks again before the wallet opens, and the token refuses what it can't cover.
+ */
+function useUsdcShortfall(amount: string | null) {
+  const wallet = useWallet();
+  const { mode, network } = useMode();
+  const account = wallet.account, token = mode?.usdc ?? null;
+  const [short, setShort] = useState<string | null>(null);
+  const [checking, setChecking] = useState(false);
+  const asked = useRef(0); // only the latest read's answer counts
+  const check = useCallback(async (): Promise<string | null> => {
+    const n = ++asked.current;
+    if (!amount || !account || !token) { setChecking(false); return null; }
+    setChecking(true);
+    const why = await readUsdcBalance(rpcFor(network), token, account).then((b) => balanceProblem(b, amount, account), () => null);
+    if (n === asked.current) { setShort(why); setChecking(false); }
+    return why;
+  }, [amount, account, token, network]);
+  useEffect(() => {
+    setShort(null);
+    void check();
+  }, [check]);
+  return { short, checking, check };
+}
+
 function TxLink({ network, tx }: { network: Network; tx: string | null }) {
   return tx ? <> (<a href={explorerTx(network, tx)} target="_blank" rel="noopener noreferrer" className={LINK}>transaction</a>)</> : null;
 }
@@ -1116,6 +1143,10 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
         refetch(); // the task may have moved on meanwhile (stopped, or funded from another page)
       });
   }, [awaitingFunding, sentLive, funding, fundingConfirmed, fundingTrouble, id, refetch]);
+  // Chain mode, a plan waiting for approval: the wallet's USDC is checked now, while the plan can still be cancelled, so
+  // a wallet short of the budget never leaves an approved task waiting for funding.
+  const needsFunds = status === 'planned' && chain && !free && !paymentsOff;
+  const funds = useUsdcShortfall(needsFunds ? snap?.task.budget_atomic ?? null : null);
   const known = tasks?.find((t) => t.id === id)?.status;
   const [revealing, setRevealing] = useState(fresh); // a plan just drafted here: agents land first, then the plan
   const onAgentsDone = useCallback(() => { setRevealing(false); onRevealed(id); }, [id, onRevealed]);
@@ -1151,6 +1182,8 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   async function act(kind: 'approve' | 'cancel' | 'stop') {
     setBusy(kind);
     setActError(null);
+    // Checked again on the click (the balance may have changed since): a short wallet's plan is never approved.
+    if (kind === 'approve' && needsFunds && await funds.check()) return setBusy(null);
     const out = await (kind === 'approve' ? approve(id) : kind === 'cancel' ? cancel(id) : stop(id)).catch(() => ({ ok: false as const, message: UNREACHABLE }));
     setBusy(null);
     if (!out.ok) setActError(out.message);
@@ -1228,14 +1261,17 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
           )}
           {task.status === 'planned' && (
             <div className="rook-in mt-4 flex flex-wrap gap-3" style={{ animationDelay: `${250 + plan.subtasks.length * 90}ms` }}>
-              <ActionButton primary onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account || paymentsOff} title={paymentsOff ? 'Paying live agents is not switched on yet' : wallet.account ? undefined : 'Connect your wallet first'}>
-                {busy === 'approve' ? (chain && !free ? 'Preparing the transfer…' : 'Starting…') : free ? 'Start' : paymentsOff ? 'Approve' : noMoney ? 'Run simulation' : `Fund ${usdc(task.budget_atomic)} USDC and start`}
+              <ActionButton primary onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account || paymentsOff || !!funds.short}
+                title={paymentsOff ? 'Paying live agents is not switched on yet' : !wallet.account ? 'Connect your wallet first' : funds.short ? 'Your wallet holds less USDC than this budget' : undefined}>
+                {busy === 'approve' ? (funds.checking ? 'Checking your USDC balance…' : chain && !free ? 'Preparing the transfer…' : 'Starting…') : free ? 'Start' : paymentsOff ? 'Approve' : noMoney ? 'Run simulation' : `Fund ${usdc(task.budget_atomic)} USDC and start`}
               </ActionButton>
+              {funds.short && <ActionButton onClick={() => void funds.check()} busy={funds.checking}>{funds.checking ? 'Checking…' : 'Check again'}</ActionButton>}
               <ActionButton onClick={() => act('cancel')} busy={busy === 'cancel'}>Cancel</ActionButton>
             </div>
           )}
           {task.status === 'planned' && !free && !paymentsOff && noMoney && <p className="mt-2 text-sm text-ink/60">A simulated {usdc(task.budget_atomic)} USDC budget: nothing leaves your wallet and no agent is paid.</p>}
-          {task.status === 'planned' && !free && !paymentsOff && !noMoney && <p className="mt-2 text-sm text-ink/60">One click: your wallet opens to send the {usdc(task.budget_atomic)} USDC budget to the Rook contract on NEAR {network}, and the run starts once it lands. Each subtask spends at most its cap plus what Rook tops up from the reserve, and whatever isn&apos;t spent comes back to you.</p>}
+          {task.status === 'planned' && funds.short && <p role="alert" className="mt-2 text-sm text-alert">{funds.short}</p>}
+          {task.status === 'planned' && !free && !paymentsOff && !noMoney && !funds.short && <p className="mt-2 text-sm text-ink/60">One click: your wallet opens to send the {usdc(task.budget_atomic)} USDC budget to the Rook contract on NEAR {network}, and the run starts once it lands. Each subtask spends at most its cap plus what Rook tops up from the reserve, and whatever isn&apos;t spent comes back to you.</p>}
           {task.status === 'planned' && !free && paymentsOff && <p className="mt-2 text-sm text-ink/60">Live agents and prices. Paying them isn&apos;t switched on yet, so nothing can be spent.</p>}
         </RookMessage>
       )}

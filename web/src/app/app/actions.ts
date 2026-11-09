@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import { forgetFundingOf, forgetUnreadFunding, fundingSent, giveBackDraftSlot, markFundingRefunded, recordFundingSent, takeDraftSlot } from './db';
 import { checkDraft, draftRefusal } from './draft';
-import { untilFinal, type Funding } from './funding';
+import { draftShortfall, untilFinal, type Funding } from './funding';
 import { approveTask, cancelTask, createTask, fundedTask, getMode, getTask, killTask, OrchestratorDown, OrchestratorError } from './orchestrator';
 import { actionRefusal, fundingCallFailure, type TaskAction } from './refusals';
 import { currentAccount } from './session';
@@ -37,8 +37,13 @@ export async function draftTask(input: { prompt: string; budget: string }): Prom
   if (!owner) return { kind: 'error', message: signInFirst() };
 
   // The composer's own checks again, with the orchestrator's budget limits, all before a draft slot is taken.
-  const check = checkDraft({ prompt: String(input?.prompt ?? ''), budget: String(input?.budget ?? '') }, await getMode().catch(() => null));
+  const mode = await getMode().catch(() => null);
+  const check = checkDraft({ prompt: String(input?.prompt ?? ''), budget: String(input?.budget ?? '') }, mode);
   if (!check.ok) return { kind: 'invalid', prompt: check.prompt, budget: check.budget };
+  // Chain mode: the signed-in wallet funds the plan, so one that can't cover the budget hears it now, before any
+  // planning is paid for, rather than after the plan is drafted.
+  const short = await draftShortfall(mode, owner, check.atomic);
+  if (short) return { kind: 'invalid', budget: short };
 
   const slot = takeDraftSlot(owner, DRAFTS_PER_HOUR, 3_600_000);
   if (!slot.ok) {

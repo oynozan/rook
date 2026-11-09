@@ -39,7 +39,7 @@ test('budgetLimitError: the orchestrator maximum and the contract minimum, when 
 });
 
 test('checkDraft: the trimmed prompt and the budget in the form the orchestrator reads, or a message per field', () => {
-  assert.deepEqual(checkDraft({ prompt: '  Due diligence  ', budget: '1,5' }), { ok: true, prompt: 'Due diligence', usdc: '1.50' });
+  assert.deepEqual(checkDraft({ prompt: '  Due diligence  ', budget: '1,5' }), { ok: true, prompt: 'Due diligence', usdc: '1.50', atomic: 1_500_000n });
   assert.deepEqual(checkDraft({ prompt: ' ', budget: 'x' }), { ok: false, prompt: 'Describe the task first.', budget: 'Enter the budget as a number, like 3.00.' });
   assert.deepEqual(checkDraft({ prompt: 'p', budget: '60' }, { max_budget_atomic: '50000000' }), { ok: false, budget: 'The largest budget is 50.00 USDC.' });
   const long = checkDraft({ prompt: 'x'.repeat(PROMPT_MAX + 1), budget: '3' });

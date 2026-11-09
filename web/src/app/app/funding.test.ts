@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  balanceProblem, closeTaskTransaction, confirmFailure, contractHasTask, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
+  balanceProblem, closeTaskTransaction, confirmFailure, contractHasTask, draftShortfall, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
   keptTransferKey, keptValue, moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, restoreKept, termsOf, txHashOf, usdc,
   whoseTransfer, untilFinal, type Funding,
 } from './funding';
@@ -320,6 +320,25 @@ test("reads the wallet's USDC balance and registration from NEAR before the wall
   assert.equal(balanceProblem(held, '2130000', 'alice.near'), null);
   assert.equal(balanceProblem({ balance: 5_000n, registered: true }, '2999000', 'alice.near'), 'Your wallet holds 0.005 USDC; this plan needs 2.999 USDC. Add USDC or draft it again with a smaller budget.');
   assert.match(balanceProblem({ balance: 0n, registered: false }, '3000000', 'new.near') ?? '', /^Your account new\.near isn't registered with the USDC contract on NEAR, so it holds no USDC\./);
+});
+
+test('a wallet short of the budget hears it before the task is drafted, so no planning is paid for a plan it cannot fund', async () => {
+  const chain = { ledger: 'chain' as const, usdc: F.usdc, network: 'mainnet' as const };
+  const bodies: any[] = [];
+  const wallet = (balance: string, storage: unknown = { total: '1', available: '0' }) => viewRpc({ ft_balance_of: balance, storage_balance_of: storage }, bodies);
+  assert.equal(await draftShortfall(chain, 'alice.near', 3_000_000n, wallet('2130000')), 'Your wallet holds 2.13 USDC, less than this budget. Lower the budget, or add USDC first.');
+  assert.equal(bodies[0].params.account_id, F.usdc);
+  assert.equal(bodies[0].params.args_base64, btoa('{"account_id":"alice.near"}')); // the signed-in account, which funds its own task
+  assert.equal(await draftShortfall(chain, 'alice.near', 3_000_000n, wallet('0')), 'Your wallet holds no USDC, and the budget is sent from it. Add USDC first.');
+  assert.match(await draftShortfall(chain, 'new.near', 3_000_000n, wallet('0', null)) ?? '', /^Your account new\.near isn't registered with the USDC contract on NEAR, so it holds no USDC\. Add USDC to it, then send the task\.$/);
+  assert.equal(await draftShortfall(chain, 'alice.near', 3_000_000n, wallet('3000000')), null);
+  // NEAR can't tell: the draft goes ahead (the plan and the funding step check again).
+  assert.equal(await draftShortfall(chain, 'alice.near', 3_000_000n, viewRpc({ ft_balance_of: new Error('UNKNOWN_ACCOUNT') })), null);
+  // No chain ledger, or an orchestrator that names no token: nothing is funded from the wallet, nothing is read.
+  const untouched = (async () => { throw new Error('must not read'); }) as unknown as typeof fetch;
+  for (const mode of [null, { ...chain, ledger: 'sim' as const }, { ...chain, usdc: null }, { ...chain, network: 'sim' as const }]) {
+    assert.equal(await draftShortfall(mode, 'alice.near', 3_000_000n, untouched), null, JSON.stringify(mode));
+  }
 });
 
 test("a contract task Rook can't see after its tries is looked up in the wallet's own view: gone, or only late", async () => {

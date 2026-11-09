@@ -35,7 +35,7 @@ export function budgetLimitError(atomic: bigint, limits: BudgetLimits | null | u
 }
 
 export type DraftCheck =
-  | { ok: true; prompt: string; usdc: string }
+  | { ok: true; prompt: string; usdc: string; atomic: bigint }
   | { ok: false; prompt?: string; budget?: string };
 
 export function checkDraft(input: { prompt: string; budget: string }, limits?: BudgetLimits | null): DraftCheck {
@@ -47,7 +47,7 @@ export function checkDraft(input: { prompt: string; budget: string }, limits?: B
   const budgetError = budget.ok ? budgetLimitError(budget.atomic, limits) : budget.error;
   if (budgetError) out.budget = budgetError;
   if (out.prompt || !budget.ok || budgetError) return out;
-  return { ok: true, prompt, usdc: budget.usdc };
+  return { ok: true, prompt, usdc: budget.usdc, atomic: budget.atomic };
 }
 
 /**
