@@ -158,7 +158,10 @@ before(async () => {
     budget: { budget_atomic: '1000000', reserve_atomic: '200000', allocatable_atomic: '800000', allocated_atomic: PRICE[handle] },
   });
   servers.push(await serve('fake-planner', {
-    'POST /plan': ({ body }) => planFor(body.prompt),
+    // 'zero cap': a plan drafted before 0 USDC quotes were dropped, with a hired part capped at 0
+    'POST /plan': ({ body }) => body.prompt === 'zero cap'
+      ? { ...planFor('alpha'), subtasks: [{ ...planFor('alpha').subtasks[0], cap_atomic: '0' }] }
+      : planFor(body.prompt),
     'POST /aggregate': () => ({ final_markdown: 'final', attribution: [], llm_calls: [] }),
   }, 0));
   servers.push(await serve('fake-evaluator', {
@@ -614,6 +617,17 @@ test('approving again to reprint the funding instructions skips the open-task li
     const next = await call(`${orch.url}/tasks`, { prompt: 'beta', budget_usdc: '1', owner: 'alice.test' });
     await assert.rejects(call(`${orch.url}/tasks/${next.id}/approve`, { owner: 'alice.test' }), /alice\.test already has 1 open tasks/);
   } finally { await orch.close(); openTasks = 0; }
+});
+
+test('a plan with a 0 USDC cap is refused before the wallet opens, and the task stays planned', async () => {
+  process.env.ROOK_DB = join(dir, 'zero-cap.sqlite');
+  const orch = await start(0);
+  try {
+    const t = await call(`${orch.url}/tasks`, { prompt: 'zero cap', budget_usdc: '1' });
+    await assert.rejects(call(`${orch.url}/tasks/${t.id}/approve`, {}), (e: any) => e.status === 409 && e.message === 'this plan has a 0 USDC cap; draft the task again');
+    assert.equal((await snap(orch, t.id)).task.status, 'planned');
+    assert.equal((await call(`${orch.url}/tasks/${t.id}/cancel`, {})).status, 'cancelled');
+  } finally { await orch.close(); }
 });
 
 /** The agent of a funded, working task delivers and the marketplace takes its payment from the sub-account. */

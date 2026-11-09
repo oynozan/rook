@@ -338,6 +338,9 @@ type ChainCfg = { contract_id: string | null; usdc: string | null; owner: string
 async function fundingInstructions(t: Task, c: ChainCfg | null, reprint = false) {
   const want = expected(t);
   if (!want.caps.length) throw new HttpError(409, 'every subtask is self_do: nothing to fund on chain');
+  // The contract refuses a cap of 0 and refunds the transfer. Plans drafted before 0 USDC quotes were dropped can carry
+  // one (reloaded from ROOK_DB): refused before the wallet opens.
+  if (want.caps.some((c) => BigInt(c) <= 0n)) throw new HttpError(409, 'this plan has a 0 USDC cap; draft the task again');
   if (want.reserve !== t.plan?.budget.reserve_atomic) {
     throw new HttpError(409, `reserve_share ${t.reserve_share} gives ${want.reserve} on chain but ${t.plan?.budget.reserve_atomic} in the plan; use a share with at most 4 decimals`);
   }
