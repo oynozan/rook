@@ -187,15 +187,16 @@ function Reveal({ open, children }: { open: boolean; children: ReactNode }) {
   );
 }
 
-/** What a subtask can cost: Rook's own work, a free agent, or a cap in USDC. During a run, what it has spent of its cap. */
+/**
+ * What a subtask can cost: Rook's own work, or a cap in USDC (the planner drops 0 USDC quotes, so a hired subtask's cap
+ * is never 0). During a run, what it has spent of its cap.
+ */
 function CapLabel({ subtask: s, usage }: { subtask: PlanView['subtasks'][number]; usage?: LedgerSub }) {
-  const free = !s.self_do && BigInt(s.cap_atomic) === 0n && s.candidates.length > 0 && BigInt(s.candidates[0].price_atomic) === 0n;
-  const words = s.self_do ? 'Rook does this' : free && !usage ? 'Free' : null;
   const topped = usage ? BigInt(usage.topped_up_atomic) : 0n;
   return (
-    <span title={s.self_do ? 'No agent is hired: Rook does this part with its own model' : usage ? 'Spent of this subtask\'s cap, plus any top-up from the reserve' : free ? 'The cheapest agent quoted 0 USDC; paid re-hires come from the reserve' : undefined}
-      className={`shrink-0 pl-3 text-sm text-ink/65 sm:pl-0 ${words ? '' : 'font-mono tabular-nums'}`}>
-      {words ?? (usage ? `${usdc(usage.spent_atomic)} of ${usdc(usage.cap_atomic)}${topped > 0n ? ` +${usdc(topped)} reserve` : ''}` : `Cap ${usdc(s.cap_atomic)}`)}
+    <span title={s.self_do ? 'No agent is hired: Rook does this part with its own model' : usage ? 'Spent of this subtask\'s cap, plus any top-up from the reserve' : undefined}
+      className={`shrink-0 pl-3 text-sm text-ink/65 sm:pl-0 ${s.self_do ? '' : 'font-mono tabular-nums'}`}>
+      {s.self_do ? 'Rook does this' : usage ? `${usdc(usage.spent_atomic)} of ${usdc(usage.cap_atomic)}${topped > 0n ? ` +${usdc(topped)} reserve` : ''}` : `Cap ${usdc(s.cap_atomic)}`}
     </span>
   );
 }
