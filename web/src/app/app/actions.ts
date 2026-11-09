@@ -62,7 +62,12 @@ export async function draftTask(input: { prompt: string; budget: string; parent_
     const refused = e instanceof OrchestratorError && e.status === 400 ? draftRefusal(e.message) : null;
     if (refused) return { kind: 'invalid', ...refused };
     const follow = e instanceof OrchestratorError ? followUpRefusal(e.status, e.message) : null;
-    if (follow) return { kind: 'error', message: follow };
+    if (follow) {
+      // The page's view of the conversation was out of date (a message sent from another tab, or a list that failed to
+      // load): the list catches up, so the newer message shows; the composer keeps the typed text.
+      if (e instanceof OrchestratorError && e.status === 409) refreshSidebar();
+      return { kind: 'error', message: follow };
+    }
     console.error('[web] draftTask:', e instanceof Error ? e.message : e);
     return { kind: 'error', message: "Rook couldn't draft a plan for this task. Try again in a moment." };
   }
