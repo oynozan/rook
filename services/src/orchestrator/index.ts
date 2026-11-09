@@ -178,17 +178,19 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       // A message in a conversation follows its newest task. Checked after the last await, so two messages sent at once
       // cannot both follow the same task.
       const parent = b.parent_id === undefined ? null : owned(b.parent_id, b.owner);
-      const chain = parent ? ancestors(parent, tasks) : [];
+      const above = parent ? ancestors(parent, tasks) : []; // the parent and the tasks above it, nearest first
       if (parent) {
         if (parent.owner !== (b.owner ?? null)) throw new HttpError(409, `task ${parent.id} has another owner: a follow-up keeps its owner`);
         // What the message acts on: the parent, or the task above replies that never got a plan (a run under way, say).
-        const head = headOf(chain)!;
+        const head = headOf(above)!;
         if (head.status === 'draft') throw new HttpError(409, 'Wait for the plan to be ready before sending more.');
+        // Chain mode, approved and not funded yet: no run has started, the funding step waits for the wallet.
+        if (head.status === 'approved' && chain && !isFree(head) && !chain.contractTaskOf(head.id)) throw new HttpError(409, 'Fund or cancel the plan above before sending more.');
         if (head.status !== 'planned' && !isTerminal(head.status)) throw new HttpError(409, 'Wait for this run to finish, or stop it, before sending more.');
         if ([...tasks.values()].some((x) => x.parent_id === parent.id)) throw new HttpError(409, 'This conversation has a newer message: reload the page and send from there.');
       }
-      const revises = openPlan(chain);
-      const conversation = parent ? conversationFor(chain, revises) : undefined;
+      const revises = openPlan(above);
+      const conversation = parent ? conversationFor(above, revises) : undefined;
       const t = newTask(b.prompt, budget, b.reserve_share ?? 0.2, b.owner ?? null, parent?.id ?? null);
       if (conversation) t.earlier_prompts = conversation.earlier;
       tasks.set(t.id, t);
