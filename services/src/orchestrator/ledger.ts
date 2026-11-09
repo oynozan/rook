@@ -37,9 +37,13 @@ export interface Ledger {
   fundSubtask(task_id: string, n: number, cap: bigint): Awaitable<bigint>;
   topUp(task_id: string, n: number, amount: bigint): Awaitable<bigint>;
   authorize(task_id: string, n: number, row: AcceptsRow, allow: Recipient[]): Awaitable<{ header: string; payment_hash: string; amount: bigint }>;
-  settle(task_id: string, n: number): Awaitable<bigint>;
-  /** `settled`: the chain shows the payment landed although the hire ended unpaid; booked as spent instead. */
-  release(task_id: string, n: number, how?: ReleaseHow): Awaitable<bigint | { amount: bigint; settled: true }>;
+  /**
+   * `signal` (the run's, chain only): a kill or shutdown stops the wait for the chain and leaves the authorization
+   * outstanding, for the unwind (or the restore) to clear on its own, so it holds back no other sub-account.
+   */
+  settle(task_id: string, n: number, signal?: AbortSignal): Awaitable<bigint>;
+  /** `settled`: the chain shows the payment landed although the hire ended unpaid; booked as spent instead. `signal`: as settle. */
+  release(task_id: string, n: number, how?: ReleaseHow, signal?: AbortSignal): Awaitable<bigint | { amount: bigint; settled: true }>;
   returnLeftover(task_id: string, n: number): Awaitable<bigint>;
   closeTask(task_id: string): Awaitable<bigint>;
   kill(task_id: string): void;

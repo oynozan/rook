@@ -109,14 +109,17 @@ export function createChainLedger(): ChainLedger {
   const reclaim = (task_id: string, n: number, c: { task_id: string; n: number; account_id: string }) =>
     signer('/reclaim', c).catch((e) => console.warn(`[orchestrator] ${task_id} subtask ${n}: reclaim ${c.account_id} failed: ${e?.message ?? e}`));
 
-  /** Clears the signer's authorization: at once when terminal_unpaid, else once the delegate ran or expired (409 until then). */
-  async function clearAuth(c: { task_id: string; n: number }, terminal_unpaid: boolean) {
+  /**
+   * Clears the signer's authorization: at once when terminal_unpaid, else once the delegate ran or expired (409 until then).
+   * `signal` aborts only the wait between 409s: the authorization stays outstanding, in the signer and in the books.
+   */
+  async function clearAuth(c: { task_id: string; n: number }, terminal_unpaid: boolean, signal?: AbortSignal) {
     for (;;) {
       try {
         return await signer<{ cleared: boolean; landed?: boolean }>('/expire', { task_id: c.task_id, n: c.n, terminal_unpaid });
       } catch (e) {
         if (!(e instanceof HttpError && e.status === 409)) throw e;
-        await sleep(Math.max(config.pollMs, 200));
+        await sleep(Math.max(config.pollMs, 200), undefined, { signal });
       }
     }
   }
@@ -177,9 +180,9 @@ export function createChainLedger(): ChainLedger {
      * A2A COMPLETED: waits until the delegate ran or expired, then books the payment only if the sub-account's USDC
      * dropped by its amount. Returns 0n (booked unpaid) when it never did: the facilitator did not settle it.
      */
-    async settle(task_id, n) {
+    async settle(task_id, n, signal) {
       const c = at(task_id, n);
-      const cleared = await clearAuth(c, false);
+      const cleared = await clearAuth(c, false, signal);
       const paid = await paidOnChain(task_id, n, c.account_id, cleared.landed === true);
       b(task_id).auths.delete(n);
       if (paid) return m.settle(task_id, n);
@@ -188,11 +191,11 @@ export function createChainLedger(): ChainLedger {
     },
 
     /** `now` drops it from Rook's books only. Otherwise waits as clearAuth; a payment that landed anyway is settled. */
-    release(task_id, n, how: ReleaseHow = 'wait') {
+    release(task_id, n, how: ReleaseHow = 'wait', signal?: AbortSignal) {
       if (how === 'now') { bound.get(task_id)?.auths.delete(n); return m.release(task_id, n); }
       const c = at(task_id, n);
       return (async () => {
-        const cleared = await clearAuth(c, how === 'terminal');
+        const cleared = await clearAuth(c, how === 'terminal', signal);
         const paid = await paidOnChain(task_id, n, c.account_id, cleared.landed === true);
         b(task_id).auths.delete(n);
         if (paid) return { amount: m.settle(task_id, n), settled: true as const };
