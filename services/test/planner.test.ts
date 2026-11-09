@@ -218,6 +218,45 @@ test('POST /plan (canned) against a fake gateway: 4 subtasks, caps, reserve; /ag
   assert.doesNotMatch(agg.final_markdown, /ignore previous/);
 });
 
+/** Runs the planner's LLM prompts against a fake NEAR AI and returns the messages each call sent. */
+async function promptsSent(run: (p: typeof import('../src/planner/prompts.ts')) => Promise<unknown>) {
+  const prompts = await import('../src/planner/prompts.ts');
+  const { config } = await import('../src/shared/config.ts');
+  const keys = ['ROOK_LLM', 'NEARAI_API_KEY', 'NEARAI_BASE_URL'] as const;
+  const saved = keys.map((k) => process.env[k]);
+  Object.assign(process.env, { ROOK_LLM: 'near', NEARAI_API_KEY: 'test-key', NEARAI_BASE_URL: 'https://nearai.test/v1' });
+  const real = globalThis.fetch, sent: { role: string; content: string }[][] = [];
+  const reply = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } });
+  globalThis.fetch = (async (input: any, init?: any) => {
+    const url = String(input);
+    if (url.endsWith('/models')) return reply({ data: [{ id: config.plannerModel, pricing: { prompt: 0, completion: 0 } }] });
+    if (url.includes('/signature/')) return reply({}); // unsigned: fine for this test
+    if (!url.endsWith('/chat/completions')) return reply({}, 404); // attestation evidence
+    const { messages } = JSON.parse(init.body);
+    sent.push(messages);
+    const content = messages[0].content.includes('You are the planner of Rook') ? JSON.stringify({ subtasks: [sub('a')] }) : 'ok';
+    return reply({ id: `c${sent.length}`, choices: [{ message: { content }, finish_reason: 'stop' }], usage: { prompt_tokens: 1, completion_tokens: 1 } });
+  }) as typeof fetch;
+  try { await run(prompts); } finally {
+    globalThis.fetch = real;
+    keys.forEach((k, i) => { if (saved[i] === undefined) delete process.env[k]; else process.env[k] = saved[i]; });
+  }
+  return sent;
+}
+
+test("the draft, self-do and aggregate prompts state today's date in UTC", async (t) => {
+  // A plan made on 2026-11-09 sent briefs asking for "the best laptops of 2025".
+  t.mock.timers.enable({ apis: ['Date'], now: Date.parse('2026-11-09T23:30:00Z') }); // already the 10th in UTC+3
+  const [drafted, selfDone, merged] = await promptsSent(async ({ draft, selfDo, aggregate }) => {
+    await draft('Best laptop right now', 3_000_000n, 2_400_000n);
+    await selfDo('Laptops\n\nCompare them.', []);
+    await aggregate({ task_id: 't', prompt: 'Best laptop', subtasks: [{ id: 's1', title: 'Laptops', status: 'passed', agent_handle: 'web-research', deliverable_text: 'text' }] });
+  });
+  assert.match(drafted[1].content, /Today is 2026-11-09 \(UTC\)\. Anything current, recent or "latest"/);
+  assert.match(selfDone[0].content, /Today is 2026-11-09 \(UTC\)/);
+  assert.match(merged[0].content, /Today is 2026-11-09 \(UTC\)/);
+});
+
 test('candidates priced above cap + reserve are dropped with a note', async () => {
   const { buildPlan } = await import('../src/planner/plan.ts');
   const recipients = [{ network: 'near:mainnet', asset: 'usdc.sim', payTo: 'treasury.sim' }];

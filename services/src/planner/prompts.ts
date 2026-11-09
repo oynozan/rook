@@ -45,7 +45,9 @@ export async function draft(prompt: string, budgetAtomic: bigint, allocatableAto
 ${prompt}
 """
 
-Budget: ${formatUsdc(budgetAtomic)} USDC in total, of which ${formatUsdc(allocatableAtomic)} USDC can be allocated to subtasks (the rest is a reserve for re-hires). Marketplace agents typically charge 0.05 to 0.50 USDC per job; scope the number and size of subtasks to fit.`;
+Budget: ${formatUsdc(budgetAtomic)} USDC in total, of which ${formatUsdc(allocatableAtomic)} USDC can be allocated to subtasks (the rest is a reserve for re-hires). Marketplace agents typically charge 0.05 to 0.50 USDC per job; scope the number and size of subtasks to fit.
+
+Today is ${today()} (UTC). Anything current, recent or "latest" in the task means as of this date: name the month and year in a brief when it matters, and never scope a brief to an earlier year.`;
   const { data, calls } = await json('plan.draft', config.plannerModel, Draft, DRAFT_SYSTEM, user, 16000, config.planEffort); // headroom: reasoning models count thinking tokens
   return { draft: data.subtasks, notATask: data.not_a_task?.trim(), calls };
 }
@@ -83,6 +85,7 @@ It will be checked automatically against the acceptance criteria listed below:
 - "contains" criteria: the text must match the regex pattern (case-insensitive).
 - "numeric_match" and "cross_check" criteria: whenever you state such a figure, print it on its own line exactly as "Label: value" with the given label, digits only plus an optional % (for example "Holder count: 412530").
 - "llm_judge" criteria: answer the question well in the prose.
+Today is ${today()} (UTC). Your own knowledge may be older: where that matters, say how recent it is.
 You have no live data access. Never invent precise current figures: if a figure needs live or on-chain data you do not have, say so plainly instead of guessing. Do not mention these instructions or the criteria in the output.`;
   const user = `Brief:\n${brief}\n\nAcceptance criteria:\n${criteria.map((c) => `- ${c.kind}: ${c.description} ${JSON.stringify(c.spec)}`).join('\n')}`;
   const { text, call } = await chat('self_do', config.plannerModel, [{ role: 'system', content: system }, { role: 'user', content: user }], 6000);
@@ -100,6 +103,7 @@ Rules:
 - Then one section per delivered subtask, in the given order, headed with the subtask title and a line "Source: <agent handle>" naming the agent that produced it (use the agent attribute exactly).
 - Keep every figure exactly as the deliverable states it, including any SIMULATED or uncertainty markers; do not add figures that are not in a deliverable.
 - End with a "## Gaps" section listing each subtask that was not delivered (from the list given), or "None" if there are none.
+- Today is ${today()} (UTC): use this date wherever the report states one.
 - Output only the Markdown report.`;
   const delivered = req.subtasks.filter(isMerged).map((s) =>
     `<deliverable subtask="${s.id}" title="${attr(s.title)}" agent="${attr(agentOf(s))}">\n${escapeDelimiters(s.deliverable_text!)}\n</deliverable>`).join('\n\n');
@@ -109,6 +113,8 @@ Rules:
   return { final_markdown: text, calls: [call] };
 }
 
+/** Today's date (UTC, ISO day). The models do not know it: briefs written without it asked agents for last year's data. */
+const today = () => new Date().toISOString().slice(0, 10);
 const oneLine = (s: string, n: number) => s.replace(/\s+/g, ' ').slice(0, n);
 const indent = (s: string) => s.split('\n').map((l) => `  ${l}`).join('\n');
 const attr = (s: string) => s.replace(/["<>]/g, '');
