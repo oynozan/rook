@@ -408,7 +408,8 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
       if (/already funds/.test(out.message)) setMade(null); // another task's contract task: this one can be funded again
       return setError(`Rook didn't start the run from here: ${why}`);
     }
-    setError(`Rook didn't start the run: ${why} Your USDC is in contract task ${cid}. Confirm again to start it.`);
+    if (next === 'not_final') return setError("NEAR hasn't finished recording your transfer yet. Your USDC is safe in the Rook contract. Confirm again in a few seconds.");
+    setError(`Rook didn't start the run: ${why} Your USDC is safe in the Rook contract. Confirm again to start it.`);
   }
 
   const lookUp = (tx: string) => lookUpFunding(network, tx, wallet.account ?? '', contract ?? '');

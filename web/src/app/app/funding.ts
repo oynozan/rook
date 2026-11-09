@@ -199,11 +199,13 @@ export const whoseTransfer = (tx: string, pending: string | null): 'own' | 'othe
  * this task (it doesn't match the plan, or the task was stopped). 'refetch': the task moved on, or another confirm is
  * binding it or has bound it, so the page catches up rather than offer a refund that could cut a starting run short.
  * The web server's own refusal (this task's funding is already another contract task) is a 'refetch' too.
- * 'retry': anything else (services down, the contract task not final yet).
+ * 'not_final': Rook can't see the contract task yet (it reads NEAR at final, a few seconds behind the wallet), even
+ * after untilFinal's tries. 'retry': anything else (services down, say).
  */
-export function confirmFailure(message: string): 'refund' | 'refetch' | 'retry' {
+export function confirmFailure(message: string): 'refund' | 'refetch' | 'not_final' | 'retry' {
   if (/does not match the approved plan|^task is (killed|cancelled), funded needs approved/.test(message)) return 'refund';
   if (/already being checked|already funded by|already funds|funded needs approved|won't confirm contract task/.test(message)) return 'refetch';
+  if (/^no contract task /.test(message)) return 'not_final';
   return 'retry';
 }
 

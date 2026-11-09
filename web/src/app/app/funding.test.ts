@@ -115,7 +115,8 @@ test('a failed confirm offers the refund only when Rook will never run that cont
   assert.equal(confirmFailure('task is running, funded needs approved'), 'refetch');
   assert.equal(confirmFailure("This task's funding is already contract task 1a, so Rook won't confirm contract task 1b for it."), 'refetch');
   assert.equal(confirmFailure("Rook's services aren't running. Start them with pnpm dev, then try again."), 'retry');
-  assert.equal(confirmFailure('no contract task 1a'), 'retry');
+  // Rook reads NEAR a few seconds behind the wallet: the contract task the transfer made isn't there for it yet.
+  assert.equal(confirmFailure('no contract task 1a'), 'not_final');
 });
 
 test('a refund counts only with the contract\'s word for it', () => {
