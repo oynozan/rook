@@ -189,8 +189,9 @@ Every criterion is `{ id, kind, description, spec }`.
 
 Rules the planner enforces (section 5.2 step 8):
 
-- Prefer script-checkable kinds; `llm_judge` is for prose quality only, at most 2 per subtask.
-- A `contains` pattern is a short plain phrase the brief explicitly asks the agent to write (for example one of its labels), so an honest agent that follows the brief always matches.
+- Prefer script-checkable kinds where the work reports figures or named sections; `llm_judge` is for prose quality only, at most 2 per subtask. Writing and translation work without figures is checked with `llm_judge`: the draft prompt says never to invent a label line, a count or a phrase only to have something to check (plans had briefs asking for "Body word count: 600" or "Attack explained: yes", and a translation whose check was the translated text itself).
+- A brief asks for each key figure as a `Label: value` line, the value in digits only (no thousands separators, `.` as the decimal point), in any language.
+- A `contains` pattern is a short plain phrase the brief explicitly asks the agent to write (for example one of its labels), so an honest agent that follows the brief always matches; never the expected answer itself.
 - `pattern` must compile; `json_schema` must compile with Ajv.
 - `numeric_match` bounds are sanity ranges the planner can know without the data (a percentage is between 0 and 100, a holder count is above 0), never guesses of the answer.
 - `cross_check.other_subtask` must be an earlier subtask in the final plan. This makes cycles impossible: a subtask's evaluation waits only on earlier subtasks.
