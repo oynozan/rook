@@ -2,7 +2,7 @@
 
 import { AnimatePresence, motion } from 'motion/react';
 import { useTheme } from 'next-themes';
-import { usePathname } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
 import { useEffect, useRef, useState, type MouseEvent, type ReactNode, type Ref } from 'react';
 import { Mark } from '@/components/Navbar';
 import { useSmoothScroll } from '@/components/SmoothScroll';
@@ -68,7 +68,7 @@ function TaskList({ tasks, onNavigate }: { tasks: TaskSummary[] | null; onNaviga
   const pathname = usePathname();
   const { chain } = useMode(); // chain mode: an approved task waits for the owner's funding transfer
   const label = (s: string) => (chain && s === 'approved' ? 'Needs funding' : STATUS[s] ?? s);
-  if (tasks === null) return <p className="px-3 text-sm text-ink/65">Rook&apos;s services aren&apos;t running. Start them with pnpm dev to see your tasks.</p>;
+  if (tasks === null) return <p className="px-3 text-sm text-ink/65">Rook&apos;s services are unreachable right now. Your tasks will be back here as soon as they are.</p>;
   if (!tasks.length) return <p className="px-3 text-sm text-ink/65">Tasks you draft will appear here.</p>;
   const recent = [...tasks].sort((a, b) => b.created_at.localeCompare(a.created_at));
   return (
@@ -220,6 +220,20 @@ export function AppShell({ tasks, children }: { tasks: TaskSummary[] | null; chi
     setCollapsed(isCollapsed);
   };
   useEffect(() => () => clearTimeout(peekTimer.current), []);
+
+  // The layout couldn't reach Rook's services (no task list, or no mode): it asks again every so often, so the sidebar
+  // and the mode come back on their own once the services answer.
+  const router = useRouter();
+  const { mode } = useMode();
+  const unreachable = tasks === null || !mode;
+  useEffect(() => {
+    if (!unreachable) return;
+    let wait = 5000;
+    let timer: ReturnType<typeof setTimeout>;
+    const again = () => { router.refresh(); wait = Math.min(wait * 2, 30_000); timer = setTimeout(again, wait); };
+    timer = setTimeout(again, wait);
+    return () => clearTimeout(timer);
+  }, [unreachable, router]);
 
   // The theme can only be changed with a wallet connected, so without one the app goes back to light.
   const { setTheme } = useTheme();

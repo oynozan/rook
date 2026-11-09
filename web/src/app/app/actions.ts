@@ -18,7 +18,7 @@ export type ActResult = { ok: true; funding?: Funding } | { ok: false; message: 
 // Each draft spends NEAR AI credit on the planner, so one account can't drain it. ponytail: per account only; many
 // throwaway accounts still add up, so the planner's own ROOK_LLM_MAX_USD cap is the backstop.
 const DRAFTS_PER_HOUR = Math.max(1, Math.floor(Number(process.env.ROOK_DRAFTS_PER_HOUR)) || 20);
-const DOWN = "Rook's services aren't running. Start them with pnpm dev, then try again.";
+const DOWN = "Rook's services are unreachable right now. Try again in a minute.";
 const refreshSidebar = () => revalidatePath('/app', 'layout');
 
 const SIGN_IN = 'Sign in with your NEAR wallet first.';

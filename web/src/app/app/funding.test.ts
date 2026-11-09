@@ -92,7 +92,7 @@ test('a failed confirm offers the refund only when Rook will never run that cont
   assert.equal(confirmFailure('contract task 1a already funds t_2'), 'refetch');
   assert.equal(confirmFailure('task is running, funded needs approved'), 'refetch');
   assert.equal(confirmFailure("This task's funding is already contract task 1a, so Rook won't confirm contract task 1b for it."), 'refetch');
-  assert.equal(confirmFailure("Rook's services aren't running. Start them with pnpm dev, then try again."), 'retry');
+  assert.equal(confirmFailure("Rook's services are unreachable right now. Try again in a minute."), 'retry');
   assert.equal(confirmFailure('no contract task 1a'), 'retry');
 });
 

@@ -1006,7 +1006,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
 
   if (problem === 'missing') return <RookMessage><p>Rook has no task at this link for the wallet you&apos;re signed in with. If another wallet drafted it, sign in with that one.</p></RookMessage>;
   if (problem === 'signin') return <RookMessage><p>Connect your wallet to see this task.</p></RookMessage>;
-  if (problem === 'down' && !snap) return <RookMessage><p>Rook&apos;s services aren&apos;t running. Start them with pnpm dev, then refresh.</p></RookMessage>;
+  if (problem === 'down' && !snap) return <RookMessage><p>Rook&apos;s services are unreachable right now. This page reconnects on its own once they&apos;re back.</p></RookMessage>;
   if (!snap) return <RookMessage><Working label="Loading" /></RookMessage>;
 
   const { task, plan, receipts, ledger, final_result } = snap;
