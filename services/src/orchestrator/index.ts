@@ -323,6 +323,9 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     'POST /tasks/:id/kill': ({ params, body }) => {
       const t = owned(params.id, body?.owner);
       if (isTerminal(t.status)) throw new HttpError(409, `task is already ${t.status}`);
+      // Its work is done and paid for: a kill would only end a finished task as stopped, while the unwind already sends
+      // the money back.
+      if (t.final_result) throw new HttpError(409, 'the report is written; Rook is only returning the unspent USDC now, so there is nothing left to stop');
       kill(ledger, t);
       if (!chain) return taskView(t);
       const cmd = chain.killCommand(t.id, t.funder);

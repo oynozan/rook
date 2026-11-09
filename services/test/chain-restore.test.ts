@@ -745,6 +745,9 @@ test('a close that keeps failing after the report keeps the report and the task 
     const s = await snap(orch, id);
     assert.deepEqual([s.task.status, s.task.error, s.final_result.final_markdown], ['closing', null, 'final']); // paid for and passed: never thrown away
     assert.deepEqual([s.subtasks[0].status, s.ledger.closed], ['returned', false]);
+    // A Stop from a page that still shows the run can't end the finished task as stopped.
+    await assert.rejects(call(`${orch.url}/tasks/${id}/kill`, {}), (e: any) => e.status === 409 && /^the report is written; Rook is only returning the unspent USDC now/.test(e.message));
+    assert.equal((await snap(orch, id)).task.status, 'closing');
   } finally { await orch.close(); }
   const settle = () => new Promise((ok) => setTimeout(ok, 700)); // longer than the unwind's next two waits
   await settle(); // a close already sent at the shutdown lands
