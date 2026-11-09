@@ -300,7 +300,8 @@ A receipt is written for every paid hire (every `COMPLETED` task, and every send
 A conversation is a chain of tasks: each message after the first is a task whose `parent_id` is the conversation's newest task, with the same owner. A task without `parent_id` (the first message, every task from before conversations, the CLI's) starts one. A message acts on the conversation's head: the nearest task up the chain from the parent that is not a message that never got a plan to run (a reply that was not a task, a planner failure, a draft stopped while planning). Usually that is the parent; after "go ahead" under a plan failed as not a task, it is the plan, and once that plan runs from its button, the run. `POST /tasks` with `parent_id` answers 404 for a task that is not the caller's, and 409 with a sentence the web app shows as is:
 
 - the head is still planning: "Wait for the plan to be ready before sending more.";
-- the head is approved or its run is under way: "Wait for this run to finish, or stop it, before sending more.";
+- the head is approved with the chain ledger and not funded yet, so no run has started: "Fund or cancel the plan above before sending more.";
+- the head's run is under way: "Wait for this run to finish, or stop it, before sending more.";
 - the parent already has a follow-up: "This conversation has a newer message: reload the page and send from there." (so a conversation never branches, even from two tabs);
 - the parent has another owner (only the CLI, which names none, can hit this).
 

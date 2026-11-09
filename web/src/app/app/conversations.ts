@@ -55,9 +55,13 @@ export function currentTask(chain: TaskSummary[]): TaskSummary {
 
 const RUNNING = new Set(['approved', 'funded', 'running', 'aggregating', 'closing']);
 
-/** Why nothing can be sent after a task in this status yet, in the orchestrator's words (it refuses the same); null when a message can go. */
-export function waitReason(status: string): string | null {
+/**
+ * Why nothing can be sent after a task in this status yet, in the orchestrator's words (it refuses the same); null when
+ * a message can go. `chain`: the chain ledger, where an approved plan waits for its funding and no run has started.
+ */
+export function waitReason(status: string, chain = false): string | null {
   if (status === 'draft') return 'Wait for the plan to be ready before sending more.';
+  if (status === 'approved' && chain) return 'Fund or cancel the plan above before sending more.';
   if (RUNNING.has(status)) return 'Wait for this run to finish, or stop it, before sending more.';
   return null;
 }
@@ -82,10 +86,10 @@ export function outgoing(prompt: string, budget: string, current: TaskSummary | 
   return usdc ? sameTaskAt(usdc) : '';
 }
 
-/** The composer's placeholder in a conversation: what sending does there. */
-export function placeholderFor(current: TaskSummary | null, budget: string): string {
+/** The composer's placeholder in a conversation: what sending does there. `chain` as in waitReason. */
+export function placeholderFor(current: TaskSummary | null, budget: string, chain = false): string {
   if (!current) return 'Ask a follow-up';
-  const wait = waitReason(current.status);
+  const wait = waitReason(current.status, chain);
   if (wait) return wait;
   const usdc = changedBudget(budget, current);
   if (current.status === 'planned') return usdc ? `Send to revise the plan at ${usdc} USDC, or say what to change` : 'Change the plan, or ask a follow-up';

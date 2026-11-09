@@ -70,7 +70,7 @@ export function draftRefusal(message: string): { prompt?: string; budget?: strin
  * written for people), has moved on, or isn't this account's. Null for any other refusal.
  */
 export function followUpRefusal(status: number, message: string): string | null {
-  if (status === 409 && /^(Wait for |This conversation has a newer message)/.test(message)) return message;
+  if (status === 409 && /^(Wait for |Fund or cancel |This conversation has a newer message)/.test(message)) return message;
   if (status === 404 && /^no task /.test(message)) return "Rook has no task at this link for the wallet you're signed in with.";
   return null;
 }

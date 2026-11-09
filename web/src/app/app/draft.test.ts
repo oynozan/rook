@@ -57,7 +57,7 @@ test('draftRefusal: the orchestrator 400s about the budget or the prompt land on
 
 test('followUpRefusal: a message the orchestrator refuses because of the task it follows', () => {
   for (const m of ['Wait for the plan to be ready before sending more.', 'Wait for this run to finish, or stop it, before sending more.',
-    'This conversation has a newer message: reload the page and send from there.']) assert.equal(followUpRefusal(409, m), m);
+    'Fund or cancel the plan above before sending more.', 'This conversation has a newer message: reload the page and send from there.']) assert.equal(followUpRefusal(409, m), m);
   assert.equal(followUpRefusal(404, 'no task t_1234abcd'), "Rook has no task at this link for the wallet you're signed in with.");
   assert.equal(followUpRefusal(409, 'task t_1 has another owner: a follow-up keeps its owner'), null); // the web always sends the owner
   assert.equal(followUpRefusal(400, 'Wait for it'), null);

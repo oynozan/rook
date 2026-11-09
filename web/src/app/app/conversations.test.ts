@@ -64,6 +64,10 @@ test('nothing goes while the task it follows is planning or running, in the orch
   assert.equal(waitReason('draft'), 'Wait for the plan to be ready before sending more.');
   for (const s of ['approved', 'funded', 'running', 'aggregating', 'closing']) assert.equal(waitReason(s), 'Wait for this run to finish, or stop it, before sending more.', s);
   for (const s of ['planned', 'closed', 'failed', 'cancelled', 'killed']) assert.equal(waitReason(s), null, s);
+  // The chain ledger: an approved plan waits for its funding, and no run has started.
+  assert.equal(waitReason('approved', true), 'Fund or cancel the plan above before sending more.');
+  assert.equal(waitReason('running', true), 'Wait for this run to finish, or stop it, before sending more.');
+  assert.equal(placeholderFor(task('a', 1, { status: 'approved' }), '3.00', true), 'Fund or cancel the plan above before sending more.');
 });
 
 test('a changed budget alone asks for the same task at that budget; typed words go as typed', () => {
