@@ -58,7 +58,6 @@ function useTask(id: string | null): Loaded {
     setProblem(null);
     if (!id) return;
     refetch();
-    const source = new EventSource(`/api/tasks/${encodeURIComponent(id)}/events`);
     const seen = new Set<number>();
     let ended = false; // the task reached a terminal status
     const types = ['task_status', 'planning', 'plan', 'quote_rejected', 'hire_sent', 'a2a_state', 'evaluation', 'security_alert', 'ledger', 'receipt', 'final', 'error'];
@@ -74,11 +73,30 @@ function useTask(id: string | null): Loaded {
       if (e.type === 'task_status' && TERMINAL.has(e.data.to)) ended = true;
       if (e.type === 'task_status' || e.type === 'final' || (ended && e.type === 'ledger')) refetch();
     };
-    types.forEach((t) => source.addEventListener(t, onEvent as EventListener));
-    // The stream ends after the terminal status, or in chain mode once a killed or failed task's money is back. Stop
-    // there, or EventSource reconnects forever. (Rook's own 'error' events arrive while the connection is OPEN.)
-    source.addEventListener('error', () => { if (ended && source.readyState !== EventSource.OPEN) { source.close(); refetch(); } });
-    return () => source.close();
+    let source: EventSource | null = null;
+    let retry: ReturnType<typeof setTimeout> | undefined;
+    let delay = 1000;
+    let gone = false; // this page left the task
+    const open = () => {
+      const es = new EventSource(`/api/tasks/${encodeURIComponent(id)}/events`);
+      source = es;
+      types.forEach((t) => es.addEventListener(t, onEvent as EventListener));
+      es.addEventListener('open', () => { delay = 1000; });
+      es.addEventListener('error', () => {
+        // The stream ends after the terminal status, or in chain mode once a killed or failed task's money is back. Stop
+        // there, or EventSource reconnects forever. (Rook's own 'error' events arrive while the connection is OPEN.)
+        if (ended && es.readyState !== EventSource.OPEN) { es.close(); refetch(); return; }
+        // Any reply but 200 (the services restarting answer 503) closes an EventSource for good: open a new one, with
+        // backoff. It replays from the start, and `seen` drops what this page already has.
+        if (es.readyState === EventSource.CLOSED && !gone) {
+          refetch();
+          retry = setTimeout(open, delay);
+          delay = Math.min(delay * 2, 15_000);
+        }
+      });
+    };
+    open();
+    return () => { gone = true; clearTimeout(retry); source?.close(); };
   }, [id, refetch]);
 
   // Chain mode: the indexer shows a payment's transaction up to a minute after its receipt, often after the stream
