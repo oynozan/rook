@@ -523,6 +523,28 @@ test('a message is refused while the task it follows is planning or running, aft
   assert.equal((await snap(running.id)).task.replaced_by, null);
 });
 
+test("a total budget the message names becomes the task's budget, within the limits; one out of range ends the draft with the reason", async () => {
+  const named = (budget_atomic: string, reserve_atomic: string, reserve_bps: number) => ({
+    ...holdersPlan(), budget: { budget_atomic, reserve_atomic, reserve_bps, allocatable_atomic: String(BigInt(budget_atomic) - BigInt(reserve_atomic)), allocated_atomic: '300000', from_message: true },
+  });
+  plan = named('1500000', '1200000', 8000);
+  const first = await call(`${orch.url}/tasks`, { prompt: 'Holders of NEAR, make it 1.5 USDC', budget_usdc: '3', owner: 'erin.near' });
+  assert.deepEqual([first.status, first.budget_atomic, first.reserve_share], ['planned', '1500000', 0.8]);
+  // The planner got the budget sent with the message, and the contract's minimum (none with the sim ledger).
+  assert.deepEqual([planRequests.at(-1).budget_atomic, planRequests.at(-1).min_budget_atomic], ['3000000', '0']);
+  assert.equal((await call(`${orch.url}/tasks?owner=erin.near`)).tasks[0].budget_atomic, '1500000');
+  await call(`${orch.url}/tasks/${first.id}/approve`, { owner: 'erin.near' });
+  const ran = await ended(first.id);
+  assert.equal(ran.task.status, 'closed', ran.task.error);
+  assert.equal(ran.ledger.budget_atomic, '1500000'); // the run's books hold the named budget
+
+  // Out of range (a planner that didn't check): the draft fails with the reason and keeps the budget it was sent with.
+  plan = named('60000000', '1200000', 8000);
+  const big = await call(`${orch.url}/tasks`, { prompt: 'Holders of NEAR for 60 USDC', budget_usdc: '3', owner: 'erin.near' });
+  assert.deepEqual([big.status, big.error, big.budget_atomic, big.plan],
+    ['failed', 'Your message asks for a budget of 60.00 USDC, but the most Rook takes is 50.00 USDC.', '3000000', null]);
+});
+
 test('the conversation sent to the planner keeps the first and the newest messages, and the newest report cut to size', async () => {
   const { conversationFor } = await import('../src/orchestrator/index.ts');
   const { newTask } = await import('../src/orchestrator/store.ts');

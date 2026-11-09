@@ -113,7 +113,8 @@ function printPlan(task: any) {
     for (const n of p.notes) console.log(`  - ${n}`);
   }
   const b = p.budget;
-  console.log(`${bold('Budget')} ${usdc(b.budget_atomic)} = reserve ${usdc(b.reserve_atomic)} + allocatable ${usdc(b.allocatable_atomic)}; caps allocated ${bold(usdc(b.allocated_atomic))}`);
+  // A total the prompt names ("... for 2 USDC") is planned at instead of --budget.
+  console.log(`${bold('Budget')} ${usdc(b.budget_atomic)}${b.from_message ? dim(' (named in the prompt)') : ''} = reserve ${usdc(b.reserve_atomic)} + allocatable ${usdc(b.allocatable_atomic)}; caps allocated ${bold(usdc(b.allocated_atomic))}`);
   const cost = (p.llm_calls ?? []).reduce((x: number, c: any) => x + (c.cost_usd ?? 0), 0);
   console.log(`${bold('LLM')} ${p.llm_calls?.length ?? 0} calls, ${cost.toFixed(4)} USD (planning)`);
   console.log(`${bold('Task id')} ${task.id}`);

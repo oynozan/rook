@@ -3,7 +3,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { config, MAX_PROMPT_CHARS } from '../shared/config.ts';
 import { bigintReplacer, call, HttpError, serve, type Ctx, type Routes, type Running } from '../shared/http.ts';
-import { formatUsdc, parseUsdc } from '../shared/money.ts';
+import { formatUsdc, namedBudgetProblem, parseUsdc } from '../shared/money.ts';
 import { CONVERSATION_MESSAGES, CONVERSATION_REPORT_CHARS, type AgentHistory, type Conversation, type Plan, type RookEvent, type X402Config } from '../shared/types.ts';
 import { attack } from './attack.ts';
 import { createChainLedger } from './chain-ledger.ts';
@@ -41,14 +41,15 @@ export function conversationFor(chain: Task[], revises: Task | null): Conversati
 /**
  * Asks the planner for a plan, relaying its progress lines as `planning` events. A planner that answers with plain
  * JSON (an older one, or a test double) still works: there is just no progress to relay. `history`: Rook's own
- * verdicts per agent, which the planner ranks candidates with.
+ * verdicts per agent, which the planner ranks candidates with. `min`: the contract's smallest budget, which a total
+ * the message names must meet too.
  */
-async function planWithProgress(t: Task, history: Record<string, AgentHistory>, conversation?: Conversation): Promise<Plan> {
+async function planWithProgress(t: Task, history: Record<string, AgentHistory>, min: bigint, conversation?: Conversation): Promise<Plan> {
   emit(t, 'planning', { stage: 'drafting' });
   const r = await fetch(config.urls.planner + '/plan', {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/x-ndjson, application/json' },
-    body: JSON.stringify({ task_id: t.id, prompt: t.prompt, budget_atomic: t.budget_atomic, reserve_share: t.reserve_share, history, conversation }),
+    body: JSON.stringify({ task_id: t.id, prompt: t.prompt, budget_atomic: t.budget_atomic, reserve_share: t.reserve_share, min_budget_atomic: min.toString(), history, conversation }),
     signal: t.abort.signal,
   });
   if (!(r.headers.get('content-type') ?? '').includes('ndjson')) {
@@ -204,8 +205,19 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         try {
           // A kill during planning aborts the wait. ponytail: the planner does not watch the disconnect, so its LLM
           // calls for this plan still finish (and are not in this task's cost).
-          const plan = await planWithProgress(t, verdictHistory(tasks.values()), conversation);
+          const plan = await planWithProgress(t, verdictHistory(tasks.values()), min, conversation);
           if (isTerminal(t.status)) return;
+          if (plan.budget.from_message) {
+            // The total the message names ("make it 1 USDC", 5.1) is the task's budget, within the same limits as one sent.
+            const problem = namedBudgetProblem(BigInt(plan.budget.budget_atomic), min, max);
+            if (problem) {
+              t.error = problem;
+              emit(t, 'error', { kind: 'planner', message: problem });
+              setStatus(t, 'failed');
+              return;
+            }
+            t.budget_atomic = plan.budget.budget_atomic;
+          }
           setPlan(t, plan);
           emit(t, 'plan', plan);
           if (!plan.subtasks.length) {
