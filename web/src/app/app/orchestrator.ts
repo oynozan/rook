@@ -36,6 +36,8 @@ export type Mode = {
 export type PlanView = {
   subtasks: {
     id: string; title: string; brief?: string; cap_atomic: string; deadline_s?: number; self_do: boolean;
+    /** Why a self_do subtask is Rook's own: no agent fits it, or the ones found cost more than the budget allows. Older plans leave it out. */
+    self_do_reason?: 'no_agent' | 'over_budget';
     criteria: { id: string; description: string }[];
     candidates: Candidate[];
   }[];

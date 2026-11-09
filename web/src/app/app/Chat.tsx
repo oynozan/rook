@@ -17,6 +17,7 @@ import {
 import { explorerTx, NETWORK, rpcFor, type Network } from './network';
 import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary } from './orchestrator';
 import { useMode } from './mode';
+import { allSelfDoWhy, selfDoWhy } from './planner';
 import { useEase } from './useEase';
 import { useWallet, WalletAccountMismatch } from './wallet';
 
@@ -194,7 +195,7 @@ function Reveal({ open, children }: { open: boolean; children: ReactNode }) {
 function CapLabel({ subtask: s, usage }: { subtask: PlanView['subtasks'][number]; usage?: LedgerSub }) {
   const topped = usage ? BigInt(usage.topped_up_atomic) : 0n;
   return (
-    <span title={s.self_do ? 'No agent is hired: Rook does this part with its own model' : usage ? 'Spent of this subtask\'s cap, plus any top-up from the reserve' : undefined}
+    <span title={s.self_do ? selfDoWhy(s.self_do_reason) : usage ? 'Spent of this subtask\'s cap, plus any top-up from the reserve' : undefined}
       className={`shrink-0 pl-3 text-sm text-ink/65 sm:pl-0 ${s.self_do ? '' : 'font-mono tabular-nums'}`}>
       {s.self_do ? 'Rook does this' : usage ? `${usdc(usage.spent_atomic)} of ${usdc(usage.cap_atomic)}${topped > 0n ? ` +${usdc(topped)} reserve` : ''}` : `Cap ${usdc(s.cap_atomic)}`}
     </span>
@@ -219,6 +220,8 @@ function PlanRow({ subtask: s, usage }: { subtask: PlanView['subtasks'][number];
       </button>
       <Reveal open={open}>
         <div className="px-4 pt-1 pb-4 pl-8 text-ink/80">
+          {/* The label's tooltip says the same, but a phone shows no tooltips. */}
+          {s.self_do && <p className="mb-3 text-sm text-ink/65">{selfDoWhy(s.self_do_reason)}</p>}
           {s.brief && (
             // The planner's own words for the agent; plain text, never markup.
             <details className="mb-3">
@@ -1049,7 +1052,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
         <RookMessage>
           {free ? (
             <p>
-              Here&apos;s the plan. No agent on the market fits these parts, so Rook does them all itself with its own model.
+              Here&apos;s the plan. {allSelfDoWhy(plan.subtasks.map((s) => s.self_do_reason))}{' '}
               Nothing is hired, so nothing is paid and nothing leaves your wallet.{task.status === 'cancelled' && ' You cancelled it.'}
             </p>
           ) : (
