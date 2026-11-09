@@ -260,6 +260,12 @@ test("the draft, self-do and aggregate prompts state today's date in UTC", async
   assert.match(drafted[1].content, /Today is 2026-11-09 \(UTC\)\. Anything current, recent or "latest"/);
   assert.match(selfDone[0].content, /Today is 2026-11-09 \(UTC\)/);
   assert.match(merged[0].content, /Today is 2026-11-09 \(UTC\)/);
+  // Today's date never replaces one the user or a deliverable gave: "NEAR grants in 2025" stays 2025, and an as-of
+  // date in a paid deliverable stays as the agent wrote it.
+  assert.match(drafted[1].content, /A year or date the user names stays as written; only a request for what is current or latest is dated today\./);
+  assert.doesNotMatch(drafted[1].content, /never scope a brief to an earlier year/);
+  assert.match(merged[0].content, /If the report shows its own date, use this one; never change a date a deliverable states\./);
+  assert.doesNotMatch(merged[0].content, /wherever the report states one/);
 });
 
 test("the aggregate prompt names Rook's own work as Rook, never by its internal handle", async () => {

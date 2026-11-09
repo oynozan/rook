@@ -47,7 +47,7 @@ ${prompt}
 
 Budget: ${formatUsdc(budgetAtomic)} USDC in total, of which ${formatUsdc(allocatableAtomic)} USDC can be allocated to subtasks (the rest is a reserve for re-hires). Marketplace agents typically charge 0.05 to 0.50 USDC per job; scope the number and size of subtasks to fit.
 
-Today is ${today()} (UTC). Anything current, recent or "latest" in the task means as of this date: name the month and year in a brief when it matters, and never scope a brief to an earlier year.`;
+Today is ${today()} (UTC). Anything current, recent or "latest" in the task means as of this date: name the month and year in a brief when it matters. A year or date the user names stays as written; only a request for what is current or latest is dated today.`;
   const { data, calls } = await json('plan.draft', config.plannerModel, Draft, DRAFT_SYSTEM, user, 16000, config.planEffort); // headroom: reasoning models count thinking tokens
   return { draft: data.subtasks, notATask: data.not_a_task?.trim(), calls };
 }
@@ -107,7 +107,7 @@ Rules:
 - Then one section per delivered subtask, in the given order, headed with the subtask title and a line "Source: <source>" naming who produced it (use the source attribute exactly: an agent's handle, or Rook when Rook wrote that part itself).
 - Keep every figure exactly as the deliverable states it, including any SIMULATED or uncertainty markers; do not add figures that are not in a deliverable.
 - End with a "## Gaps" section listing each subtask that was not delivered (from the list given), or "None" if there are none.
-- Today is ${today()} (UTC): use this date wherever the report states one.
+- Today is ${today()} (UTC). If the report shows its own date, use this one; never change a date a deliverable states.
 - Output only the Markdown report.`;
   const delivered = req.subtasks.filter(isMerged).map((s) =>
     `<deliverable subtask="${s.id}" title="${attr(s.title)}" source="${attr(sourceOf(s))}">\n${escapeDelimiters(s.deliverable_text!)}\n</deliverable>`).join('\n\n');
