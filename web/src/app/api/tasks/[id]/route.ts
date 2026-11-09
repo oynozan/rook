@@ -1,6 +1,6 @@
 import { fundingSent } from '@/app/app/db';
 import { currentAccount } from '@/app/app/session';
-import { getTask, OrchestratorDown } from '@/app/app/orchestrator';
+import { getTask, OrchestratorDown, OrchestratorError } from '@/app/app/orchestrator';
 
 /** One task, only for the account that owns it. Anyone else gets 404, as if it didn't exist. */
 export async function GET(_: Request, { params }: { params: Promise<{ id: string }> }) {
@@ -11,8 +11,11 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
   try {
     snap = await getTask(id, account);
   } catch (e) {
-    if (e instanceof OrchestratorDown) return Response.json({ error: 'services are not running' }, { status: 503 });
-    return Response.json({ error: `no task ${id}` }, { status: 404 });
+    // Only the orchestrator's 404 means no such task. Anything else (down, ROOK_SERVICE_TOKEN differs, a 500): the page
+    // says the services are unreachable and tries again.
+    if (e instanceof OrchestratorError && e.status === 404) return Response.json({ error: `no task ${id}` }, { status: 404 });
+    if (!(e instanceof OrchestratorDown)) console.error(`[web] task ${id}:`, e instanceof Error ? e.message : e);
+    return Response.json({ error: 'services are unreachable' }, { status: 503 });
   }
   if (snap.task.owner !== account) return Response.json({ error: `no task ${id}` }, { status: 404 });
   // A funding transfer already sent from this account's wallet, so the page offers "confirm" rather than a second
