@@ -10,6 +10,7 @@ import { WebSearch, type WebSource } from '@/components/ui/web-search';
 import { approve, cancel, confirmFunding, draftTask, forgetTransfer, fundingRefunded, rememberTransfer, stop } from './actions';
 import { go } from './AppShell';
 import { Composer, type ComposerErrors } from './Composer';
+import { alertLine, problemLine, skipReason } from './feed';
 import {
   closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
   readCloseOutcome, readFundingOutcome, termsOf, txHashOf, whoseTransfer, type CloseResult, type Funding, type FundingResult, type Terms,
@@ -60,7 +61,7 @@ function useTask(id: string | null): Loaded {
     refetch();
     const seen = new Set<number>();
     let ended = false; // the task reached a terminal status
-    const types = ['task_status', 'planning', 'plan', 'quote_rejected', 'hire_sent', 'a2a_state', 'evaluation', 'security_alert', 'ledger', 'receipt', 'final', 'error'];
+    const types = ['task_status', 'subtask_status', 'planning', 'plan', 'quote_rejected', 'hire_sent', 'a2a_state', 'evaluation', 'security_alert', 'ledger', 'receipt', 'final', 'error'];
     const onEvent = (m: MessageEvent) => {
       // The browser fires its own 'error' event, with no data, when the connection drops or is refused (signed out,
       // not your task, services restarting). That shares a name with Rook's 'error' events, so skip anything empty.
@@ -817,19 +818,42 @@ function AgentSearch({ plan, planning, animate, onGrow, onDone }: { plan: PlanVi
 }
 
 type Now = { state: string; label: string; detail?: string };
-type FeedLine = { key: number; text: string; tone: 'normal' | 'muted' | 'alert'; now: Now; paid?: number; fromReserve?: number; started?: string; ended?: string };
+/**
+ * started/ended: an agent hired and done; writing/written: a part Rook does itself (its title). detail: the raw text
+ * behind a reworded line, as a tooltip. flag: an agent's delivery or quote was flagged (what "flagged" counts).
+ */
+type FeedLine = {
+  key: number; text: string; tone: 'normal' | 'muted' | 'alert'; now: Now; paid?: number; fromReserve?: number;
+  started?: string; ended?: string; writing?: string; written?: string; detail?: string; flag?: true;
+};
+/** What the feed needs from the plan: titles by subtask, the self_do ones, and whether no agent is hired at all. */
+type FeedContext = { titles: Map<string, string>; selfDo: Set<string>; free: boolean; simNote: string };
 
 /** Turns the run's events into plain lines. Agent text is never shown as instructions: only handles and Rook's verdicts. */
-function feedFrom(events: RookEvent[]): FeedLine[] {
+function feedFrom(events: RookEvent[], ctx: FeedContext): FeedLine[] {
   const lines: FeedLine[] = [];
   let receipt = 0;
   const hired = new Map<string | undefined, string>(); // subtask -> the agent its payment authorization is for
+  const tries = new Map<string, number>(); // self_do subtask -> times Rook started on it
+  const part = (id?: string) => (id && ctx.titles.get(id)) || 'this part';
   for (const { seq: key, type, data, subtask_id } of events) {
     const agent = data?.agent_handle;
+    const self = !!subtask_id && ctx.selfDo.has(subtask_id);
     if (agent && (type === 'hire_sent' || (type === 'ledger' && data.op === 'clearing'))) hired.set(subtask_id, agent);
     if (type === 'hire_sent') lines.push({ key, text: `Hired ${agent}, quoted ${usdc(data.amount_atomic)} USDC.`, tone: 'normal', started: agent, now: { state: 'researching', label: 'Hired', detail: agent } });
+    // Rook does a self_do part with its own model: no hire, so never "rook:self-do" or a hire's wording.
+    else if (type === 'subtask_status' && self && data.to === 'working') {
+      const n = (tries.get(subtask_id!) ?? 0) + 1;
+      tries.set(subtask_id!, n);
+      const title = part(subtask_id);
+      lines.push({ key, text: n === 1 ? `Rook is doing ${title} itself.` : `Rook is trying ${title} again.`, tone: 'normal', writing: title, now: { state: 'writing', label: 'Rook is working on', detail: title } });
+    }
+    else if (type === 'evaluation' && (self || agent === 'rook:self-do')) {
+      const title = part(subtask_id), pass = data.verdict === 'pass';
+      lines.push({ key, text: `Rook's own work on ${title} ${pass ? 'passed every check' : 'failed a check'}.`, tone: 'normal', written: title, now: { state: 'analyzing', label: pass ? 'Passed' : 'Failed a check', detail: title } });
+    }
     // Whether an unpaid hire cost anything is known only once its authorization is released (it can still land).
-    else if (type === 'a2a_state' && ['FAILED', 'REJECTED'].includes(data.state)) lines.push({ key, text: `${agent} didn't deliver.`, tone: 'normal', ended: agent, now: { state: 'analyzing', label: 'No delivery', detail: agent } });
+    else if (type === 'a2a_state' && ['FAILED', 'REJECTED', 'CANCELED'].includes(data.state)) lines.push({ key, text: `${agent} didn't deliver.`, tone: 'normal', ended: agent, now: { state: 'analyzing', label: 'No delivery', detail: agent } });
     else if (type === 'a2a_state' && data.state === 'TIMEOUT') lines.push({ key, text: `${agent} timed out.`, tone: 'normal', ended: agent, now: { state: 'analyzing', label: 'Timed out', detail: agent } });
     else if (type === 'ledger' && data.op === 'release' && data.settled === false) {
       const who = agent ?? hired.get(subtask_id);
@@ -837,19 +861,30 @@ function feedFrom(events: RookEvent[]): FeedLine[] {
     }
     else if (type === 'evaluation') {
       if (data.verdict === 'pass') lines.push({ key, text: `${agent} passed every check.`, tone: 'normal', ended: agent, now: { state: 'analyzing', label: 'Passed', detail: agent } });
-      else if (data.failed_criteria?.includes('injection')) lines.push({ key, text: `${agent}'s delivery tried to give Rook instructions. Flagged and rejected.`, tone: 'alert', ended: agent, now: { state: 'analyzing', label: 'Flagged', detail: agent } });
-      else lines.push({ key, text: `${agent} failed a check.`, tone: 'alert', ended: agent, now: { state: 'analyzing', label: 'Failed a check', detail: agent } });
-    } else if (type === 'security_alert' && data.source === 'quote') lines.push({ key, text: `Security alert: ${data.flag}`, tone: 'alert', now: { state: 'analyzing', label: 'Security alert' } });
-    else if (type === 'quote_rejected') lines.push({ key, text: `Skipped ${agent}: ${data.reason}`, tone: 'muted', now: { state: 'researching', label: 'Skipped', detail: agent } });
+      else if (data.failed_criteria?.includes('injection')) lines.push({ key, text: `${agent}'s delivery tried to give Rook instructions. Flagged and rejected.`, tone: 'alert', flag: true, ended: agent, now: { state: 'analyzing', label: 'Flagged', detail: agent } });
+      else lines.push({ key, text: `${agent} failed a check.`, tone: 'alert', flag: true, ended: agent, now: { state: 'analyzing', label: 'Failed a check', detail: agent } });
+    } else if (type === 'security_alert' && data.source === 'quote') lines.push({ key, text: alertLine(data.flag, agent), detail: data.flag, tone: 'alert', flag: true, now: { state: 'analyzing', label: 'Security alert' } });
+    else if (type === 'quote_rejected') lines.push({ key, text: `Skipped ${agent}: ${skipReason(data.reason)}.`, detail: data.reason, tone: 'muted', now: { state: 'researching', label: 'Skipped', detail: agent } });
     else if (type === 'ledger' && data.op === 'topUp') lines.push({ key, text: `Topped up ${usdc(data.amount_atomic)} USDC from the reserve.`, tone: 'muted', fromReserve: Number(data.amount_atomic), now: { state: 'analyzing', label: 'Topped up', detail: `${usdc(data.amount_atomic)} USDC` } });
     else if (type === 'receipt' && data.amount_atomic === '0') lines.push({ key, text: `Receipt ${++receipt}: ${agent} delivered, but no payment showed on chain, so nothing was paid.`, tone: 'muted', now: { state: 'analyzing', label: 'Unpaid', detail: agent } });
     else if (type === 'receipt') lines.push({ key, text: `Receipt ${++receipt}: paid ${usdc(data.amount_atomic)} USDC to ${agent}.`, tone: 'muted', paid: Number(data.amount_atomic), now: { state: 'analyzing', label: 'Paid', detail: agent } });
-    // Chain mode: what happens to the money after a kill, a failure or a restart (runner.ts unwind and restoreTask).
-    else if (type === 'ledger' && data.op === 'kill') lines.push({ key, text: data.human_action ? `Stopped. ${data.human_action}` : 'Stopped. No new payments.', tone: 'muted', now: { state: 'analyzing', label: 'Stopped' } });
+    // What happens to the money after a kill, a failure or a restart (runner.ts unwind and restoreTask). Older kill
+    // events carried a near-cli command (human_action) for the funder: never shown, the unwind refunds on its own.
+    else if (type === 'ledger' && data.op === 'kill') {
+      const text = ctx.free ? 'Stopped.' : data.returning || data.human_action
+        ? "Stopped. Rook pays no more agents and is sending what's left back to your wallet."
+        : 'Stopped. Rook pays no more agents.';
+      lines.push({ key, text, tone: 'muted', now: { state: 'analyzing', label: 'Stopped' } });
+    }
     else if (type === 'ledger' && data.op === 'clearing') lines.push({ key, text: `Waiting for ${data.agent_handle ?? 'an agent'}'s payment authorization to ${data.how === 'terminal' ? 'clear' : 'settle or expire'} before returning its funds.`, tone: 'muted', now: { state: 'analyzing', label: 'Clearing', detail: data.agent_handle ?? undefined } });
     else if (type === 'ledger' && data.op === 'restored') lines.push({ key, text: `Rook restarted and picked this task up again from contract task ${data.contract_task_id}.`, tone: 'muted', now: { state: 'analyzing', label: 'Restored' } });
-    else if (type === 'ledger' && data.op === 'closeTask' && data.amount_atomic != null) lines.push({ key, text: `Closed the budget: ${usdc(data.amount_atomic)} USDC went back to the funder.`, tone: 'muted', now: { state: 'analyzing', label: 'Closed' } });
-    else if (type === 'error') lines.push({ key, text: `Problem: ${data.message}`, tone: 'alert', now: { state: 'analyzing', label: 'Problem' } });
+    // A plan that hires no agent held no money: no budget to close, nothing refunded.
+    else if (type === 'ledger' && data.op === 'closeTask' && data.amount_atomic != null && !ctx.free) lines.push({ key, text: `Closed the budget: ${usdc(data.amount_atomic)} USDC went back to your wallet${ctx.simNote}.`, tone: 'muted', now: { state: 'analyzing', label: 'Closed' } });
+    // Rook's own errors: plain words, the raw text as a tooltip, never counted as an agent's flag.
+    else if (type === 'error') {
+      const p = problemLine(data ?? {}, subtask_id && ctx.titles.get(subtask_id));
+      if (p) lines.push({ key, text: p.text, tone: p.tone, detail: data?.message, ...(self && p.tone === 'alert' ? { written: part(subtask_id) } : {}), now: { state: 'analyzing', label: p.label } });
+    }
   }
   return lines;
 }
@@ -862,23 +897,26 @@ const STOPPED = (
 const RUN_STATES = { stopped: { label: 'Stopped', active: false, icon: STOPPED } };
 
 /** Collapsed to one line that says what is happening now; the full list is one click away. */
-function Activity({ lines, live, caughtUp, closing, outcome, timed }: { lines: FeedLine[]; live: boolean; caughtUp: boolean; closing: boolean; outcome: string; timed: boolean }) {
+function Activity({ lines, live, caughtUp, closing, outcome, timed, free }: { lines: FeedLine[]; live: boolean; caughtUp: boolean; closing: boolean; outcome: string; timed: boolean; free: boolean }) {
   const [open, setOpen] = useState(false);
   const latest = lines[lines.length - 1];
-  const working = new Set<string>();
+  const working = new Set<string>(), writing = new Set<string>();
   for (const l of lines) {
     if (l.started) working.add(l.started);
     if (l.ended) working.delete(l.ended);
+    if (l.writing) writing.add(l.writing);
+    if (l.written) writing.delete(l.written);
   }
-  const rejected = lines.filter((l) => l.tone === 'alert').length;
+  const rejected = lines.filter((l) => l.flag).length;
 
   let now: Now;
   if (!live) now = { state: outcome === 'killed' ? 'stopped' : outcome === 'failed' ? 'error' : 'done', label: '', detail: `${lines.length} step${lines.length === 1 ? '' : 's'}${rejected ? `, ${rejected} flagged` : ''}` };
   else if (!latest) now = { state: 'thinking', label: 'Starting the run' };
   else if (!caughtUp) now = latest.now;
   else if (closing) now = { state: 'writing', label: 'Combining the report' };
-  else if (working.size) now = { state: 'analyzing', label: 'Waiting on', detail: [...working].join(', ') };
-  else now = { state: 'researching', label: 'Lining up the next hire' };
+  else if (working.size) now = { state: 'analyzing', label: 'Waiting on', detail: [...working, ...(writing.size ? ['Rook'] : [])].join(', ') };
+  else if (writing.size) now = { state: 'writing', label: 'Rook is working on', detail: [...writing].join(', ') };
+  else now = free ? { state: 'writing', label: 'Rook is working' } : { state: 'researching', label: 'Lining up the next hire' };
 
   return (
     <div className="mt-2">
@@ -894,7 +932,7 @@ function Activity({ lines, live, caughtUp, closing, outcome, timed }: { lines: F
       </button>
       <Reveal open={open && lines.length > 0}>
         <ul className="mt-2 space-y-1.5 border-l-2 border-ink/10 pl-4">
-          {lines.map((l) => <li key={l.key} className={TONE[l.tone]}>{l.text}</li>)}
+          {lines.map((l) => <li key={l.key} className={TONE[l.tone]} title={l.detail}>{l.text}</li>)}
         </ul>
       </Reveal>
     </div>
@@ -970,7 +1008,9 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   const onAgentsDone = useCallback(() => { setRevealing(false); onRevealed(id); }, [id, onRevealed]);
 
   // Run updates roll in one at a time. A task that had already ended when opened is history, so it shows at once.
-  const feed = feedFrom(events);
+  const planned = snap?.plan?.subtasks ?? [];
+  const titles = new Map(planned.map((s) => [s.id, s.title]));
+  const feed = feedFrom(events, { titles, selfDo: new Set(planned.filter((s) => s.self_do).map((s) => s.id)), free, simNote: noMoney ? ' (simulated)' : '' });
   const planning = planningFrom(events);
   const [shown, setShown] = useState(0);
   const instant = useRef<boolean | null>(null);
@@ -1105,7 +1145,8 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
             </p>
             {!TERMINAL.has(task.status) && <ActionButton onClick={() => act('stop')} busy={busy === 'stop'} disabled={fundingBusy}>{busy === 'stop' ? 'Stopping…' : 'Stop'}</ActionButton>}
           </div>
-          <Activity lines={visible} live={live} caughtUp={caughtUp} closing={task.status === 'aggregating' || task.status === 'closing' || task.status === 'closed'} outcome={task.status} timed={!!timed.current} />
+          <Activity lines={visible} live={live} caughtUp={caughtUp} closing={task.status === 'aggregating' || task.status === 'closing' || task.status === 'closed'}
+            outcome={task.status} timed={!!timed.current} free={free} />
         </RookMessage>
       )}
 
