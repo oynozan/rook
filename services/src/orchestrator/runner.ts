@@ -189,7 +189,7 @@ async function unpaidHow(hire: Hire | null): Promise<'terminal' | 'wait'> {
  * gets booked with a receipt), returns every funded sub-account (/return, or mark_empty at 0), then closes the task so
  * the contract refunds the funder. Each sub-account clears and returns on its own, so one authorization that runs for
  * hours holds back only its own money; the close waits for all. Its events record after the terminal status.
- * `afterRun`: wait for the run's loops.
+ * `afterRun`: wait for the run's loops (a kill aborts their waits for the chain, so that is quick).
  */
 export async function unwind(ledger: Ledger, t: Task, why: string, afterRun = false): Promise<void> {
   if (t.unwinding) return t.unwinding;
@@ -209,6 +209,8 @@ export async function unwind(ledger: Ledger, t: Task, why: string, afterRun = fa
     await Promise.all(t.subtasks.map(async (s) => {
       if (authorizedNow(ledger, t, s)) {
         const hire = authHire(ledger, t, s); // never an older hire: its A2A state says nothing about this authorization
+        // The run stopped while this hire's send outcome was still being waited on (a kill cuts that wait short).
+        if (hire && !hire.ended_at) { hire.state = t.status === 'killed' ? 'KILLED' : 'CANCELED'; hire.ended_at = now(); }
         if (!chain && hire?.a2a_task_id) cancelBestEffort(hire.agent_handle, hire.a2a_task_id);
         const how = chain ? await unpaidHow(hire) : 'now';
         if (chain) emit(t, 'ledger', { op: 'clearing', n: s.n, how, agent_handle: hire?.agent_handle ?? null, expires_at: hire?.expires_at ?? null }, s.id);
@@ -365,7 +367,7 @@ async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Defer
   if (!pending && authorizedNow(ledger, t, s)) {
     // An authorization with no saved hire (stored before hires were saved ahead of /send): nothing else is signed for
     // this subtask until it lands or expires. Its agent and deliverable are unknown, so a landed payment only counts as spent.
-    const r = await ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n, 'wait'));
+    const r = await ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n, 'wait', signal));
     if (typeof r === 'object' && r.settled) emit(t, 'error', { message: 'a payment authorized before the restart, for a hire Rook has no record of, landed on chain; counted as spent' }, s.id);
   }
   for (;;) {
@@ -476,10 +478,13 @@ async function quote(ledger: Ledger, t: Task, s: Sub, c: Candidate): Promise<Acc
   return row;
 }
 
-/** Ends the hire unpaid; true when the chain shows the payment landed anyway, and then it counts as paid. */
+/**
+ * Ends the hire unpaid; true when the chain shows the payment landed anyway, and then it counts as paid. A kill stops
+ * the wait for the chain (the run's signal): unwind then clears that authorization on its own.
+ */
 async function endUnpaid(ledger: Ledger, t: Task, s: Sub, hire: Hire, how: 'terminal' | 'wait') {
   const r = await ledgerOp(t, 'release', s, async () => {
-    const out = await ledger.release(t.id, s.n, how);
+    const out = await ledger.release(t.id, s.n, how, t.abort.signal);
     if (typeof out === 'object' && out.settled) { hire.paid = true; hire.state = 'OUTCOME_UNKNOWN'; hire.ended_at = now(); }
     return out;
   }, { agent_handle: hire.agent_handle });
@@ -541,7 +546,7 @@ async function hire1(ledger: Ledger, t: Task, s: Sub, c: Candidate, row: Accepts
       // The gateway saw a 502 and cannot tell whether the payment settled: never release it as unpaid. In chain mode
       // settle waits for the chain's answer; booked unpaid (0) only when the payment never showed.
       const paid = await ledgerOp(t, 'settle', s, async () => {
-        const a = await ledger.settle(t.id, s.n);
+        const a = await ledger.settle(t.id, s.n, signal);
         if (a > 0n) { hire.paid = true; hire.state = 'OUTCOME_UNKNOWN'; } else hire.state = 'SEND_FAILED';
         hire.ended_at = now();
         return a;
@@ -616,8 +621,9 @@ async function follow(ledger: Ledger, t: Task, s: Sub, c: Candidate, hire: Hire,
   // Delivered: keep the deliverable before settling, so the settle event stores it with the payment.
   hire.parts = final.artifacts.flatMap((a) => a.parts ?? []);
   hire.deliverable_text = hire.parts.filter((p) => typeof p.text === 'string').map((p) => p.text).join('\n\n');
+  // A kill stops the wait for the facilitator: unwind then waits out this authorization on its own.
   const paid = await ledgerOp(t, 'settle', s, async () => {
-    const a = await ledger.settle(t.id, s.n);
+    const a = await ledger.settle(t.id, s.n, signal);
     hire.paid = a > 0n;
     return a;
   }, { agent_handle: c.handle, payment_hash: hire.payment_hash });
