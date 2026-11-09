@@ -2,7 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { recordFundingSent, takeDraftSlot } from './db';
-import type { Funding } from './funding';
+import { untilFinal, type Funding } from './funding';
 import { approveTask, cancelTask, createTask, fundedTask, getTask, killTask, OrchestratorDown } from './orchestrator';
 import { currentAccount } from './session';
 
@@ -87,5 +87,5 @@ export async function confirmFunding(id: string, input: { contract_task_id: stri
     return { ok: false, message: e instanceof OrchestratorDown ? DOWN : `No task ${id}.` };
   }
   recordFundingSent(id, owner, { contract_task_id: cid, tx_hash: tx });
-  return act(() => fundedTask(id, cid, owner));
+  return untilFinal(() => act(() => fundedTask(id, cid, owner)));
 }

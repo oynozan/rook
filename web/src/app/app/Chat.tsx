@@ -306,7 +306,12 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping }:
   const { network: modeNetwork } = useMode();
   const [phase, setPhase] = useState<'idle' | 'wallet' | 'reading' | 'confirming'>('idle');
   const [error, setError] = useState<string | null>(null);
-  const [pasted, setPasted] = useState<string | null>(null); // the wallet returned no outcome: ask for the hash
+  // A transfer may have gone out but can't be read: ask for its hash, and offer no second transfer (or Cancel) meanwhile.
+  const [pasted, setPasted] = useState<string | null>(null);
+  const [mayBeUnsent, setMayBeUnsent] = useState(false); // the wallet errored, so the owner may know nothing went out
+  // The transfer created a contract task: from then on this step only confirms it, before the server remembers it too.
+  const [made, setMade] = useState<TaskSnapshot['funding_sent']>(null);
+  const done = sent ?? made;
   const network = funding?.network ?? modeNetwork;
 
   async function confirm(cid: string, tx: string | null) {
@@ -314,20 +319,24 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping }:
     const out = await confirmFunding(id, { contract_task_id: cid, tx_hash: tx });
     setPhase('idle');
     if (out.ok) return onConfirmed();
-    setError(`Your transfer created contract task ${cid}, but Rook didn't start the run: ${out.message.replace(/\.?$/, '.')} The USDC stays in that contract task; the contract owner can close it (close_task) to refund it.`);
+    setError(`Rook didn't start the run: ${out.message.replace(/\.?$/, '.')} Your USDC is in contract task ${cid}. Confirm again to start it. If Rook still can't, the contract owner can close that contract task (close_task) to refund it.`);
   }
 
   const lookUp = (tx: string) => fetchTxOutcome(rpcFor(network), tx, wallet.account ?? '')
     .then((o) => readFundingOutcome(o, funding?.contract_id ?? ''), (): FundingResult => ({ kind: 'unknown' }));
 
   async function settle(result: FundingResult, tx: string | null) {
-    if (result.kind === 'created') return confirm(result.task_id, tx);
+    if (result.kind !== 'unknown') { setPasted(null); setMayBeUnsent(false); }
+    if (result.kind === 'created') {
+      setMade({ contract_task_id: result.task_id, tx_hash: tx });
+      return confirm(result.task_id, tx);
+    }
     setPhase('idle');
     if (result.kind === 'refunded') setError(`The Rook contract refused the transfer, so the USDC went back to your wallet: ${result.reason}`);
     else if (result.kind === 'failed') setError(`The transfer failed on NEAR, so no USDC left your wallet: ${result.reason}`);
     else {
-      setPasted(tx ?? '');
-      setError("Your wallet didn't say what the transfer did. Paste its transaction hash from your wallet's history so Rook can read it.");
+      setPasted(tx ?? pasted ?? '');
+      setError("Rook can't tell what the transfer did. Paste its transaction hash from your wallet's history so Rook can read it. Until then Rook won't offer the transfer again, so nothing is sent twice.");
     }
   }
 
@@ -341,7 +350,11 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping }:
     } catch (e) {
       setPhase('idle');
       const m = e instanceof Error ? e.message : String(e);
-      setError(e instanceof WalletAccountMismatch ? m : isWalletCancel(m) ? 'You cancelled the transfer in your wallet. Nothing was sent.' : `Your wallet couldn't send the transfer: ${m}`);
+      if (e instanceof WalletAccountMismatch) return setError(m); // checked before anything is signed
+      // A wallet can fail, or close, after it broadcast the transfer: an error doesn't show that nothing went out.
+      setPasted('');
+      setMayBeUnsent(true);
+      setError(`${isWalletCancel(m) ? 'Your wallet reports the transfer was stopped' : "Your wallet reported an error, so Rook can't tell whether the transfer went out"}: ${m.replace(/\.?$/, '.')} If you approved it there, paste its transaction hash from your wallet's history so Rook can read it. If nothing was sent, choose “Nothing was sent” to try again.`);
       return;
     }
     setPhase('reading');
@@ -360,16 +373,17 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping }:
 
   const busyLabel = { wallet: 'Confirm in your wallet…', reading: 'Reading the transaction…', confirming: 'Checking with Rook…' } as const;
 
-  // Already sent from this account's wallet (remembered by this web server): confirm it, never offer a second transfer.
-  if (sent) {
+  // Already sent from this account's wallet (remembered by this web server, or just read here): confirm it, never offer
+  // a second transfer.
+  if (done) {
     return (
       <div className="rounded-2xl border border-ink/15 p-4">
         <p>
-          Your wallet already sent the funding. It created contract task <span className="font-mono">{sent.contract_task_id}</span>
-          {sent.tx_hash && <> (<a href={explorerTx(network, sent.tx_hash)} target="_blank" rel="noopener noreferrer" className={LINK}>transaction</a>)</>}, and Rook hasn&apos;t started the run yet.
+          Your wallet already sent the funding. It created contract task <span className="font-mono">{done.contract_task_id}</span>
+          {done.tx_hash && <> (<a href={explorerTx(network, done.tx_hash)} target="_blank" rel="noopener noreferrer" className={LINK}>transaction</a>)</>}, and Rook hasn&apos;t started the run yet.
         </p>
         <div className="mt-4 flex flex-wrap gap-3">
-          <ActionButton primary onClick={() => confirm(sent.contract_task_id, sent.tx_hash)} busy={phase !== 'idle'}>{phase === 'idle' ? 'Confirm funding and start' : busyLabel[phase]}</ActionButton>
+          <ActionButton primary onClick={() => confirm(done.contract_task_id, done.tx_hash)} busy={phase !== 'idle'}>{phase === 'idle' ? 'Confirm funding and start' : busyLabel[phase]}</ActionButton>
         </div>
         {error && <p role="alert" className="mt-3 text-alert">{error}</p>}
       </div>
@@ -391,7 +405,7 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping }:
       <p className="font-medium">Fund this plan</p>
       <p className="mt-1">
         This moves {funding.network === 'mainnet' ? 'real USDC' : 'USDC test tokens'} on NEAR {funding.network}: {usdc(funding.amount_atomic)} USDC from your wallet to the Rook contract.
-        The contract pays each agent at most its cap, and refunds what isn&apos;t spent when the task closes.
+        Each subtask spends at most its cap plus what Rook tops up from the reserve, and the contract refunds what isn&apos;t spent when the task closes.
       </p>
       <dl className="mt-3 border-t border-ink/10 text-sm">
         <div className={row}><dt className="text-ink/65">Network</dt><dd>NEAR {funding.network}</dd></div>
@@ -413,10 +427,13 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping }:
         </p>
       )}
       <div className="mt-4 flex flex-wrap gap-3">
-        <ActionButton primary onClick={fund} busy={phase !== 'idle'} disabled={!terms || wrongNetwork || notOwner || !wallet.account}>
+        <ActionButton primary onClick={fund} busy={phase !== 'idle'} disabled={!terms || wrongNetwork || notOwner || !wallet.account || pasted !== null}
+          title={pasted !== null ? 'Rook can’t tell yet whether your first transfer went out' : undefined}>
           {phase === 'idle' ? `Fund ${usdc(funding.amount_atomic)} USDC with wallet` : busyLabel[phase]}
         </ActionButton>
-        <ActionButton onClick={onStop} busy={stopping}>{stopping ? 'Cancelling…' : 'Cancel'}</ActionButton>
+        <ActionButton onClick={onStop} busy={stopping} disabled={pasted !== null} title={pasted !== null ? 'Your wallet may have sent the funding: look the transaction up first' : undefined}>
+          {stopping ? 'Cancelling…' : 'Cancel'}
+        </ActionButton>
       </div>
       {pasted !== null && (
         <form className="mt-3 flex flex-wrap gap-2" onSubmit={(e) => { e.preventDefault(); void lookUpPasted(); }}>
@@ -424,6 +441,7 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping }:
           <input id={`tx-${id}`} value={pasted} onChange={(e) => setPasted(e.target.value)} placeholder="Transaction hash"
             className="min-h-11 min-w-0 flex-1 rounded-full bg-ink/5 px-4 font-mono text-sm outline-none focus:ring-2 focus:ring-accent/50" />
           <ActionButton onClick={() => void lookUpPasted()} busy={phase !== 'idle'}>Look it up</ActionButton>
+          {mayBeUnsent && <ActionButton onClick={() => { setPasted(null); setMayBeUnsent(false); setError(null); }}>Nothing was sent</ActionButton>}
         </form>
       )}
       {error && <p role="alert" className="mt-3 text-alert">{error}</p>}
@@ -515,11 +533,18 @@ type FeedLine = { key: number; text: string; tone: 'normal' | 'muted' | 'alert';
 function feedFrom(events: RookEvent[]): FeedLine[] {
   const lines: FeedLine[] = [];
   let receipt = 0;
-  for (const { seq: key, type, data } of events) {
+  const hired = new Map<string | undefined, string>(); // subtask -> the agent its payment authorization is for
+  for (const { seq: key, type, data, subtask_id } of events) {
     const agent = data?.agent_handle;
+    if (agent && (type === 'hire_sent' || (type === 'ledger' && data.op === 'clearing'))) hired.set(subtask_id, agent);
     if (type === 'hire_sent') lines.push({ key, text: `Hired ${agent}, quoted ${usdc(data.amount_atomic)} USDC.`, tone: 'normal', started: agent, now: { state: 'researching', label: 'Hired', detail: agent } });
-    else if (type === 'a2a_state' && ['FAILED', 'REJECTED'].includes(data.state)) lines.push({ key, text: `${agent} didn't deliver. No charge.`, tone: 'normal', ended: agent, now: { state: 'analyzing', label: 'No delivery', detail: agent } });
-    else if (type === 'a2a_state' && data.state === 'TIMEOUT') lines.push({ key, text: `${agent} timed out. No charge.`, tone: 'normal', ended: agent, now: { state: 'analyzing', label: 'Timed out', detail: agent } });
+    // Whether an unpaid hire cost anything is known only once its authorization is released (it can still land).
+    else if (type === 'a2a_state' && ['FAILED', 'REJECTED'].includes(data.state)) lines.push({ key, text: `${agent} didn't deliver.`, tone: 'normal', ended: agent, now: { state: 'analyzing', label: 'No delivery', detail: agent } });
+    else if (type === 'a2a_state' && data.state === 'TIMEOUT') lines.push({ key, text: `${agent} timed out.`, tone: 'normal', ended: agent, now: { state: 'analyzing', label: 'Timed out', detail: agent } });
+    else if (type === 'ledger' && data.op === 'release' && data.settled === false) {
+      const who = agent ?? hired.get(subtask_id);
+      lines.push({ key, text: `No charge${who ? ` for ${who}` : ''}: its payment authorization was released unpaid.`, tone: 'muted', now: { state: 'analyzing', label: 'No charge', detail: who } });
+    }
     else if (type === 'evaluation') {
       if (data.verdict === 'pass') lines.push({ key, text: `${agent} passed every check.`, tone: 'normal', ended: agent, now: { state: 'analyzing', label: 'Passed', detail: agent } });
       else if (data.failed_criteria?.includes('injection')) lines.push({ key, text: `${agent}'s delivery tried to give Rook instructions. Flagged and rejected.`, tone: 'alert', ended: agent, now: { state: 'analyzing', label: 'Flagged', detail: agent } });
@@ -681,7 +706,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
     refetch();
   }
 
-  if (problem === 'missing') return <RookMessage><p>This task isn&apos;t available anymore. Tasks are cleared when Rook&apos;s services restart.</p></RookMessage>;
+  if (problem === 'missing') return <RookMessage><p>Rook has no task at this link for the wallet you&apos;re signed in with. If another wallet drafted it, sign in with that one.</p></RookMessage>;
   if (problem === 'signin') return <RookMessage><p>Connect your wallet to see this task.</p></RookMessage>;
   if (problem === 'down' && !snap) return <RookMessage><p>Rook&apos;s services aren&apos;t running. Start them with pnpm dev, then refresh.</p></RookMessage>;
   if (!snap) return <RookMessage><Working label="Loading" /></RookMessage>;
@@ -724,19 +749,25 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
 
       {plan && !revealing && plan.subtasks.length > 0 && (
         <RookMessage>
-          <p>Here&apos;s the plan. The agents cost at most <span className="font-medium">{usdc(plan.budget.allocated_atomic)} USDC</span> together. {started ? 'You approved it.' : task.status === 'cancelled' ? 'You cancelled it, so nothing was spent.' : task.status === 'killed' ? 'You stopped it before it was funded, so nothing was spent.' : task.status === 'approved' ? 'You approved it. Nothing has been spent yet.' : 'Nothing has been spent.'}</p>
+          <p>
+            Here&apos;s the plan. The caps add up to <span className="font-medium">{usdc(plan.budget.allocated_atomic)} USDC</span>
+            {BigInt(plan.budget.reserve_atomic || 0) > 0n && <>, and up to {usdc(plan.budget.reserve_atomic)} USDC more can come from the reserve when a subtask needs more than its cap</>}.{' '}
+            {started ? 'You approved it.' : task.status === 'cancelled' ? 'You cancelled it, so nothing was spent.' : task.status === 'approved' ? 'You approved it. Nothing has been spent yet.' : task.status !== 'killed' ? 'Nothing has been spent.'
+              : snap.funding_sent ? <>You stopped it before Rook started the run, so no agent was paid. Your wallet&apos;s funding transfer is still in contract task <span className="font-mono">{snap.funding_sent.contract_task_id}</span>: the contract owner can refund it with close_task.</>
+              : 'You stopped it before Rook started the run, so no agent was paid.'}
+          </p>
           <PlanCard plan={plan} usage={usage} />
           {plan.dropped.length > 0 && <p className="mt-2 text-sm text-ink/65">Left out: {plan.dropped.map((d) => `${d.title} (${d.reason})`).join(', ')}</p>}
           {task.status === 'planned' && (
             <div className="rook-in mt-4 flex flex-wrap gap-3" style={{ animationDelay: `${250 + plan.subtasks.length * 90}ms` }}>
               <ActionButton primary onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account || paymentsOff} title={paymentsOff ? 'Paying live agents is not switched on yet' : wallet.account ? undefined : 'Connect your wallet first'}>
-                {busy === 'approve' ? (chain ? 'Preparing the transfer…' : 'Starting…') : noMoney && !paymentsOff ? 'Run simulation' : chain ? `Approve and fund ${usdc(task.budget_atomic)} USDC` : `Fund ${usdc(task.budget_atomic)} USDC and start`}
+                {busy === 'approve' ? (chain ? 'Preparing the transfer…' : 'Starting…') : paymentsOff ? 'Approve' : noMoney ? 'Run simulation' : chain ? `Approve and fund ${usdc(task.budget_atomic)} USDC` : `Fund ${usdc(task.budget_atomic)} USDC and start`}
               </ActionButton>
               <ActionButton onClick={() => act('cancel')} busy={busy === 'cancel'}>Cancel</ActionButton>
             </div>
           )}
           {task.status === 'planned' && !paymentsOff && noMoney && <p className="mt-2 text-sm text-ink/60">A simulated {usdc(task.budget_atomic)} USDC budget: nothing leaves your wallet and no agent is paid.</p>}
-          {task.status === 'planned' && !paymentsOff && !noMoney && <p className="mt-2 text-sm text-ink/60">Next, your wallet sends the {usdc(task.budget_atomic)} USDC budget to the Rook contract on NEAR {network}. It pays each agent at most its cap, and whatever isn&apos;t spent comes back to you.</p>}
+          {task.status === 'planned' && !paymentsOff && !noMoney && <p className="mt-2 text-sm text-ink/60">Next, your wallet sends the {usdc(task.budget_atomic)} USDC budget to the Rook contract on NEAR {network}. Each subtask spends at most its cap plus what Rook tops up from the reserve, and whatever isn&apos;t spent comes back to you.</p>}
           {task.status === 'planned' && paymentsOff && <p className="mt-2 text-sm text-ink/60">Live agents and prices. Paying them isn&apos;t switched on yet, so nothing can be spent.</p>}
         </RookMessage>
       )}

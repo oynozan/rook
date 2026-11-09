@@ -60,7 +60,14 @@ function failureText(status: unknown): string | null {
   return typeof exec === 'string' ? exec : JSON.stringify(f).slice(0, 300);
 }
 
-/** Reads what the funding transfer did. Only logs from receipts the contract itself executed count. */
+/** A receipt that ran to the end. NEAR keeps a failed receipt's logs, though its state changes were rolled back. */
+const succeeded = (status: unknown) => !!status && typeof status === 'object' && ('SuccessValue' in status || 'SuccessReceiptId' in status);
+
+/**
+ * Reads what the funding transfer did. Only logs from receipts the contract itself executed count, and task_created
+ * only from one that succeeded: create_task logs it before storing the task, so a receipt that failed after the log
+ * (out of storage NEAR, say) created nothing, and the token refunded the USDC.
+ */
 export function readFundingOutcome(outcome: unknown, contractId: string): FundingResult {
   const o = outcome as Outcome | null;
   if (!o || typeof o !== 'object' || !Array.isArray(o.receipts_outcome)) return { kind: 'unknown' };
@@ -68,7 +75,7 @@ export function readFundingOutcome(outcome: unknown, contractId: string): Fundin
   for (const r of o.receipts_outcome) {
     if (r.outcome?.executor_id !== contractId) continue;
     for (const log of r.outcome.logs ?? []) {
-      if (log.startsWith('EVENT_JSON:')) {
+      if (log.startsWith('EVENT_JSON:') && succeeded(r.outcome.status)) {
         let ev: any;
         try { ev = JSON.parse(log.slice('EVENT_JSON:'.length)); } catch { continue; }
         const d = ev?.standard === 'rook' && ev.event === 'task_created' && Array.isArray(ev.data) ? ev.data[0] : null;
@@ -102,6 +109,18 @@ export async function fetchTxOutcome(rpc: string, txHash: string, sender: string
     if (!/UNKNOWN_TRANSACTION|TIMEOUT_ERROR|HTTP 5/.test(last)) break;
   }
   throw new Error(`NEAR RPC could not find transaction ${txHash}: ${last}`);
+}
+
+/**
+ * The browser reads the transfer at EXECUTED_OPTIMISTIC; the orchestrator reads the contract at final, a block or two
+ * behind, so a contract task the transfer just created can look missing for a few seconds. Only that is retried.
+ */
+export async function untilFinal<T extends { ok: boolean; message?: string }>(run: () => Promise<T>, tries = 5, gapMs = 1500): Promise<T> {
+  for (let i = 1; ; i++) {
+    const out = await run();
+    if (out.ok || i >= tries || !/no contract task/.test(out.message ?? '')) return out;
+    await new Promise((ok) => setTimeout(ok, gapMs));
+  }
 }
 
 /** Closing the wallet or declining is a choice, not a failure. */
