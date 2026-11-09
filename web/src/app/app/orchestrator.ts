@@ -24,7 +24,7 @@ export type PlanView = {
   budget: { reserve_atomic: string; allocated_atomic: string };
 };
 
-export type TaskView = TaskSummary & { budget_atomic: string; error: string | null; plan: PlanView | null };
+export type TaskView = TaskSummary & { budget_atomic: string; error: string | null; owner: string | null; plan: PlanView | null };
 
 export type Receipt = { id: string; agent_handle: string; amount_atomic: string; verdict: 'pass' | 'fail' | null };
 
@@ -55,10 +55,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 const post = <T>(path: string, body: unknown = {}) =>
   request<T>(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
-export const listTasks = () => request<{ tasks: TaskSummary[] }>('/tasks').then((d) => d.tasks);
+// `owner` is always the signed-in account from the session (session.ts), never a value from the browser.
+export const listTasks = (owner: string) => request<{ tasks: TaskSummary[] }>(`/tasks?owner=${encodeURIComponent(owner)}`).then((d) => d.tasks);
 export const getMode = () => request<Mode>('/mode');
-export const createTask = (prompt: string, budget_usdc: string) => post<TaskView>('/tasks', { prompt, budget_usdc });
+// wait: false returns the draft task at once; planning continues and reports progress as `planning` events.
+export const createTask = (prompt: string, budget_usdc: string, owner: string) => post<TaskView>('/tasks', { prompt, budget_usdc, owner, wait: false });
 const taskPath = (id: string) => `/tasks/${encodeURIComponent(id)}`;
-export const approveTask = (id: string, funder_account: string) => post<TaskView & { funding?: unknown }>(`${taskPath(id)}/approve`, { funder_account });
-export const cancelTask = (id: string) => post<TaskView>(`${taskPath(id)}/cancel`);
-export const killTask = (id: string) => post<TaskView>(`${taskPath(id)}/kill`);
+export const getTask = (id: string) => request<TaskSnapshot>(taskPath(id));
+export const approveTask = (id: string, owner: string) => post<TaskView & { funding?: unknown }>(`${taskPath(id)}/approve`, { funder_account: owner, owner });
+export const cancelTask = (id: string, owner: string) => post<TaskView>(`${taskPath(id)}/cancel`, { owner });
+export const killTask = (id: string, owner: string) => post<TaskView>(`${taskPath(id)}/kill`, { owner });

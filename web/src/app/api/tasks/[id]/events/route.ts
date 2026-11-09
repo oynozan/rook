@@ -1,8 +1,17 @@
-import { ORCHESTRATOR } from '@/app/app/orchestrator';
+import { currentAccount } from '@/app/app/session';
+import { getTask, ORCHESTRATOR, OrchestratorDown } from '@/app/app/orchestrator';
 
-/** Passes the orchestrator's event stream through, resuming from Last-Event-ID when the browser reconnects. */
+/** Passes the orchestrator's event stream through for the task's owner, resuming from Last-Event-ID on reconnect. */
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
+  const account = await currentAccount();
+  if (!account) return new Response(null, { status: 401 });
+  try {
+    const snap = await getTask(id);
+    if (snap.task.owner !== account) return new Response(null, { status: 404 });
+  } catch (e) {
+    return new Response(null, { status: e instanceof OrchestratorDown ? 503 : 404 });
+  }
   const lastId = req.headers.get('last-event-id');
   try {
     const r = await fetch(`${ORCHESTRATOR}/tasks/${encodeURIComponent(id)}/events`, {

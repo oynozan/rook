@@ -109,7 +109,8 @@ export type Evaluation = {
 export type TaskStatus = 'draft' | 'planned' | 'approved' | 'funded' | 'running' | 'aggregating' | 'closing' | 'closed' | 'cancelled' | 'killed' | 'failed';
 export type SubtaskStatus = 'pending' | 'funded' | 'quoting' | 'working' | 'evaluating' | 'passed' | 'abandoned' | 'returned';
 export type EventType = 'task_status' | 'subtask_status' | 'plan' | 'quote' | 'quote_rejected' | 'hire_sent' | 'a2a_state'
-  | 'evaluation' | 'security_alert' | 'ledger' | 'receipt' | 'final' | 'error';
+  | 'evaluation' | 'security_alert' | 'ledger' | 'receipt' | 'final' | 'error'
+  | 'planning'; // progress while the plan is drafted: { stage: 'drafting' | 'searching' | 'found' | 'quoting', ... }
 export type RookEvent = { seq: number; ts: string; task_id: string; subtask_id?: string; type: EventType; data: any };
 // verdict and attestation_hash are null when a paid hire was never judged (kill or evaluator outage during evaluation,
 // or a payment whose outcome is unknown); a2a_task_id is null when the agent's task id was never learned.

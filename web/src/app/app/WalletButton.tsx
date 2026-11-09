@@ -67,7 +67,7 @@ export function AccountMenu({ account, onDisconnect }: { account: string; onDisc
 }
 
 export function WalletButton() {
-  const { connecting, failed, connect } = useWallet();
+  const { connecting, error, connect } = useWallet();
 
   return (
     <div className="relative flex flex-col items-end">
@@ -77,9 +77,9 @@ export function WalletButton() {
         disabled={connecting}
         className="inline-flex min-h-11 cursor-pointer items-center gap-[0.25em] rounded-full bg-accent px-4 text-base font-medium sm:min-h-13 sm:px-5 sm:text-[1.0625rem] whitespace-nowrap text-on-accent transition-colors duration-200 hover:bg-accent-hover focus-visible:bg-accent-hover active:translate-y-px disabled:cursor-wait disabled:bg-accent-hover motion-reduce:transition-none md:min-h-14 md:px-6.5 md:text-lg"
       >
-        {connecting ? 'Connecting…' : <>Connect <span className="max-[399px]:sr-only">NEAR</span> wallet</>}
+        {connecting ? 'Check your wallet…' : <>Connect <span className="max-[399px]:sr-only">NEAR</span> wallet</>}
       </button>
-      {failed && <p role="alert" className="absolute top-full mt-1 text-sm text-alert">Couldn&apos;t load wallets. Try again.</p>}
+      {error && <p role="alert" className="absolute top-full right-0 mt-1 w-max max-w-72 text-right text-sm text-alert">{error}</p>}
     </div>
   );
 }

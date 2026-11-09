@@ -36,6 +36,8 @@ Environment (export in your shell; keys never go in the repo, `.env` is git-igno
 | `NEAR_RPC_URL` | NEAR JSON-RPC endpoint. Required, no default, so nothing reaches a network by accident |
 | `NEAR_NETWORK` | `testnet` (default) or `mainnet`; x402 rows must say `near:<network>` |
 | `ROOK_CONTRACT_ID` | the deployed budget contract |
+| `ROOK_SESSION_SECRET` | web app: 32+ random characters that sign the sign-in cookie; required in production (development uses a per-process secret, so restarting `pnpm web` signs everyone out) |
+| `ROOK_DB` | orchestrator: SQLite file for tasks; `pnpm dev` uses `services/data/rook.sqlite`, empty keeps tasks in memory |
 | `ROOK_SIGNER_ACCOUNT`, `ROOK_SIGNER_KEY` | the contract's signer role and its function-call key (`ed25519:...`) limited to `register_subtask_key` |
 | `ROOK_SIGNER_KEY_DIR` | where sub-account keys are written (mode 0600), default `~/.rook/keys`; a directory inside the repo is refused |
 | `ROOK_ORCHESTRATOR_ACCOUNT`, `ROOK_ORCHESTRATOR_KEY` | the orchestrator role and its function-call key on `fund_subtask, top_up, record_receipt, close_task` |

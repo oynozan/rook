@@ -7,13 +7,52 @@ import type { Plan, RookEvent } from '../shared/types.ts';
 import { createChainLedger } from './chain-ledger.ts';
 import { createLedger, type Ledger } from './ledger.ts';
 import { kill, runTask } from './runner.ts';
-import { emit, isTerminal, newTask, setPlan, setStatus, snapshot, taskView, type Task } from './store.ts';
+import { openStore } from './db.ts';
+import { emit, fromDoc, isTerminal, newTask, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, type Task } from './store.ts';
 
 const CreateBody = z.object({
   prompt: z.string().trim().min(1),
   budget_usdc: z.union([z.string(), z.number()]),
   reserve_share: z.number().min(0).max(0.9).optional(),
+  owner: z.string().min(2).max(64).optional(), // set by the web app from a verified wallet sign-in
+  wait: z.boolean().optional(), // false: answer at once with the draft task and plan in the background (progress as events)
 });
+
+/**
+ * Asks the planner for a plan, relaying its progress lines as `planning` events. A planner that answers with plain
+ * JSON (an older one, or a test double) still works: there is just no progress to relay.
+ */
+async function planWithProgress(t: Task): Promise<Plan> {
+  emit(t, 'planning', { stage: 'drafting' });
+  const r = await fetch(config.urls.planner + '/plan', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', accept: 'application/x-ndjson, application/json' },
+    body: JSON.stringify({ task_id: t.id, prompt: t.prompt, budget_atomic: t.budget_atomic, reserve_share: t.reserve_share }),
+    signal: t.abort.signal,
+  });
+  if (!(r.headers.get('content-type') ?? '').includes('ndjson')) {
+    const j: any = await r.json().catch(() => null);
+    if (!r.ok) throw new HttpError(r.status, j?.error ?? `planner answered HTTP ${r.status}`, j?.details);
+    return j as Plan;
+  }
+  const reader = r.body!.pipeThrough(new TextDecoderStream()).getReader();
+  let buf = '';
+  for (;;) {
+    const { value, done } = await reader.read();
+    buf += value ?? '';
+    let nl: number;
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
+      if (!line) continue;
+      const m = JSON.parse(line);
+      if (m.type === 'progress') { const { type: _, ...p } = m; if (!isTerminal(t.status)) emit(t, 'planning', p); }
+      else if (m.type === 'plan') return m.plan as Plan;
+      else if (m.type === 'error') throw new HttpError(m.status ?? 502, m.error ?? 'planner failed', m.details);
+    }
+    if (done) throw new HttpError(502, 'planner ended without a plan');
+  }
+}
 
 export async function start(port = config.ports.orchestrator): Promise<Running> {
   const tasks = new Map<string, Task>();
@@ -25,6 +64,31 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     if (!t) throw new HttpError(404, `no task ${id}`);
     return t;
   };
+  // The web app passes the signed-in account as `owner`; someone else's task looks like no task at all. Callers that
+  // pass no owner (the CLI, on this machine) act on any task: the orchestrator only listens on localhost.
+  const owned = (id: string, owner: unknown) => {
+    const t = get(id);
+    if (typeof owner === 'string' && t.owner !== owner) throw new HttpError(404, `no task ${id}`);
+    return t;
+  };
+
+  // With ROOK_DB set, tasks survive restarts. A task that was mid-run cannot pick up where it left off (its in-flight
+  // hires and payment authorizations lived in memory), so it is marked failed with the reason. A plan waiting for
+  // approval carries on, and so does a chain-mode task waiting for its funding transaction.
+  const db = config.dbPath ? openStore(config.dbPath) : null;
+  if (db) {
+    for (const doc of db.load()) tasks.set(doc.id, fromDoc(doc));
+    persistWith((t) => { if (tasks.has(t.id)) db.save({ ...toDoc(t), ledger_saved: ledger.view(t.id) ?? t.ledger_saved ?? null }); });
+    for (const t of tasks.values()) {
+      const waiting = t.status === 'planned' || (chain !== null && t.status === 'approved');
+      if (isTerminal(t.status) || waiting) continue;
+      const was = t.status;
+      t.error = `Rook's services restarted while this task was ${was}, so it stopped there. Nothing more will be spent on it.`;
+      emit(t, 'error', { message: t.error });
+      setStatus(t, 'failed');
+    }
+    console.log(`[orchestrator] ${tasks.size} task${tasks.size === 1 ? '' : 's'} loaded from ${config.dbPath}`);
+  }
 
   const running = await serve('orchestrator', {
     'POST /tasks': async ({ body }) => {
@@ -32,38 +96,43 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       let budget: bigint;
       try { budget = parseUsdc(b.budget_usdc); } catch (e: any) { throw new HttpError(400, e.message); }
       if (budget <= 0n) throw new HttpError(400, 'budget_usdc must be positive');
-      const t = newTask(b.prompt, budget, b.reserve_share ?? 0.2);
+      const t = newTask(b.prompt, budget, b.reserve_share ?? 0.2, b.owner ?? null);
       tasks.set(t.id, t);
-      try {
-        // A kill during planning aborts the wait. ponytail: the planner does not watch the disconnect, so its LLM
-        // calls for this plan still finish (and are not in this task's cost).
-        const plan = await call<Plan>(config.urls.planner + '/plan', {
-          task_id: t.id, prompt: t.prompt, budget_atomic: t.budget_atomic, reserve_share: t.reserve_share,
-        }, { signal: t.abort.signal });
-        if (isTerminal(t.status)) return taskView(t);
-        setPlan(t, plan);
-        emit(t, 'plan', plan);
-        setStatus(t, 'planned');
-      } catch (e: any) {
-        if (isTerminal(t.status)) return taskView(t); // killed while planning: stays killed
-        t.error = `planner: ${e?.message ?? e}`;
-        emit(t, 'error', { message: t.error });
-        setStatus(t, 'failed');
-      }
+      saveTask(t);
+      const planning = (async () => {
+        try {
+          // A kill during planning aborts the wait. ponytail: the planner does not watch the disconnect, so its LLM
+          // calls for this plan still finish (and are not in this task's cost).
+          const plan = await planWithProgress(t);
+          if (isTerminal(t.status)) return;
+          setPlan(t, plan);
+          emit(t, 'plan', plan);
+          setStatus(t, 'planned');
+        } catch (e: any) {
+          if (isTerminal(t.status)) return; // killed while planning: stays killed
+          t.error = `planner: ${e?.message ?? e}`;
+          emit(t, 'error', { message: t.error });
+          setStatus(t, 'failed');
+        }
+      })();
+      if (b.wait === false) return taskView(t); // the caller follows along on /tasks/:id/events
+      await planning;
       return taskView(t);
     },
 
     /** Which market, model and ledger this orchestrator runs with, so a client can label things honestly. No secrets. */
     'GET /mode': () => ({ market: config.market, llm: config.llm, ledger: config.ledger, paying: config.ledger === 'chain' }),
 
-    'GET /tasks': () => ({
-      tasks: [...tasks.values()].map(({ id, status, prompt, created_at }) => ({ id, status, prompt, created_at })),
+    'GET /tasks': ({ query }) => ({
+      tasks: [...tasks.values()]
+        .filter((t) => !query.has('owner') || t.owner === query.get('owner'))
+        .map(({ id, status, prompt, created_at }) => ({ id, status, prompt, created_at })),
     }),
 
     'GET /tasks/:id': ({ params }) => snapshot(get(params.id), ledger),
 
     'POST /tasks/:id/approve': async ({ params, body }) => {
-      const t = get(params.id);
+      const t = owned(params.id, body?.owner);
       const reprint = chain && t.status === 'approved' && !chain.contractTaskOf(t.id); // funding instructions again
       if (t.status !== 'planned' && !reprint) throw new HttpError(409, `task is ${t.status}, approve needs planned`);
       if (!t.subtasks.length) throw new HttpError(409, 'the plan has no subtasks');
@@ -116,15 +185,15 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       }
     },
 
-    'POST /tasks/:id/cancel': ({ params }) => {
-      const t = get(params.id);
+    'POST /tasks/:id/cancel': ({ params, body }) => {
+      const t = owned(params.id, body?.owner);
       if (t.status !== 'planned') throw new HttpError(409, `task is ${t.status}, cancel needs planned`);
       setStatus(t, 'cancelled');
       return taskView(t);
     },
 
-    'POST /tasks/:id/kill': ({ params }) => {
-      const t = get(params.id);
+    'POST /tasks/:id/kill': ({ params, body }) => {
+      const t = owned(params.id, body?.owner);
       if (isTerminal(t.status)) throw new HttpError(409, `task is already ${t.status}`);
       kill(ledger, t);
       if (!chain) return taskView(t);
@@ -140,6 +209,8 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     close: async () => {
       for (const t of tasks.values()) if (!isTerminal(t.status)) t.abort.abort(new Error('orchestrator shutting down'));
       await running.close();
+      persistWith(null);
+      db?.close();
     },
   };
 }

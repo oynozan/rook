@@ -28,6 +28,8 @@ export const config = {
   get nearAiBase() { return env('NEARAI_BASE_URL', 'https://cloud-api.near.ai/v1'); },
   // Planner and evaluator calls are Rook's evidence; defaults are TEE-hosted models chosen by benchmark, see docs/model-choice.md.
   // Simulated agents need no signature.
+  // SQLite file for tasks; empty keeps them in memory only. scripts/service.ts sets a default for the real service.
+  get dbPath() { return env('ROOK_DB', ''); },
   get plannerModel() { return env('PLANNER_MODEL', 'z-ai/glm-5.3'); },
   // Reasoning effort for drafting the plan. 'medium' made GLM 5.3 think for ~12k tokens (most of a minute and ~90% of
   // the plan's cost); 'low' skips the thinking. Raise it if plans for complex tasks come out too shallow.

@@ -10,6 +10,8 @@ if (!NAMES.includes(name)) {
 if (process.env.ROOK_DEV_CHILD === '1') {
   process.stdin.on('close', () => process.exit(0)).on('end', () => process.exit(0)).resume();
 }
+// The real orchestrator keeps tasks across restarts; tests call start() directly and stay in memory.
+if (name === 'orchestrator') process.env.ROOK_DB ??= new URL('../data/rook.sqlite', import.meta.url).pathname;
 const { start } = await import(`../src/${name}/index.ts`);
 const r = await start();
 console.log(`listening on ${r.url}`);

@@ -18,7 +18,6 @@ import { useWallet } from './wallet';
 const TERMINAL = new Set(['closed', 'cancelled', 'killed', 'failed']);
 const usdc = (atomic: string | number | bigint) => (Number(atomic) / 1e6).toFixed(2);
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-const MIN_DRAFT_MS = 1100; // an instant plan reads as canned; real LLM drafts take longer than this anyway
 const LINE_MS = 420;
 const CATCH_UP_MS = 70; // a refresh mid-run replays history quickly, then returns to the live pace
 const AGENT_MS = 320; // agents land one at a time, then the plan they make up
@@ -28,7 +27,7 @@ const FOLLOW_HOLD_MS = 150; // after the reader scrolls up, how long scroll even
 
 // ---- loading one task ----
 
-type Loaded = { snap: TaskSnapshot | null; events: RookEvent[]; problem: 'missing' | 'down' | null; refetch: () => void };
+type Loaded = { snap: TaskSnapshot | null; events: RookEvent[]; problem: 'missing' | 'signin' | 'down' | null; refetch: () => void };
 
 function useTask(id: string | null): Loaded {
   const [snap, setSnap] = useState<TaskSnapshot | null>(null);
@@ -40,6 +39,7 @@ function useTask(id: string | null): Loaded {
     fetch(`/api/tasks/${encodeURIComponent(id)}`, { cache: 'no-store' })
       .then(async (r) => {
         if (r.status === 404) return setProblem('missing');
+        if (r.status === 401) return setProblem('signin');
         if (!r.ok) return setProblem('down');
         setProblem(null);
         setSnap(await r.json());
@@ -55,9 +55,13 @@ function useTask(id: string | null): Loaded {
     refetch();
     const source = new EventSource(`/api/tasks/${encodeURIComponent(id)}/events`);
     const seen = new Set<number>();
-    const types = ['task_status', 'plan', 'quote_rejected', 'hire_sent', 'a2a_state', 'evaluation', 'security_alert', 'ledger', 'receipt', 'final', 'error'];
+    const types = ['task_status', 'planning', 'plan', 'quote_rejected', 'hire_sent', 'a2a_state', 'evaluation', 'security_alert', 'ledger', 'receipt', 'final', 'error'];
     const onEvent = (m: MessageEvent) => {
-      const e = JSON.parse(m.data) as RookEvent;
+      // The browser fires its own 'error' event, with no data, when the connection drops or is refused (signed out,
+      // not your task, services restarting). That shares a name with Rook's 'error' events, so skip anything empty.
+      if (typeof m.data !== 'string' || !m.data) return;
+      let e: RookEvent;
+      try { e = JSON.parse(m.data); } catch { return; }
       if (seen.has(e.seq)) return;
       seen.add(e.seq);
       setEvents((all) => [...all, e]);
@@ -227,20 +231,50 @@ function PlanCard({ plan }: { plan: PlanView }) {
   );
 }
 
+/** What the planner has reported so far: its stage, and the agents its searches turned up, one card each. */
+type Planning = { stage: string | null; quoting: number; found: { handle: string; name: string; title: string }[] };
+
+function planningFrom(events: RookEvent[]): Planning {
+  const out: Planning = { stage: null, quoting: 0, found: [] };
+  const seen = new Set<string>();
+  for (const e of events) {
+    if (e.type !== 'planning') continue;
+    out.stage = e.data.stage;
+    if (e.data.stage === 'quoting') out.quoting = e.data.agents;
+    if (e.data.stage === 'found') for (const a of e.data.agents ?? []) {
+      if (seen.has(a.handle)) continue;
+      seen.add(a.handle);
+      out.found.push({ handle: a.handle, name: a.name, title: e.data.title });
+    }
+  }
+  return out;
+}
+
 /**
- * Rook choosing agents. The planner reports nothing until the plan is done, so this searches with empty cards until then,
- * and every card that lands is a real candidate from that plan. Handles and titles are plain text, with no links or images.
+ * Rook choosing agents. While planning, cards land as the planner's market searches return; once the plan is in, they
+ * narrow to the candidates it picked. Names and handles are plain text, with no links or images.
  */
-function AgentSearch({ plan, animate, onGrow, onDone }: { plan: PlanView | null; animate: boolean; onGrow?: () => void; onDone?: () => void }) {
+function AgentSearch({ plan, planning, animate, onGrow, onDone }: { plan: PlanView | null; planning?: Planning; animate: boolean; onGrow?: () => void; onDone?: () => void }) {
   const { live } = useMode();
   // Live agents have real names; the simulator's names are just their handles, so the subtask reads better there.
-  const sources: WebSource[] = (plan?.subtasks ?? []).flatMap((s) =>
-    s.candidates.map((c) => ({ id: `${s.id}/${c.handle}`, title: c.name && c.name !== c.handle ? c.name : s.title, url: c.handle })),
-  );
+  const name = (n: string, handle: string, fallback: string) => (n && n !== handle ? n : fallback);
+  const sources: WebSource[] = plan
+    ? plan.subtasks.flatMap((s) => s.candidates.map((c) => ({ id: `${s.id}/${c.handle}`, title: name(c.name, c.handle, s.title), url: c.handle })))
+    : (planning?.found ?? []).map((a) => ({ id: a.handle, title: name(a.name, a.handle, a.title), url: a.handle }));
+  const foundCount = planning?.found.length ?? 0;
   const total = sources.length;
   const [landed, setLanded] = useState(0);
-  const count = animate ? landed : total;
+  const count = animate && plan ? landed : total;
   const searching = !plan || count < total;
+  const market = live ? 'the NEAR AI market' : 'the simulated market';
+  const working =
+    planning?.stage === 'quoting' ? `Getting prices from ${planning.quoting} agent${planning.quoting === 1 ? '' : 's'}`
+    : planning?.stage === 'searching' || planning?.stage === 'found' ? `Searching ${market}`
+    : plan ? `Searching ${market}`
+    : 'Planning the subtasks';
+  const done = foundCount > total
+    ? `Picked ${total} of ${foundCount} agents found`
+    : `Found ${total} agent${total === 1 ? '' : 's'}`;
 
   useEffect(() => {
     if (!plan || !animate || landed >= total) return;
@@ -265,7 +299,7 @@ function AgentSearch({ plan, animate, onGrow, onDone }: { plan: PlanView | null;
   return (
     <WebSearch
       status={searching ? 'searching' : 'done'}
-      label={searching ? (live ? 'Searching the NEAR AI market' : 'Searching the simulated market') : `Found ${total} agent${total === 1 ? '' : 's'}`}
+      label={searching ? working : done}
       sources={sources.slice(0, count)}
       linked={false}
       open={open}
@@ -398,6 +432,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
 
   // Run updates roll in one at a time. A task that had already ended when opened is history, so it shows at once.
   const feed = feedFrom(events);
+  const planning = planningFrom(events);
   const [shown, setShown] = useState(0);
   const instant = useRef<boolean | null>(null);
   if (status && instant.current === null) instant.current = TERMINAL.has(status);
@@ -417,13 +452,13 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
 
   // Keep the sidebar's status honest when the run moves on without an action from this page.
   useEffect(() => {
-    if (status && known && status !== known && (status === 'running' || TERMINAL.has(status))) router.refresh();
+    if (status && known && status !== known && (status === 'planned' || status === 'running' || TERMINAL.has(status))) router.refresh();
   }, [status, known, router]);
 
   async function act(kind: 'approve' | 'cancel' | 'stop') {
     setBusy(kind);
     setActError(null);
-    const out = kind === 'approve' ? await approve(id, wallet.account ?? '') : kind === 'cancel' ? await cancel(id) : await stop(id);
+    const out = kind === 'approve' ? await approve(id) : kind === 'cancel' ? await cancel(id) : await stop(id);
     setBusy(null);
     if (!out.ok) setActError(out.message);
     else if (out.needsFunding) setNeedsFunding(true);
@@ -431,6 +466,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   }
 
   if (problem === 'missing') return <RookMessage><p>This task isn&apos;t available anymore. Tasks are cleared when Rook&apos;s services restart.</p></RookMessage>;
+  if (problem === 'signin') return <RookMessage><p>Connect your wallet to see this task.</p></RookMessage>;
   if (problem === 'down' && !snap) return <RookMessage><p>Rook&apos;s services aren&apos;t running. Start them with pnpm dev, then refresh.</p></RookMessage>;
   if (!snap) return <RookMessage><Working label="Loading" /></RookMessage>;
 
@@ -440,7 +476,6 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   const live = started && !settled;
   const spent = visible.reduce((sum, l) => sum + (l.paid ?? 0), 0);
   const reserveUsed = visible.reduce((sum, l) => sum + (l.fromReserve ?? 0), 0);
-  const max = plan ? BigInt(plan.budget.allocated_atomic) + BigInt(plan.budget.reserve_atomic) : 0n;
 
   return (
     <>
@@ -448,7 +483,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
 
       {(task.status === 'draft' || (plan && (revealing || plan.subtasks.some((s) => s.candidates.length > 0)))) && (
         <RookMessage still={fresh}>
-          <AgentSearch plan={plan} animate={fresh} onGrow={onGrow} onDone={revealing ? onAgentsDone : undefined} />
+          <AgentSearch plan={plan} planning={planning} animate={fresh && planning.found.length === 0} onGrow={onGrow} onDone={revealing ? onAgentsDone : undefined} />
         </RookMessage>
       )}
       {task.status === 'failed' && !plan && (
@@ -467,17 +502,18 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
 
       {plan && !revealing && plan.subtasks.length > 0 && (
         <RookMessage>
-          <p>Here&apos;s the plan, up to <span className="font-medium">{usdc(max)} USDC</span>. {started ? 'You approved it.' : task.status === 'cancelled' ? 'You cancelled it, so nothing was spent.' : 'Nothing has been spent.'}</p>
+          <p>Here&apos;s the plan. The agents cost at most <span className="font-medium">{usdc(plan.budget.allocated_atomic)} USDC</span> together. {started ? 'You approved it.' : task.status === 'cancelled' ? 'You cancelled it, so nothing was spent.' : 'Nothing has been spent.'}</p>
           <PlanCard plan={plan} />
           {plan.dropped.length > 0 && <p className="mt-2 text-sm text-ink/65">Left out: {plan.dropped.map((d) => `${d.title} (${d.reason})`).join(', ')}</p>}
           {task.status === 'planned' && (
             <div className="rook-in mt-4 flex flex-wrap gap-3" style={{ animationDelay: `${250 + plan.subtasks.length * 90}ms` }}>
               <ActionButton primary onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account || paymentsOff} title={paymentsOff ? 'Paying live agents is not switched on yet' : wallet.account ? undefined : 'Connect your wallet first'}>
-                {busy === 'approve' ? 'Starting…' : `Approve, up to ${usdc(max)} USDC`}
+                {busy === 'approve' ? 'Starting…' : `Fund ${usdc(task.budget_atomic)} USDC and start`}
               </ActionButton>
               <ActionButton onClick={() => act('cancel')} busy={busy === 'cancel'}>Cancel</ActionButton>
             </div>
           )}
+          {task.status === 'planned' && !paymentsOff && <p className="mt-2 text-sm text-ink/60">Your {usdc(task.budget_atomic)} USDC budget is held while the agents work. Whatever isn&apos;t spent comes back to you.</p>}
           {task.status === 'planned' && paymentsOff && <p className="mt-2 text-sm text-ink/60">Live agents and prices. Paying them isn&apos;t switched on yet, so nothing can be spent.</p>}
         </RookMessage>
       )}
@@ -547,10 +583,8 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
   async function send(prompt: string, budget: string) {
     setErrors(null);
     setSending({ prompt: prompt.trim(), budget });
-    const [out] = await Promise.all([
-      draftTask({ prompt, budget, account: wallet.account ?? '' }),
-      new Promise((ok) => setTimeout(ok, reducedMotion() ? 0 : MIN_DRAFT_MS)),
-    ]);
+    // Returns as soon as the task exists; the plan then streams in on the task's page.
+    const out = await draftTask({ prompt, budget });
     if (out.kind === 'planned') {
       // Keep showing this message until the task has loaded, so the thread takes over with no gap.
       justDrafted.current.add(out.id);
