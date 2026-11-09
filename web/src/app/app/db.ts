@@ -6,11 +6,14 @@ import { mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 
-// One connection per process. On globalThis because Next bundles route handlers, pages and actions separately.
-const shared = globalThis as typeof globalThis & { __rookWebDb?: DatabaseSync };
+// One connection per process. On globalThis because Next bundles route handlers, pages and actions separately. The key
+// names the schema: a dev server that hot-reloads newer code opens (and migrates) a fresh connection instead of reusing
+// one made for the old tables. Bump it whenever the schema below changes.
+const KEY = '__rookWebDbV2';
+const shared = globalThis as typeof globalThis & { [KEY]?: DatabaseSync };
 
 function db(): DatabaseSync {
-  if (shared.__rookWebDb) return shared.__rookWebDb;
+  if (shared[KEY]) return shared[KEY];
   const { DatabaseSync } = process.getBuiltinModule('node:sqlite');
   const file = process.env.ROOK_WEB_DB || join(process.cwd(), '.data', 'web.sqlite');
   mkdirSync(dirname(file), { recursive: true });
@@ -46,7 +49,7 @@ function db(): DatabaseSync {
       throw e;
     }
   }
-  return (shared.__rookWebDb = d);
+  return (shared[KEY] = d);
 }
 
 /** True the first time a nonce is spent, false ever after (until it would have expired anyway). */
