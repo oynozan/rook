@@ -10,7 +10,7 @@ import { WebSearch, type WebSource } from '@/components/ui/web-search';
 import { approve, cancel, confirmFunding, draftTask, stop } from './actions';
 import { go } from './AppShell';
 import { Composer, type ComposerErrors } from './Composer';
-import { fetchTxOutcome, fundingOwner, fundingTerms, fundingTransaction, isWalletCancel, readFundingOutcome, txHashOf, type Funding, type FundingResult } from './funding';
+import { closeTaskTransaction, fetchTxOutcome, fundingTerms, fundingTransaction, isWalletCancel, readFundingOutcome, txHashOf, type Funding, type FundingResult } from './funding';
 import { explorerTx, NETWORK, rpcFor, type Network } from './network';
 import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary } from './orchestrator';
 import { useMode } from './mode';
@@ -210,7 +210,7 @@ function PlanRow({ subtask: s, usage }: { subtask: PlanView['subtasks'][number];
           {!!s.deadline_s && <p className="mt-3 text-sm text-ink/65">Deadline: delivered within {turnaround(s.deadline_s)}</p>}
           {s.candidates.length > 0 && (
             <>
-              <p className="mt-3 text-sm text-ink/65">Candidates, cheapest first</p>
+              <p className="mt-3 text-sm text-ink/65">Candidates, in the order Rook hires them: lowest expected cost first</p>
               <ul className="mt-1.5 space-y-2">{s.candidates.map((c) => <CandidateLine key={c.handle} c={c} />)}</ul>
             </>
           )}
@@ -223,11 +223,13 @@ function PlanRow({ subtask: s, usage }: { subtask: PlanView['subtasks'][number];
 const turnaround = (s: number) =>
   s < 120 ? `${s} s` : s < 7200 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} days`;
 
-/** One candidate: its name, handle and price, then what the market says about it. Agent text is shown as plain text. */
+/**
+ * One candidate: its name, handle and price, what the market says about it, and why it sits where it does (expected
+ * cost: price divided by its chance to pass). Agent text is shown as plain text.
+ */
 function CandidateLine({ c }: { c: Candidate }) {
-  // The live market reports success as a percentage (100), the simulator as a share (1.0). A rate with no delivered
-  // jobs behind it says nothing, so it is left out rather than shown as 0%.
-  const rate = c.success_rate === null || c.delivered_jobs === 0 ? null : Math.round(c.success_rate > 1 ? c.success_rate : c.success_rate * 100);
+  // success_rate is a percentage. A rate with no delivered jobs behind it says nothing, so it is left out, not shown as 0%.
+  const rate = c.success_rate === null || c.delivered_jobs === 0 ? null : Math.round(c.success_rate);
   const facts = [
     rate !== null && `${rate}% success`,
     c.delivered_jobs > 0 && `${c.delivered_jobs} job${c.delivered_jobs === 1 ? '' : 's'} delivered`,
@@ -241,6 +243,7 @@ function CandidateLine({ c }: { c: Candidate }) {
         <span className="ml-auto font-mono text-sm tabular-nums">{usdc(c.price_atomic)} USDC</span>
       </p>
       {facts.length > 0 && <p className="text-sm text-ink/60">{facts.join(' · ')}</p>}
+      {c.rank_reason && <p className="text-xs text-ink/55">{c.rank_reason}</p>}
     </li>
   );
 }
@@ -298,9 +301,11 @@ const TX_HASH = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/;
  * Chain mode, after approval: the owner's wallet sends the budget to the Rook contract (SHARED API DECISION 4), the
  * contract's task_created event names the contract task, and Rook checks it against the plan before running.
  */
-function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping }: {
+function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping, autoStart }: {
   id: string; plan: PlanView; funding: Funding | null; sent: TaskSnapshot['funding_sent'];
   onConfirmed: () => void; onStop: () => void; stopping: boolean;
+  /** One click: the approve button already asked for the transfer, so the wallet opens as soon as it is ready. */
+  autoStart: boolean;
 }) {
   const wallet = useWallet();
   const { network: modeNetwork } = useMode();
@@ -319,7 +324,7 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping }:
     const out = await confirmFunding(id, { contract_task_id: cid, tx_hash: tx });
     setPhase('idle');
     if (out.ok) return onConfirmed();
-    setError(`Rook didn't start the run: ${out.message.replace(/\.?$/, '.')} Your USDC is in contract task ${cid}. Confirm again to start it. If Rook still can't, the contract owner can close that contract task (close_task) to refund it.`);
+    setError(`Rook didn't start the run: ${out.message.replace(/\.?$/, '.')} Your USDC is in contract task ${cid}. Confirm again to start it, or take the USDC back to your wallet.`);
   }
 
   const lookUp = (tx: string) => fetchTxOutcome(rpcFor(network), tx, wallet.account ?? '')
@@ -371,6 +376,16 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping }:
     await settle(await lookUp(tx), tx);
   }
 
+  // One click: the approve button asked for the transfer, so the wallet opens once, as soon as the instructions are in.
+  const autoFired = useRef(false);
+  useEffect(() => {
+    if (!autoStart || autoFired.current || !funding || sent || made || phase !== 'idle') return;
+    if (!fundingTerms(funding) || funding.network !== NETWORK || !wallet.account || (funding.funder && wallet.account !== funding.funder)) return;
+    autoFired.current = true;
+    void fund();
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- fires once per approval; fund reads the current state
+  }, [autoStart, funding, sent, made, phase, wallet.account]);
+
   const busyLabel = { wallet: 'Confirm in your wallet…', reading: 'Reading the transaction…', confirming: 'Checking with Rook…' } as const;
 
   // Already sent from this account's wallet (remembered by this web server, or just read here): confirm it, never offer
@@ -384,6 +399,7 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping }:
         </p>
         <div className="mt-4 flex flex-wrap gap-3">
           <ActionButton primary onClick={() => confirm(done.contract_task_id, done.tx_hash)} busy={phase !== 'idle'}>{phase === 'idle' ? 'Confirm funding and start' : busyLabel[phase]}</ActionButton>
+          {error && funding && <RefundButton contractId={funding.contract_id} taskId={done.contract_task_id} network={network} />}
         </div>
         {error && <p role="alert" className="mt-3 text-alert">{error}</p>}
       </div>
@@ -391,12 +407,11 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping }:
   }
   if (!funding) return <Working label="Getting the funding transfer ready" />;
 
-  const owner = fundingOwner(funding);
   const terms = fundingTerms(funding);
   const hired = plan.subtasks.filter((s) => !s.self_do);
   const wrongNetwork = funding.network !== NETWORK;
-  const notOwner = !!owner && !!wallet.account && wallet.account !== owner;
   const capsTotal = terms?.caps.reduce((sum, c) => sum + BigInt(c), 0n) ?? 0n;
+  const ready = !!terms && !wrongNetwork && !!wallet.account && (!funding.funder || wallet.account === funding.funder);
   const unallocated = terms ? BigInt(funding.amount_atomic) - BigInt(terms.reserve_atomic) - capsTotal : 0n;
   const row = 'flex items-baseline justify-between gap-4 py-1';
 
@@ -420,14 +435,11 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping }:
       </dl>
       {!terms && <p className="mt-3 text-alert">Rook sent funding instructions this page can&apos;t read, so it won&apos;t offer the transfer.</p>}
       {wrongNetwork && <p className="mt-3 text-alert">Rook&apos;s contract is on NEAR {funding.network}, but this app connects wallets on NEAR {NETWORK}. Run the web app with NEXT_PUBLIC_NEAR_NETWORK={funding.network}.</p>}
-      {notOwner && (
-        <p className="mt-3 text-ink/80">
-          In this deployment only the Rook operator account, <span className="font-mono">{owner}</span>, can fund tasks: the contract accepts funding only from its owner.
-          The team is deciding whether to open funding to everyone who signs in. You&apos;re signed in as <span className="font-mono">{wallet.account}</span>.
-        </p>
+      {funding.funder && wallet.account && wallet.account !== funding.funder && (
+        <p className="mt-3 text-alert">This task is yours as <span className="font-mono">{funding.funder}</span>, but your wallet is connected as <span className="font-mono">{wallet.account}</span>. Switch accounts in your wallet: the account that sends the budget is the one the contract refunds.</p>
       )}
       <div className="mt-4 flex flex-wrap gap-3">
-        <ActionButton primary onClick={fund} busy={phase !== 'idle'} disabled={!terms || wrongNetwork || notOwner || !wallet.account || pasted !== null}
+        <ActionButton primary onClick={fund} busy={phase !== 'idle'} disabled={!ready || pasted !== null}
           title={pasted !== null ? 'Rook can’t tell yet whether your first transfer went out' : undefined}>
           {phase === 'idle' ? `Fund ${usdc(funding.amount_atomic)} USDC with wallet` : busyLabel[phase]}
         </ActionButton>
@@ -446,6 +458,40 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping }:
       )}
       {error && <p role="alert" className="mt-3 text-alert">{error}</p>}
     </div>
+  );
+}
+
+/**
+ * The funder takes the budget back: its own wallet calls close_task on the contract, which refunds what it holds for
+ * that contract task. Works for a task Rook never ran (no subtask holds money); the contract refuses anything else.
+ */
+function RefundButton({ contractId, taskId, network }: { contractId: string; taskId: string; network: Network }) {
+  const wallet = useWallet();
+  const [state, setState] = useState<'idle' | 'busy' | 'done'>('idle');
+  const [tx, setTx] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  async function refund() {
+    setState('busy');
+    setError(null);
+    try {
+      const out = await wallet.sendTransaction(closeTaskTransaction(contractId, taskId));
+      const failure = (out as { status?: { Failure?: unknown } } | null)?.status?.Failure;
+      if (failure) throw new Error(`the contract refused: ${JSON.stringify(failure).slice(0, 200)}`);
+      setTx(txHashOf(out));
+      setState('done');
+    } catch (e) {
+      setState('idle');
+      setError(`The refund didn't go through: ${(e instanceof Error ? e.message : String(e)).replace(/\.?$/, '.')}`);
+    }
+  }
+  if (state === 'done') {
+    return <p className="text-sm">Refund sent to your wallet{tx && <> (<a href={explorerTx(network, tx)} target="_blank" rel="noopener noreferrer" className={LINK}>transaction</a>)</>}.</p>;
+  }
+  return (
+    <span className="flex flex-col gap-1">
+      <ActionButton onClick={refund} busy={state === 'busy'} disabled={!wallet.account}>{state === 'busy' ? 'Confirm in your wallet…' : 'Refund to my wallet'}</ActionButton>
+      {error && <span role="alert" className="text-sm text-alert">{error}</span>}
+    </span>
   );
 }
 
@@ -656,8 +702,10 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   const [actError, setActError] = useState<string | null>(null);
   const [funding, setFunding] = useState<Funding | null>(null);
   const [fundingConfirmed, setFundingConfirmed] = useState(false);
+  const [autoFund, setAutoFund] = useState(false); // approved here with one click: the wallet opens right away
   const status = snap?.task.status;
-  const { paymentsOff, noMoney, chain, network } = useMode();
+  const { mode, paymentsOff, noMoney, chain, network } = useMode();
+  const contractId = funding?.contract_id ?? mode?.contract_id ?? null;
   // Approved but not yet funded (chain mode): the run starts only once the funding is bound, so this survives a reload.
   // The in-memory ledger starts the run at once, so there this state is gone in a moment.
   const awaitingFunding = status === 'approved' && !snap?.ledger && !noMoney;
@@ -702,7 +750,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
     const out = kind === 'approve' ? await approve(id) : kind === 'cancel' ? await cancel(id) : await stop(id);
     setBusy(null);
     if (!out.ok) setActError(out.message);
-    else if (out.funding) setFunding(out.funding);
+    else if (out.funding) { setFunding(out.funding); if (kind === 'approve') setAutoFund(true); }
     refetch();
   }
 
@@ -753,21 +801,24 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
             Here&apos;s the plan. The caps add up to <span className="font-medium">{usdc(plan.budget.allocated_atomic)} USDC</span>
             {BigInt(plan.budget.reserve_atomic || 0) > 0n && <>, and up to {usdc(plan.budget.reserve_atomic)} USDC more can come from the reserve when a subtask needs more than its cap</>}.{' '}
             {started ? 'You approved it.' : task.status === 'cancelled' ? 'You cancelled it, so nothing was spent.' : task.status === 'approved' ? 'You approved it. Nothing has been spent yet.' : task.status !== 'killed' ? 'Nothing has been spent.'
-              : snap.funding_sent ? <>You stopped it before Rook started the run, so no agent was paid. Your wallet&apos;s funding transfer is still in contract task <span className="font-mono">{snap.funding_sent.contract_task_id}</span>: the contract owner can refund it with close_task.</>
+              : snap.funding_sent ? <>You stopped it before Rook started the run, so no agent was paid. Your wallet&apos;s funding transfer is still in contract task <span className="font-mono">{snap.funding_sent.contract_task_id}</span>; take it back below.</>
               : 'You stopped it before Rook started the run, so no agent was paid.'}
           </p>
           <PlanCard plan={plan} usage={usage} />
           {plan.dropped.length > 0 && <p className="mt-2 text-sm text-ink/65">Left out: {plan.dropped.map((d) => `${d.title} (${d.reason})`).join(', ')}</p>}
+          {task.status === 'killed' && unfunded && snap.funding_sent && contractId && (
+            <div className="mt-3"><RefundButton contractId={contractId} taskId={snap.funding_sent.contract_task_id} network={network} /></div>
+          )}
           {task.status === 'planned' && (
             <div className="rook-in mt-4 flex flex-wrap gap-3" style={{ animationDelay: `${250 + plan.subtasks.length * 90}ms` }}>
               <ActionButton primary onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account || paymentsOff} title={paymentsOff ? 'Paying live agents is not switched on yet' : wallet.account ? undefined : 'Connect your wallet first'}>
-                {busy === 'approve' ? (chain ? 'Preparing the transfer…' : 'Starting…') : paymentsOff ? 'Approve' : noMoney ? 'Run simulation' : chain ? `Approve and fund ${usdc(task.budget_atomic)} USDC` : `Fund ${usdc(task.budget_atomic)} USDC and start`}
+                {busy === 'approve' ? (chain ? 'Preparing the transfer…' : 'Starting…') : paymentsOff ? 'Approve' : noMoney ? 'Run simulation' : `Fund ${usdc(task.budget_atomic)} USDC and start`}
               </ActionButton>
               <ActionButton onClick={() => act('cancel')} busy={busy === 'cancel'}>Cancel</ActionButton>
             </div>
           )}
           {task.status === 'planned' && !paymentsOff && noMoney && <p className="mt-2 text-sm text-ink/60">A simulated {usdc(task.budget_atomic)} USDC budget: nothing leaves your wallet and no agent is paid.</p>}
-          {task.status === 'planned' && !paymentsOff && !noMoney && <p className="mt-2 text-sm text-ink/60">Next, your wallet sends the {usdc(task.budget_atomic)} USDC budget to the Rook contract on NEAR {network}. Each subtask spends at most its cap plus what Rook tops up from the reserve, and whatever isn&apos;t spent comes back to you.</p>}
+          {task.status === 'planned' && !paymentsOff && !noMoney && <p className="mt-2 text-sm text-ink/60">One click: your wallet opens to send the {usdc(task.budget_atomic)} USDC budget to the Rook contract on NEAR {network}, and the run starts once it lands. Each subtask spends at most its cap plus what Rook tops up from the reserve, and whatever isn&apos;t spent comes back to you.</p>}
           {task.status === 'planned' && paymentsOff && <p className="mt-2 text-sm text-ink/60">Live agents and prices. Paying them isn&apos;t switched on yet, so nothing can be spent.</p>}
         </RookMessage>
       )}
@@ -776,7 +827,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
         <RookMessage>
           {fundingConfirmed
             ? <Working label="Funding confirmed. Starting the run" />
-            : <FundingStep id={id} plan={plan} funding={funding} sent={snap.funding_sent ?? null} stopping={busy === 'stop'} onStop={() => act('stop')}
+            : <FundingStep id={id} plan={plan} funding={funding} sent={snap.funding_sent ?? null} stopping={busy === 'stop'} onStop={() => act('stop')} autoStart={autoFund}
                 onConfirmed={() => { setFundingConfirmed(true); refetch(); router.refresh(); }} />}
         </RookMessage>
       )}

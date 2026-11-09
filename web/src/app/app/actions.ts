@@ -3,7 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import { recordFundingSent, takeDraftSlot } from './db';
 import { untilFinal, type Funding } from './funding';
-import { approveTask, cancelTask, createTask, fundedTask, getTask, killTask, OrchestratorDown } from './orchestrator';
+import { approveTask, cancelTask, createTask, fundedTask, getMode, getTask, killTask, OrchestratorDown } from './orchestrator';
 import { currentAccount } from './session';
 
 export type DraftResult =
@@ -23,6 +23,12 @@ const refreshSidebar = () => revalidatePath('/app', 'layout');
 
 const SIGN_IN = 'Sign in with your NEAR wallet first.';
 
+/** "1.5" -> 1500000n (USDC has 6 decimals); the input already matched BUDGET. */
+const toAtomic = (s: string) => {
+  const [whole, frac = ''] = s.split('.');
+  return BigInt(whole) * 1_000_000n + BigInt(frac.padEnd(6, '0'));
+};
+
 // Every action acts as the signed-in account from the session cookie. The browser can't name an account.
 export async function draftTask(input: { prompt: string; budget: string }): Promise<DraftResult> {
   const prompt = String(input.prompt ?? '').trim();
@@ -34,6 +40,11 @@ export async function draftTask(input: { prompt: string; budget: string }): Prom
   if (!prompt) invalid.prompt = 'Describe the task first.';
   else if (prompt.length > PROMPT_MAX) invalid.prompt = `Keep the task under ${PROMPT_MAX} characters. This one has ${prompt.length}.`;
   if (!BUDGET.test(budget) || Number(budget) <= 0) invalid.budget = 'Enter an amount above 0, like 3.00.';
+  else {
+    // The budget contract refunds a transfer below its minimum, so say so before any planning is paid for.
+    const min = (await getMode().catch(() => null))?.min_budget_atomic;
+    if (min && /^\d+$/.test(min) && toAtomic(budget) < BigInt(min)) invalid.budget = `The smallest budget is ${(Number(min) / 1e6).toFixed(2)} USDC.`;
+  }
   if (invalid.prompt || invalid.budget) return invalid;
 
   const slot = takeDraftSlot(owner, DRAFTS_PER_HOUR, 3_600_000);

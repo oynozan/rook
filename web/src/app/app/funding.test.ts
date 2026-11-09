@@ -3,11 +3,11 @@
 // (contract/budget/src/lib.rs: emit() and ft_on_transfer's refund log). Run: npx tsx --test src/app/app/*.test.ts
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { fetchTxOutcome, fundingOwner, fundingTerms, fundingTransaction, isWalletCancel, readFundingOutcome, txHashOf, untilFinal, type Funding } from './funding';
+import { closeTaskTransaction, fetchTxOutcome, fundingTerms, fundingTransaction, isWalletCancel, readFundingOutcome, txHashOf, untilFinal, type Funding } from './funding';
 
 const F: Funding = {
   contract_id: 'rook.near', usdc: '17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1', network: 'mainnet',
-  amount_atomic: '3000000', msg: JSON.stringify({ create_task: { reserve_bps: 2000, caps: ['1000000', '800000'] } }), owner: 'ops.near',
+  amount_atomic: '3000000', msg: JSON.stringify({ create_task: { reserve_bps: 2000, caps: ['1000000', '800000'] } }), funder: 'ops.near',
 };
 
 const event = (event: string, data: object) => `EVENT_JSON:${JSON.stringify({ standard: 'rook', version: '1.0.0', event, data: [data] })}`;
@@ -32,10 +32,11 @@ test('terms: caps and the reserve the contract will compute', () => {
   assert.equal(fundingTerms({ ...F, msg: JSON.stringify({ create_task: { reserve_bps: 2000, caps: [1000000] } }) }), null);
 });
 
-test('owner: SHARED API DECISION 4 says owner; older orchestrators said funder', () => {
-  assert.equal(fundingOwner(F), 'ops.near');
-  assert.equal(fundingOwner({ ...F, owner: undefined, funder: 'old.near' }), 'old.near');
-  assert.equal(fundingOwner({ ...F, owner: undefined }), null);
+test('close_task from the funder refunds a task Rook never ran: no deposit, 50 Tgas', () => {
+  assert.deepEqual(closeTaskTransaction('rook.near', '1a'), {
+    receiverId: 'rook.near',
+    actions: [{ type: 'FunctionCall', params: { methodName: 'close_task', args: { task_id: '1a' }, gas: '50000000000000', deposit: '0' } }],
+  });
 });
 
 test('reads the contract task id from task_created', () => {
@@ -64,8 +65,8 @@ test('ignores other standards, other events and malformed ids', () => {
 });
 
 test('a refused create_task: the contract logs why and the token refunds', () => {
-  const o = outcome([{ executor_id: 'rook.near', logs: ['refunding 3000000: only the owner funds tasks'] }]);
-  assert.deepEqual(readFundingOutcome(o, 'rook.near'), { kind: 'refunded', reason: 'only the owner funds tasks' });
+  const o = outcome([{ executor_id: 'rook.near', logs: ['refunding 3000000: alice.near already has 5 open tasks'] }]);
+  assert.deepEqual(readFundingOutcome(o, 'rook.near'), { kind: 'refunded', reason: 'alice.near already has 5 open tasks' });
 });
 
 test('ft_on_transfer panicked: the token refunds everything', () => {

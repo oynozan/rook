@@ -3,13 +3,14 @@
 // so the browser and the tests both use them.
 import type { Network } from './network';
 
-/** What POST /tasks/:id/approve returns in chain mode. Older orchestrators name the owner `funder`. */
+/**
+ * What POST /tasks/:id/approve returns in chain mode. Any signed-in account funds its own task: `funder` is that account
+ * (the wallet must send from it). `contract_owner` is only informative.
+ */
 export type Funding = {
   contract_id: string; usdc: string; network: Network; amount_atomic: string; msg: string;
-  owner?: string; funder?: string;
+  funder?: string | null; contract_owner?: string | null;
 };
-
-export const fundingOwner = (f: Funding) => f.owner ?? f.funder ?? null;
 
 /** The caps and reserve the transfer's msg carries: what the contract will enforce. Null if the msg isn't a create_task. */
 export function fundingTerms(f: Funding): { reserve_bps: number; caps: string[]; reserve_atomic: string } | null {
@@ -23,6 +24,16 @@ export function fundingTerms(f: Funding): { reserve_bps: number; caps: string[];
 }
 
 export const GAS_100_TGAS = '100000000000000';
+export const GAS_50_TGAS = '50000000000000';
+
+/**
+ * The funder's own close_task on the contract: refunds what the contract holds for the task. The contract allows it
+ * once no subtask holds money (always so for a task stopped before Rook funded any subtask).
+ */
+export const closeTaskTransaction = (contract_id: string, task_id: string) => ({
+  receiverId: contract_id,
+  actions: [{ type: 'FunctionCall' as const, params: { methodName: 'close_task', args: { task_id }, gas: GAS_50_TGAS, deposit: '0' } }],
+});
 
 /** The one transaction the human signs: USDC ft_transfer_call to the contract, 1 yoctoNEAR, 100 Tgas. */
 export const fundingTransaction = (f: Funding) => ({

@@ -11,11 +11,15 @@ export const serviceHeaders = (): Record<string, string> =>
 
 export type TaskSummary = { id: string; status: string; prompt: string; created_at: string };
 
-/** An agent the planner can hire. On the live market these come from market.near.ai. success_rate is a percentage there
- * (0 to 100) and a share (0 to 1) on the simulator. */
+/**
+ * An agent the planner can hire, in the order Rook hires them: lowest expected cost first (price divided by the chance it
+ * passes, from the market's record and Rook's own verdicts). success_rate is a percentage (0 to 100). Older
+ * orchestrators send no p_pass, expected_cost_atomic or rank_reason.
+ */
 export type Candidate = {
   handle: string; name: string; description: string; price_atomic: string;
   sla_seconds: number; success_rate: number | null; delivered_jobs: number;
+  p_pass?: number; expected_cost_atomic?: string; rank_reason?: string;
 };
 
 /**
@@ -25,6 +29,8 @@ export type Candidate = {
 export type Mode = {
   market: 'sim' | 'live'; llm: 'canned' | 'near'; ledger: 'sim' | 'chain'; paying: boolean;
   network?: Network | 'sim'; contract_id?: string | null; usdc?: string | null; simulated?: boolean;
+  /** Chain mode: the contract's smallest budget (atomic USDC) and tasks one funder may have open at once. */
+  min_budget_atomic?: string | null; max_open_tasks?: number | null; contract_owner?: string | null;
 };
 
 export type PlanView = {
