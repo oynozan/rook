@@ -485,7 +485,7 @@ test('orchestrator, ROOK_LEDGER=chain: approve gives funding instructions, /fund
     budget: { budget_atomic: '1000000', reserve_atomic: '200000', allocatable_atomic: '800000', allocated_atomic: '500000' },
   };
   const planner = await serve('fake-planner', {
-    'POST /plan': () => plan,
+    'POST /plan': ({ body }) => body.prompt === 'free' ? { ...plan, subtasks: [sub('s1', '0', [], true)] } : plan,
     'POST /self-do': () => ({ text: 'self report', llm_calls: [] }),
     'POST /aggregate': () => ({ final_markdown: 'final', attribution: [], llm_calls: [] }),
   }, 0);
@@ -563,4 +563,20 @@ test('orchestrator, ROOK_LEDGER=chain: approve gives funding instructions, /fund
   // The binding to the contract task is in the snapshot's ledger view; the stored task keeps it for a restart.
   assert.deepEqual(s.ledger.accounts, { 1: `${ok}-1.${CONTRACT}`, 3: `${ok}-2.${CONTRACT}` });
   await refused(call(`${orch.url}/tasks/${t.id}/funded`, { contract_task_id: 'ok' }), /closed/);
+
+  // A plan that hires no agent (every subtask self_do) pays no one: approve starts it at once, with no funding and no
+  // contract task, and its books hold nothing (seen on mainnet: it asked for 3 USDC, then refused the transfer).
+  const before = calls.length;
+  const free = await call(`${orch.url}/tasks`, { prompt: 'free', budget_usdc: '3', owner: 'alice.near' });
+  const fa = await call(`${orch.url}/tasks/${free.id}/approve`, { owner: 'alice.near' });
+  assert.equal(fa.funding, undefined);
+  let f: any;
+  for (const end = Date.now() + 10_000; Date.now() < end; await new Promise((ok) => setTimeout(ok, 25))) {
+    f = await call(`${orch.url}/tasks/${free.id}`);
+    if (['closed', 'failed'].includes(f.task.status)) break;
+  }
+  assert.equal(f.task.status, 'closed', f.task.error);
+  assert.equal(f.final_result.final_markdown, 'final');
+  assert.deepEqual([f.ledger.budget_atomic, f.ledger.spent_atomic, f.ledger.refunded_atomic], ['0', '0', '0']);
+  assert.equal(calls.length, before); // nothing signed, funded or closed on chain
 });

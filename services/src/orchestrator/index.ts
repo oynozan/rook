@@ -10,7 +10,7 @@ import { createChainLedger } from './chain-ledger.ts';
 import { createLedger, type Ledger } from './ledger.ts';
 import { kill, restoreTask, runTask, SHUTDOWN } from './runner.ts';
 import { openStore } from './db.ts';
-import { emit, fromDoc, isTerminal, newTask, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task } from './store.ts';
+import { emit, fromDoc, isFree, isTerminal, newTask, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task } from './store.ts';
 
 const CreateBody = z.object({
   prompt: z.string().trim().min(1),
@@ -103,7 +103,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     });
     const resume: (() => Promise<void>)[] = [];
     for (const t of tasks.values()) {
-      const waiting = t.status === 'planned' || (chain !== null && t.status === 'approved' && !t.chain);
+      const waiting = t.status === 'planned' || (chain !== null && t.status === 'approved' && !t.chain && !isFree(t));
       if (waiting || t.status === 'closed' || t.status === 'cancelled') continue;
       if (chain && t.chain && !(t.ledger_saved as { closed?: boolean } | undefined)?.closed) {
         const next = await restoreTask(chain, t);
@@ -111,7 +111,9 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         continue;
       }
       if (isTerminal(t.status)) continue;
-      t.error = `Rook's services restarted while this task was ${t.status}, so it stopped there. ${chain
+      t.error = `Rook's services restarted while this task was ${t.status}, so it stopped there. ${isFree(t)
+        ? 'It hired no agent, so nothing was paid.'
+        : chain
         ? 'It has no contract task on record, so nothing of it is on chain to resume.'
         : 'Its simulated ledger lived in memory only, so the run cannot resume; no real money was involved.'}`;
       emit(t, 'error', { message: t.error });
@@ -199,19 +201,20 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
 
     'POST /tasks/:id/approve': async ({ params, body }) => {
       const t = owned(params.id, body?.owner);
-      const reprint = chain && t.status === 'approved' && !chain.contractTaskOf(t.id); // funding instructions again
+      const reprint = chain && !isFree(t) && t.status === 'approved' && !chain.contractTaskOf(t.id); // funding instructions again
       if (t.status !== 'planned' && !reprint) throw new HttpError(409, `task is ${t.status}, approve needs planned`);
       if (!t.subtasks.length) throw new HttpError(409, 'the plan has no subtasks');
       if (config.market === 'live' && !chain) {
         throw new HttpError(409, 'live market: paying agents needs ROOK_LEDGER=chain (signer, chain-gateway, budget contract); see docs/x402-payments-plan.md');
       }
-      if (chain) {
+      if (chain && !isFree(t)) {
         // Rook never creates the task on chain: the human funds it with the caps they approve, then calls /funded.
         const funding = await fundingInstructions(t, await contractCfg(), !!reprint);
         setStatus(t, 'approved');
         return { ...taskView(t), funding };
       }
-      t.funder = typeof body?.funder_account === 'string' && body.funder_account ? body.funder_account : 'funder.sim';
+      // A plan that hires no agent (every subtask self_do) costs its funder nothing, so it starts at once in chain mode too.
+      t.funder = chain ? t.owner : typeof body?.funder_account === 'string' && body.funder_account ? body.funder_account : 'funder.sim';
       setStatus(t, 'approved');
       void runTask(ledger, t).catch((e) => console.error('[orchestrator] runTask', e));
       return taskView(t);

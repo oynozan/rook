@@ -50,6 +50,8 @@ export type TaskDoc = Omit<Task, Runtime>;
 
 export const TERMINAL_TASK: TaskStatus[] = ['closed', 'cancelled', 'killed', 'failed'];
 export const isTerminal = (s: TaskStatus) => TERMINAL_TASK.includes(s);
+/** Every subtask is self_do: the plan pays no one, so no money is held (no contract task in chain mode). */
+export const isFree = (t: { subtasks: { self_do: boolean }[] }) => t.subtasks.length > 0 && t.subtasks.every((s) => s.self_do);
 export const now = () => new Date().toISOString();
 
 // Called after every change to a task; the orchestrator points it at SQLite when ROOK_DB is set.

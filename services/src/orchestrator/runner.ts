@@ -14,7 +14,7 @@ import {
 } from '../shared/types.ts';
 import { OtherContract, type ChainLedger } from './chain-ledger.ts';
 import { LedgerError, type Ledger, type Recipient } from './ledger.ts';
-import { emit, isTerminal, now, saveTask, setStatus, setSub, type Hire, type ReceiptView, type Sub, type Task } from './store.ts';
+import { emit, isFree, isTerminal, now, saveTask, setStatus, setSub, type Hire, type ReceiptView, type Sub, type Task } from './store.ts';
 
 const gw = (path: string) => config.urls.marketGateway + path;
 const msg = (e: any) => e?.message ?? String(e);
@@ -101,7 +101,8 @@ export async function runTask(ledger: Ledger, t: Task) {
   t.running = run.promise;
   try {
     // Books first (local in both modes): a failure from here on can always close the task and refund the funder.
-    if (!ledger.view(t.id)) await ledgerOp(t, 'createTask', null, () => ledger.createTask(t.id, t.funder!, BigInt(t.budget_atomic), t.reserve_share));
+    const held = isFree(t) ? 0n : BigInt(t.budget_atomic); // a plan that hires no agent holds nothing
+    if (!ledger.view(t.id)) await ledgerOp(t, 'createTask', null, () => ledger.createTask(t.id, t.funder ?? '', held, t.reserve_share));
     const x402 = await call<X402Config>(gw('/x402'), undefined, { signal });
     signal.throwIfAborted();
     t.allow = x402.recipients ?? [];
@@ -567,7 +568,7 @@ async function hire1(ledger: Ledger, t: Task, s: Sub, c: Candidate, row: Accepts
     hire.a2a_task_id = sent.task.id; hire.context_id = sent.task.context_id; hire.state = sent.task.state;
     emit(t, 'hire_sent', { hire_id: hire.id, agent_handle: c.handle, a2a_task_id: sent.task.id, amount_atomic: hire.amount_atomic, payment_hash: hire.payment_hash }, s.id);
     setSub(t, s, 'working');
-    return await follow(ledger, t, s, c, hire, sent.task, Date.now() + (c.sla_seconds + config.paymentGraceS) * 1000);
+    return await follow(ledger, t, s, c, hire, sent.task, slaEnd(c, hire));
   } finally {
     release();
   }
@@ -585,12 +586,15 @@ async function resumeHire(ledger: Ledger, t: Task, s: Sub, hire: Hire): Promise<
     }
     setSub(t, s, 'working');
     const state = (['SUBMITTED', 'WORKING', ...TERMINAL] as string[]).includes(hire.state) ? hire.state as A2AState : 'WORKING';
-    const slaEnd = Date.parse(hire.started_at) + (c.sla_seconds + config.paymentGraceS) * 1000;
-    return await follow(ledger, t, s, c, hire, { id: hire.a2a_task_id, context_id: hire.context_id, state, artifacts: [] }, slaEnd);
+    return await follow(ledger, t, s, c, hire, { id: hire.a2a_task_id, context_id: hire.context_id, state, artifacts: [] }, slaEnd(c, hire));
   } finally {
     release();
   }
 }
+
+/** When Rook stops waiting for a hire and sends CancelTask: its agent's SLA plus the grace, at most ROOK_HIRE_PATIENCE_S. */
+const slaEnd = (c: Candidate, hire: Hire) =>
+  Date.parse(hire.started_at) + Math.min(c.sla_seconds + config.paymentGraceS, config.hirePatienceS) * 1000;
 
 /** Polls a sent hire to its end, then settles its payment or ends it unpaid (a fresh hire, or one resumed after a restart). */
 async function follow(ledger: Ledger, t: Task, s: Sub, c: Candidate, hire: Hire, sentTask: A2ATask, slaEnd: number): Promise<Hire | null> {

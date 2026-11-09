@@ -90,7 +90,7 @@ export function createLedger() {
     createTask(task_id: string, funder: string, budget: bigint, reserve_share: number) {
       if (killed.has(task_id)) refuse('task is killed');
       if (accts.has(task_id)) refuse('task already exists');
-      if (budget <= 0n) refuse('budget must be positive');
+      if (budget < 0n) refuse('budget must not be negative'); // 0: a plan that hires no agent holds nothing
       const reserve = share(budget, reserve_share);
       return mutate(task_id, () => {
         accts.set(task_id, { funder, budget, reserve, unallocated: budget - reserve, reserve_remaining: reserve, refunded: 0n, closed: false, subs: new Map() });

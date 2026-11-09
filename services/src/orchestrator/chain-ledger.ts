@@ -136,7 +136,10 @@ export function createChainLedger(): ChainLedger {
     },
 
     /** The human funded the task with ft_transfer_call; POST /tasks/:id/funded checked it. Only the mirror opens here. */
-    createTask(task_id, funder, budget, reserve_share) { b(task_id); return m.createTask(task_id, funder, budget, reserve_share); },
+    createTask(task_id, funder, budget, reserve_share) {
+      if (budget !== 0n) b(task_id); // 0: a plan that hires no agent has no contract task, only these local books
+      return m.createTask(task_id, funder, budget, reserve_share);
+    },
 
     fundSubtask: (task_id, n, cap) => transfer(task_id, async () => {
       const c = at(task_id, n);
@@ -222,6 +225,7 @@ export function createChainLedger(): ChainLedger {
 
     async closeTask(task_id) {
       for (const s of m.view(task_id)?.subtasks ?? []) if (s.returned_atomic === null) throw new LedgerError(`subtask ${s.n} has not returned its leftover`);
+      if (!bound.has(task_id) && m.view(task_id)?.budget_atomic === 0n) return m.closeTask(task_id); // nothing on chain
       const cid = b(task_id).cid;
       const refused = await svc(gateway('/close', { task_id: cid })).then(() => null, (e) => e);
       if (refused) {

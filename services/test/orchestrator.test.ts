@@ -222,6 +222,19 @@ test('a hire past sla_seconds + grace times out, is cancelled and released, then
   assert.equal(s.ledger.reserve_used_atomic, '0');
 });
 
+test('an advertised 1-day SLA does not hold the run: past ROOK_HIRE_PATIENCE_S Rook cancels the hire and hires the next', async () => {
+  process.env.ROOK_HIRE_PATIENCE_S = '1';
+  try {
+    plan = { subtasks: [sub('s1', 'Slow', '300000', [cand('hang', '100000', 86_400), cand('holders-good', '300000')])], dropped: [], budget: budget('300000'), notes: [], llm_calls: [] };
+    const created = await call(`${orch.url}/tasks`, { prompt: 'p', budget_usdc: '1' });
+    await call(`${orch.url}/tasks/${created.id}/approve`, {});
+    const s = await until(async () => { const x = await snap(created.id); return ['closed', 'failed'].includes(x.task.status) ? x : false; });
+    assert.equal(s.task.status, 'closed', s.task.error);
+    assert.deepEqual(s.subtasks[0].hires.map((h: any) => [h.agent_handle, h.state]), [['hang', 'TIMEOUT'], ['holders-good', 'COMPLETED']]);
+    assert.ok(cancelled.includes(s.subtasks[0].hires[0].a2a_task_id));
+  } finally { delete process.env.ROOK_HIRE_PATIENCE_S; }
+});
+
 const runToEnd = async (p: any, prompt = 'p') => {
   plan = p;
   const created = await call(`${orch.url}/tasks`, { prompt, budget_usdc: '1' });

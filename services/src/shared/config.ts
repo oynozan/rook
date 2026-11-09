@@ -84,11 +84,17 @@ export const config = {
   },
   get contractId() { return env('ROOK_CONTRACT_ID', ''); },
   /**
-   * Longest payment validity Rook signs or accepts, in blocks (about seconds): a quote asking more is refused, and the
-   * planner drops it. 15 000 (about 4 h) admits agents whose SLA is up to about 4 h (the window is SLA + 600 s); an
-   * authorization holds its sub-account's money and a hiring slot until it lands or expires, so never a day.
+   * Longest payment validity Rook signs or accepts, in blocks (about seconds); the planner drops a quote asking more.
+   * The window is the agent's SLA + 600 s, and the market refuses a payment signed for less, so this must admit the
+   * common 1-day SLA (87 000 s): at 15 000 the planner dropped most of the market. An authorization holds its
+   * sub-account's money until it lands or expires, but only an agent that hangs AND refuses CancelTask holds it that long.
    */
-  get maxPaymentTimeoutS() { return num('ROOK_MAX_PAYMENT_TIMEOUT_S', 15_000); },
+  get maxPaymentTimeoutS() { return num('ROOK_MAX_PAYMENT_TIMEOUT_S', 90_000); },
+  /**
+   * How long Rook waits for one hire to deliver before it sends CancelTask and moves on (when the agent accepts the
+   * cancel): its SLA + ROOK_PAYMENT_GRACE_S, at most this. An advertised 1-day SLA must not hold a run for a day.
+   */
+  get hirePatienceS() { return num('ROOK_HIRE_PATIENCE_S', 1_800); },
 
   /** `live`: `pnpm live`, nothing simulated (checkProfile). Anything else: the simulation profile of `pnpm dev`. */
   get profile() { return process.env.ROOK_PROFILE === 'live' ? 'live' as const : 'sim' as const; },

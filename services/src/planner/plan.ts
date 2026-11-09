@@ -21,7 +21,9 @@ export const DraftSubtask = z.object({
   self_do_ok: z.boolean(),
   criteria: z.array(DraftCriterion),
 });
-export const Draft = z.object({ subtasks: z.array(DraftSubtask).min(1).max(5) });
+// No subtasks only with `not_a_task`: the message is not a task to plan ("go ahead", "hi"), and that sentence says why.
+export const Draft = z.object({ subtasks: z.array(DraftSubtask).max(5), not_a_task: z.string().optional() })
+  .refine((d) => d.subtasks.length > 0 || !!d.not_a_task?.trim(), 'return at least one subtask, or set not_a_task');
 export type DraftSubtask = z.infer<typeof DraftSubtask>;
 export type Draft = z.infer<typeof Draft>;
 
@@ -123,7 +125,8 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
       search_terms: k.d.search_terms,
       criteria: validateCriteria(id, i, k.d.criteria, finalId, notes),
       cap_atomic: k.cap.toString(),
-      deadline_s: k.self_do ? 0 : Math.max(...k.candidates.map((c) => c.sla_seconds)),
+      // Rook waits for a hire at most ROOK_HIRE_PATIENCE_S, whatever SLA the agent advertises.
+      deadline_s: k.self_do ? 0 : Math.min(Math.max(...k.candidates.map((c) => c.sla_seconds)), config.hirePatienceS),
       self_do: k.self_do,
       candidates: k.candidates,
     };
