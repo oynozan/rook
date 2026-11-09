@@ -2,6 +2,7 @@
 // then reading the contract's NEP-297 "task_created" event from the outcome. Pure functions, no Next.js or Node imports,
 // so the browser and the tests both use them.
 import type { Network } from './network';
+import type { PlanView } from './orchestrator';
 
 /**
  * What POST /tasks/:id/approve returns in chain mode. Any signed-in account funds its own task: `funder` is that account
@@ -52,7 +53,7 @@ type Outcome = {
 };
 
 export type FundingResult =
-  | { kind: 'created'; task_id: string; funder: string | null; budget: string | null }
+  | { kind: 'created'; task_id: string; funder: string | null; budget: string | null; reserve: string | null; caps: string[] | null }
   | { kind: 'refunded'; reason: string } // the contract refused the msg and the token sent the USDC back
   | { kind: 'failed'; reason: string } // the transaction failed: no USDC left the wallet
   | { kind: 'unknown' }; // no outcome to read (some wallets return none)
@@ -74,6 +75,20 @@ function failureText(status: unknown): string | null {
 /** A receipt that ran to the end. NEAR keeps a failed receipt's logs, though its state changes were rolled back. */
 const succeeded = (status: unknown) => !!status && typeof status === 'object' && ('SuccessValue' in status || 'SuccessReceiptId' in status);
 
+/** The data of a budget contract event (NEP-297, standard "rook") named `name`, or null for any other log. */
+function rookEvent(log: string, name: string): Record<string, unknown> | null {
+  if (!log.startsWith('EVENT_JSON:')) return null;
+  try {
+    const ev = JSON.parse(log.slice('EVENT_JSON:'.length));
+    const d = ev?.standard === 'rook' && ev.event === name && Array.isArray(ev.data) ? ev.data[0] : null;
+    return d && typeof d === 'object' ? d : null;
+  } catch {
+    return null;
+  }
+}
+
+const str = (v: unknown) => (typeof v === 'string' ? v : null);
+
 /**
  * Reads what the funding transfer did. Only logs from receipts the contract itself executed count, and task_created
  * only from one that succeeded: create_task logs it before storing the task, so a receipt that failed after the log
@@ -86,13 +101,10 @@ export function readFundingOutcome(outcome: unknown, contractId: string): Fundin
   for (const r of o.receipts_outcome) {
     if (r.outcome?.executor_id !== contractId) continue;
     for (const log of r.outcome.logs ?? []) {
-      if (log.startsWith('EVENT_JSON:') && succeeded(r.outcome.status)) {
-        let ev: any;
-        try { ev = JSON.parse(log.slice('EVENT_JSON:'.length)); } catch { continue; }
-        const d = ev?.standard === 'rook' && ev.event === 'task_created' && Array.isArray(ev.data) ? ev.data[0] : null;
-        if (d && typeof d.task_id === 'string' && /^[0-9a-z]+$/.test(d.task_id)) {
-          return { kind: 'created', task_id: d.task_id, funder: typeof d.funder === 'string' ? d.funder : null, budget: typeof d.budget === 'string' ? d.budget : null };
-        }
+      const d = succeeded(r.outcome.status) ? rookEvent(log, 'task_created') : null;
+      if (d && typeof d.task_id === 'string' && /^[0-9a-z]+$/.test(d.task_id)) {
+        const caps = Array.isArray(d.caps) && d.caps.every((c) => typeof c === 'string') ? (d.caps as string[]) : null;
+        return { kind: 'created', task_id: d.task_id, funder: str(d.funder), budget: str(d.budget), reserve: str(d.reserve), caps };
       }
       const m = log.match(/^refunding \d+: (.+)$/);
       if (m) refund = m[1];
@@ -102,6 +114,93 @@ export function readFundingOutcome(outcome: unknown, contractId: string): Fundin
   if (refund) return { kind: 'refunded', reason: refund };
   const failed = failureText(o.status);
   return failed ? { kind: 'failed', reason: failed } : { kind: 'unknown' };
+}
+
+/** What a task_created event must carry to be one plan's funding: the budget, the reserve and the caps, in order. */
+export type Terms = { budget: string; reserve: string; caps: string[] };
+
+/** The terms the approved transfer asks the contract for. */
+export function termsOf(f: Funding): Terms | null {
+  const t = fundingTerms(f);
+  return t && { budget: f.amount_atomic, reserve: t.reserve_atomic, caps: t.caps };
+}
+
+/**
+ * The same terms from the plan, for when the funding instructions aren't in (Rook couldn't repeat them). The contract's
+ * caps are the hired subtasks' caps in plan order, and the orchestrator gives instructions only when the reserve the
+ * contract computes is the plan's.
+ */
+export const planTerms = (budget_atomic: string, plan: Pick<PlanView, 'subtasks' | 'budget'>): Terms => ({
+  budget: budget_atomic,
+  reserve: plan.budget.reserve_atomic || '0',
+  caps: plan.subtasks.filter((s) => !s.self_do).map((s) => s.cap_atomic),
+});
+
+const usd = (atomic: string | null) => (atomic !== null && /^\d+$/.test(atomic) ? `${(Number(atomic) / 1e6).toFixed(2)} USDC` : 'missing');
+
+/**
+ * Why a contract task isn't this plan's funding from `funder`, or null when it is. A transaction hash proves only that
+ * some transfer created some contract task: one made for another task (or by another account) must never be confirmed
+ * or refunded from this one. The orchestrator checks the same before it runs.
+ */
+export function fundingMismatch(c: Extract<FundingResult, { kind: 'created' }>, want: Terms, funder: string): string | null {
+  const caps = (cs: string[] | null) => (cs ? cs.map(usd).join(', ') : 'missing');
+  const bad = [
+    c.funder !== funder && `it was sent by ${c.funder ?? 'an unnamed account'}, not ${funder}`,
+    c.budget !== want.budget && `its budget is ${usd(c.budget)}, not ${usd(want.budget)}`,
+    c.reserve !== want.reserve && `its reserve is ${usd(c.reserve)}, not ${usd(want.reserve)}`,
+    JSON.stringify(c.caps) !== JSON.stringify(want.caps) && `its caps are ${caps(c.caps)}, not ${caps(want.caps)}`,
+  ].filter((x): x is string => !!x);
+  return bad.length ? bad.join('; ') : null;
+}
+
+/**
+ * What a failed confirm means for the USDC in the contract task. 'refund': Rook will never run this contract task for
+ * this task (it doesn't match the plan, or the task was stopped). 'refetch': the task moved on, or another confirm is
+ * binding it or has bound it, so the page catches up rather than offer a refund that could cut a starting run short.
+ * The web server's own refusal (this task's funding is already another contract task) is a 'refetch' too.
+ * 'retry': anything else (services down, the contract task not final yet).
+ */
+export function confirmFailure(message: string): 'refund' | 'refetch' | 'retry' {
+  if (/does not match the approved plan|^task is (killed|cancelled), funded needs approved/.test(message)) return 'refund';
+  if (/already being checked|already funded by|already funds|funded needs approved|won't confirm contract task/.test(message)) return 'refetch';
+  return 'retry';
+}
+
+export type CloseResult =
+  | { kind: 'refunded'; amount: string } // the contract sent what it held for the task back to the funder
+  | { kind: 'refused'; reason: string } // nothing came back: the contract refused, or the refund transfer failed
+  | { kind: 'unknown' }; // no evidence either way (no outcome, or one without the contract's event)
+
+/** A receipt's or transaction's return value, decoded from base64, or null when it has none. */
+function successValue(status: unknown): string | null {
+  const v = (status as { SuccessValue?: unknown } | null)?.SuccessValue;
+  if (typeof v !== 'string') return null;
+  try { return atob(v); } catch { return null; }
+}
+
+/**
+ * Reads what the funder's close_task did. A refund counts only with evidence: the transaction didn't fail, its final
+ * value isn't false (on_task_closed returns false when the USDC transfer to the funder failed, and the contract put the
+ * money back in the task), and the contract logged task_closed for this task with ok true.
+ */
+export function readCloseOutcome(outcome: unknown, contractId: string, taskId: string): CloseResult {
+  const o = outcome as Outcome | null;
+  if (!o || typeof o !== 'object' || !Array.isArray(o.receipts_outcome)) return { kind: 'unknown' };
+  const failed = failureText(o.status);
+  if (failed) return { kind: 'refused', reason: failed };
+  let closed: { ok: boolean; refund: string } | null = null;
+  for (const r of o.receipts_outcome) {
+    if (r.outcome?.executor_id !== contractId || !succeeded(r.outcome.status)) continue;
+    for (const log of r.outcome.logs ?? []) {
+      const d = rookEvent(log, 'task_closed');
+      if (d?.task_id === taskId) closed = { ok: d.ok === true, refund: str(d.refund) ?? '0' };
+    }
+  }
+  if (successValue(o.status) === 'false' || closed?.ok === false) {
+    return { kind: 'refused', reason: 'the USDC transfer to your wallet failed, so the contract kept the USDC in the task' };
+  }
+  return closed?.ok ? { kind: 'refunded', amount: closed.refund } : { kind: 'unknown' };
 }
 
 /** The final outcome of a transaction by hash, from a NEAR RPC. Retries while the node hasn't seen it yet. */
@@ -133,6 +232,14 @@ export async function untilFinal<T extends { ok: boolean; message?: string }>(ru
     await new Promise((ok) => setTimeout(ok, gapMs));
   }
 }
+
+/**
+ * Whether a task's money ever moved, so its run started: a ledger snapshot, a receipt, a hire, or a ledger event. The
+ * kill's own ledger line doesn't count: runner.ts kill() adds it even to a task stopped before its funding was bound.
+ */
+export const moneyMoved = (snap: { ledger: unknown; receipts: unknown[] }, events: { type: string; data?: { op?: string } }[]) =>
+  !!snap.ledger || snap.receipts.length > 0
+  || events.some((e) => e.type === 'hire_sent' || e.type === 'receipt' || (e.type === 'ledger' && e.data?.op !== 'kill'));
 
 /** Closing the wallet or declining is a choice, not a failure. */
 export const isWalletCancel = (message: string) => /clos|cancel|reject|denied|declin/i.test(message);

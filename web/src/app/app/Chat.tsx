@@ -7,10 +7,13 @@ import { Mark } from '@/components/Navbar';
 import { useSmoothScroll } from '@/components/SmoothScroll';
 import { AiStatus } from '@/components/ui/ai-status';
 import { WebSearch, type WebSource } from '@/components/ui/web-search';
-import { approve, cancel, confirmFunding, draftTask, stop } from './actions';
+import { approve, cancel, confirmFunding, draftTask, forgetTransfer, fundingRefunded, rememberTransfer, stop } from './actions';
 import { go } from './AppShell';
 import { Composer, type ComposerErrors } from './Composer';
-import { closeTaskTransaction, fetchTxOutcome, fundingTerms, fundingTransaction, isWalletCancel, readFundingOutcome, txHashOf, type Funding, type FundingResult } from './funding';
+import {
+  closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
+  readCloseOutcome, readFundingOutcome, termsOf, txHashOf, type CloseResult, type Funding, type FundingResult, type Terms,
+} from './funding';
 import { explorerTx, NETWORK, rpcFor, type Network } from './network';
 import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary } from './orchestrator';
 import { useMode } from './mode';
@@ -297,57 +300,117 @@ function ReceiptProof({ r, network }: { r: Receipt; network: Network }) {
 
 const TX_HASH = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/;
 
+type Sent = NonNullable<TaskSnapshot['funding_sent']>;
+
+/** What a funding transfer did, read from NEAR by its hash; unknown while NEAR can't find it. */
+const lookUpFunding = (network: Network, tx: string, account: string, contractId: string) =>
+  fetchTxOutcome(rpcFor(network), tx, account).then((o) => readFundingOutcome(o, contractId), (): FundingResult => ({ kind: 'unknown' }));
+
+function TxLink({ network, tx }: { network: Network; tx: string | null }) {
+  return tx ? <> (<a href={explorerTx(network, tx)} target="_blank" rel="noopener noreferrer" className={LINK}>transaction</a>)</> : null;
+}
+
 /**
  * Chain mode, after approval: the owner's wallet sends the budget to the Rook contract (SHARED API DECISION 4), the
- * contract's task_created event names the contract task, and Rook checks it against the plan before running.
+ * contract's task_created event names the contract task, and Rook checks it against the plan before running. The
+ * transfer's hash is remembered by this web server the moment the wallet returns it, so no reload offers a second one.
  */
-function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping, autoStart }: {
-  id: string; plan: PlanView; funding: Funding | null; sent: TaskSnapshot['funding_sent'];
+function FundingStep({ id, plan, budget, funding, sent, contractId, onConfirmed, onStop, stopping, autoStart, onBusy, onChanged }: {
+  id: string; plan: PlanView; budget: string; funding: Funding | null; sent: TaskSnapshot['funding_sent'];
+  /** The contract to read and refund from when Rook couldn't repeat the funding instructions. */
+  contractId: string | null;
   onConfirmed: () => void; onStop: () => void; stopping: boolean;
   /** One click: the approve button already asked for the transfer, so the wallet opens as soon as it is ready. */
   autoStart: boolean;
+  /** The wallet is open, or a transfer is being read or confirmed: the task must not be stopped meanwhile. */
+  onBusy: (busy: boolean) => void;
+  /** The server's record changed, or the task may have moved on: load the task again. */
+  onChanged: () => void;
 }) {
   const wallet = useWallet();
   const { network: modeNetwork } = useMode();
   const [phase, setPhase] = useState<'idle' | 'wallet' | 'reading' | 'confirming'>('idle');
   const [error, setError] = useState<string | null>(null);
+  // The error means Rook will never run this contract task for this task, so its USDC can only go back.
+  const [refundable, setRefundable] = useState(false);
   // A transfer may have gone out but can't be read: ask for its hash, and offer no second transfer (or Cancel) meanwhile.
   const [pasted, setPasted] = useState<string | null>(null);
   const [mayBeUnsent, setMayBeUnsent] = useState(false); // the wallet errored, so the owner may know nothing went out
   // The transfer created a contract task: from then on this step only confirms it, before the server remembers it too.
-  const [made, setMade] = useState<TaskSnapshot['funding_sent']>(null);
-  const done = sent ?? made;
+  const [made, setMade] = useState<{ contract_task_id: string; tx_hash: string | null } | null>(null);
+  // This page's own transfer, by hash, while what it did isn't settled: sent from here, or remembered by the server.
+  const [ownTx, setOwnTx] = useState<string | null>(null);
+  const held = sent && !sent.refunded && sent.contract_task_id ? { contract_task_id: sent.contract_task_id, tx_hash: sent.tx_hash } : null;
+  const done = held ?? made;
+  const unreadTx = !done && sent && !sent.refunded && !sent.contract_task_id ? sent.tx_hash : null;
+  const pendingTx = done ? null : ownTx ?? unreadTx;
   const network = funding?.network ?? modeNetwork;
+  const contract = funding?.contract_id ?? contractId;
+  const want: Terms = (funding && termsOf(funding)) ?? planTerms(budget, plan);
+
+  useEffect(() => { onBusy(phase !== 'idle'); }, [phase, onBusy]);
+  useEffect(() => () => onBusy(false), [onBusy]);
 
   async function confirm(cid: string, tx: string | null) {
+    setError(null);
+    setRefundable(false);
     setPhase('confirming');
-    const out = await confirmFunding(id, { contract_task_id: cid, tx_hash: tx });
+    const out = await confirmFunding(id, { contract_task_id: cid, tx_hash: tx })
+      .catch(() => ({ ok: false as const, message: "This page couldn't reach Rook's web server" }));
     setPhase('idle');
     if (out.ok) return onConfirmed();
-    setError(`Rook didn't start the run: ${out.message.replace(/\.?$/, '.')} Your USDC is in contract task ${cid}. Confirm again to start it, or take the USDC back to your wallet.`);
+    const why = out.message.replace(/\.?$/, '.');
+    const next = confirmFailure(out.message);
+    onChanged(); // the task may have moved on meanwhile: bound by another confirm, or stopped
+    if (next === 'refund') {
+      setRefundable(true);
+      return setError(`Rook won't run this task from contract task ${cid}: ${why} Take the USDC back to your wallet.`);
+    }
+    if (next === 'refetch') {
+      if (/already funds/.test(out.message)) setMade(null); // another task's contract task: this one can be funded again
+      return setError(`Rook didn't start the run from here: ${why}`);
+    }
+    setError(`Rook didn't start the run: ${why} Your USDC is in contract task ${cid}. Confirm again to start it.`);
   }
 
-  const lookUp = (tx: string) => fetchTxOutcome(rpcFor(network), tx, wallet.account ?? '')
-    .then((o) => readFundingOutcome(o, funding?.contract_id ?? ''), (): FundingResult => ({ kind: 'unknown' }));
+  const lookUp = (tx: string) => lookUpFunding(network, tx, wallet.account ?? '', contract ?? '');
 
-  async function settle(result: FundingResult, tx: string | null) {
-    if (result.kind !== 'unknown') { setPasted(null); setMayBeUnsent(false); }
+  /**
+   * What a transfer did, once read. `own`: it is the transfer this page is waiting on (or no hash was known), not just any
+   * pasted hash, so a transfer that moved nothing ends the wait. `start`: confirm a match at once (the owner just acted).
+   */
+  async function settle(result: FundingResult, tx: string | null, own: boolean, start: boolean) {
     if (result.kind === 'created') {
+      const bad = fundingMismatch(result, want, wallet.account ?? '');
+      if (bad) {
+        setPhase('idle');
+        return setError(`That transaction created contract task ${result.task_id}, but not for this plan: ${bad}. Rook won't use it for this task.`);
+      }
+      setPasted(null); setMayBeUnsent(false); setOwnTx(null);
       setMade({ contract_task_id: result.task_id, tx_hash: tx });
-      return confirm(result.task_id, tx);
+      if (start) return confirm(result.task_id, tx);
+      setPhase('idle');
+      if (tx) await rememberTransfer(id, { tx_hash: tx, contract_task_id: result.task_id }).catch(() => null);
+      return;
     }
     setPhase('idle');
-    if (result.kind === 'refunded') setError(`The Rook contract refused the transfer, so the USDC went back to your wallet: ${result.reason}`);
-    else if (result.kind === 'failed') setError(`The transfer failed on NEAR, so no USDC left your wallet: ${result.reason}`);
-    else {
-      setPasted(tx ?? pasted ?? '');
-      setError("Rook can't tell what the transfer did. Paste its transaction hash from your wallet's history so Rook can read it. Until then Rook won't offer the transfer again, so nothing is sent twice.");
+    if (result.kind === 'unknown') {
+      setPasted((p) => tx ?? p ?? '');
+      return setError("Rook can't tell what the transfer did. Paste its transaction hash from your wallet's history so Rook can read it. Until then Rook won't offer the transfer again, so nothing is sent twice.");
     }
+    const why = result.kind === 'refunded'
+      ? `The Rook contract refused the transfer, so the USDC went back to your wallet: ${result.reason.replace(/\.?$/, '.')}`
+      : `The transfer failed on NEAR, so no USDC left your wallet: ${result.reason.replace(/\.?$/, '.')}`;
+    if (!own) return setError(`${why} That was a different transaction, so Rook still can't tell what your transfer did.`);
+    setPasted(null); setMayBeUnsent(false); setOwnTx(null);
+    setError(why);
+    if (tx) { await forgetTransfer(id, tx).catch(() => null); onChanged(); }
   }
 
   async function fund() {
     if (!funding) return;
     setError(null);
+    setRefundable(false);
     setPhase('wallet');
     let outcome: unknown;
     try {
@@ -364,8 +427,15 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping, a
     }
     setPhase('reading');
     const tx = txHashOf(outcome);
+    if (tx) {
+      // Remembered before anything reads the outcome or calls Rook, so a reload or a closed tab never offers a second
+      // transfer. This page reads it itself.
+      autoRead.current = tx;
+      setOwnTx(tx);
+      await rememberTransfer(id, { tx_hash: tx }).catch(() => null);
+    }
     const first = readFundingOutcome(outcome, funding.contract_id);
-    await settle(first.kind === 'unknown' && tx ? await lookUp(tx) : first, tx);
+    await settle(first.kind === 'unknown' && tx ? await lookUp(tx) : first, tx, true, true);
   }
 
   async function lookUpPasted() {
@@ -373,34 +443,76 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping, a
     if (!TX_HASH.test(tx)) return setError("That isn't a NEAR transaction hash.");
     setError(null);
     setPhase('reading');
-    await settle(await lookUp(tx), tx);
+    await settle(await lookUp(tx), tx, !pendingTx || tx === pendingTx, true);
   }
+
+  // A transfer remembered only by its hash (the page closed or reloaded while reading it): read it once, so the page can
+  // confirm or refund the contract task it created.
+  const autoRead = useRef<string | null>(null);
+  useEffect(() => {
+    if (!unreadTx || !contract || !wallet.account || phase !== 'idle' || autoRead.current === unreadTx) return;
+    autoRead.current = unreadTx;
+    setOwnTx(unreadTx);
+    setPhase('reading');
+    void lookUp(unreadTx).then((r) => settle(r, unreadTx, true, false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per remembered hash; settle reads the current state
+  }, [unreadTx, contract, wallet.account, phase]);
 
   // One click: the approve button asked for the transfer, so the wallet opens once, as soon as the instructions are in.
   const autoFired = useRef(false);
   useEffect(() => {
-    if (!autoStart || autoFired.current || !funding || sent || made || phase !== 'idle') return;
+    if (!autoStart || autoFired.current || !funding || done || pendingTx || phase !== 'idle') return;
     if (!fundingTerms(funding) || funding.network !== NETWORK || !wallet.account || (funding.funder && wallet.account !== funding.funder)) return;
     autoFired.current = true;
     void fund();
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fires once per approval; fund reads the current state
-  }, [autoStart, funding, sent, made, phase, wallet.account]);
+  }, [autoStart, funding, done, pendingTx, phase, wallet.account]);
 
   const busyLabel = { wallet: 'Confirm in your wallet…', reading: 'Reading the transaction…', confirming: 'Checking with Rook…' } as const;
+  const pasteForm = () => (
+    <form className="mt-3 flex flex-wrap gap-2" onSubmit={(e) => { e.preventDefault(); void lookUpPasted(); }}>
+      <label className="sr-only" htmlFor={`tx-${id}`}>Transaction hash</label>
+      <input id={`tx-${id}`} value={pasted ?? ''} onChange={(e) => setPasted(e.target.value)} placeholder="Transaction hash"
+        className="min-h-11 min-w-0 flex-1 rounded-full bg-ink/5 px-4 font-mono text-sm outline-none focus:ring-2 focus:ring-accent/50" />
+      <ActionButton onClick={() => void lookUpPasted()} busy={phase !== 'idle'}>Look it up</ActionButton>
+      {mayBeUnsent && <ActionButton onClick={() => { setPasted(null); setMayBeUnsent(false); setError(null); }}>Nothing was sent</ActionButton>}
+    </form>
+  );
+  const stopButton = (label: string) => (
+    <ActionButton onClick={onStop} busy={stopping} disabled={phase !== 'idle'} title={phase !== 'idle' ? 'Wait until the transfer is settled' : undefined}>
+      {stopping ? 'Stopping…' : label}
+    </ActionButton>
+  );
 
   // Already sent from this account's wallet (remembered by this web server, or just read here): confirm it, never offer
-  // a second transfer.
+  // a second transfer. The refund appears only when Rook will never run this contract task, and not while confirming.
   if (done) {
+    const refund = refundable && phase === 'idle' && contract;
     return (
       <div className="rounded-2xl border border-ink/15 p-4">
         <p>
           Your wallet already sent the funding. It created contract task <span className="font-mono">{done.contract_task_id}</span>
-          {done.tx_hash && <> (<a href={explorerTx(network, done.tx_hash)} target="_blank" rel="noopener noreferrer" className={LINK}>transaction</a>)</>}, and Rook hasn&apos;t started the run yet.
+          <TxLink network={network} tx={done.tx_hash} />, and Rook hasn&apos;t started the run yet.
         </p>
         <div className="mt-4 flex flex-wrap gap-3">
-          <ActionButton primary onClick={() => confirm(done.contract_task_id, done.tx_hash)} busy={phase !== 'idle'}>{phase === 'idle' ? 'Confirm funding and start' : busyLabel[phase]}</ActionButton>
-          {error && funding && <RefundButton contractId={funding.contract_id} taskId={done.contract_task_id} network={network} />}
+          {refund
+            ? <RefundButton id={id} contractId={refund} taskId={done.contract_task_id} network={network} onRefunded={onChanged} />
+            : <ActionButton primary onClick={() => confirm(done.contract_task_id, done.tx_hash)} busy={phase !== 'idle'}>{phase === 'idle' ? 'Confirm funding and start' : busyLabel[phase]}</ActionButton>}
+          {stopButton('Stop')}
         </div>
+        {error && <p role="alert" className="mt-3 text-alert">{error}</p>}
+      </div>
+    );
+  }
+
+  // This page's transfer went out, and what it did isn't settled: read it, or ask for its hash. Never a second transfer.
+  if (pendingTx) {
+    return (
+      <div className="rounded-2xl border border-ink/15 p-4">
+        <p>Your wallet sent the funding transfer<TxLink network={network} tx={pendingTx} />.</p>
+        {phase === 'reading' && <div className="mt-3"><Working label="Reading what it did" /></div>}
+        <div className="mt-4 flex flex-wrap gap-3">{stopButton('Stop')}</div>
+        {pasted !== null && pasteForm()}
         {error && <p role="alert" className="mt-3 text-alert">{error}</p>}
       </div>
     );
@@ -443,19 +555,12 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping, a
           title={pasted !== null ? 'Rook can’t tell yet whether your first transfer went out' : undefined}>
           {phase === 'idle' ? `Fund ${usdc(funding.amount_atomic)} USDC with wallet` : busyLabel[phase]}
         </ActionButton>
-        <ActionButton onClick={onStop} busy={stopping} disabled={pasted !== null} title={pasted !== null ? 'Your wallet may have sent the funding: look the transaction up first' : undefined}>
+        <ActionButton onClick={onStop} busy={stopping} disabled={phase !== 'idle' || pasted !== null}
+          title={phase !== 'idle' ? 'Wait until the transfer is settled' : pasted !== null ? 'Your wallet may have sent the funding: look the transaction up first' : undefined}>
           {stopping ? 'Cancelling…' : 'Cancel'}
         </ActionButton>
       </div>
-      {pasted !== null && (
-        <form className="mt-3 flex flex-wrap gap-2" onSubmit={(e) => { e.preventDefault(); void lookUpPasted(); }}>
-          <label className="sr-only" htmlFor={`tx-${id}`}>Transaction hash</label>
-          <input id={`tx-${id}`} value={pasted} onChange={(e) => setPasted(e.target.value)} placeholder="Transaction hash"
-            className="min-h-11 min-w-0 flex-1 rounded-full bg-ink/5 px-4 font-mono text-sm outline-none focus:ring-2 focus:ring-accent/50" />
-          <ActionButton onClick={() => void lookUpPasted()} busy={phase !== 'idle'}>Look it up</ActionButton>
-          {mayBeUnsent && <ActionButton onClick={() => { setPasted(null); setMayBeUnsent(false); setError(null); }}>Nothing was sent</ActionButton>}
-        </form>
-      )}
+      {pasted !== null && pasteForm()}
       {error && <p role="alert" className="mt-3 text-alert">{error}</p>}
     </div>
   );
@@ -464,34 +569,101 @@ function FundingStep({ id, plan, funding, sent, onConfirmed, onStop, stopping, a
 /**
  * The funder takes the budget back: its own wallet calls close_task on the contract, which refunds what it holds for
  * that contract task. Works for a task Rook never ran (no subtask holds money); the contract refuses anything else.
+ * It says the refund went through only on the contract's word (readCloseOutcome); then this web server remembers it
+ * and stops the task, which can't run without that funding.
  */
-function RefundButton({ contractId, taskId, network }: { contractId: string; taskId: string; network: Network }) {
+function RefundButton({ id, contractId, taskId, network, onRefunded }: { id: string; contractId: string; taskId: string; network: Network; onRefunded: () => void }) {
   const wallet = useWallet();
-  const [state, setState] = useState<'idle' | 'busy' | 'done'>('idle');
+  const [state, setState] = useState<'idle' | 'wallet' | 'reading' | 'done'>('idle');
+  const [amount, setAmount] = useState('0');
   const [tx, setTx] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   async function refund() {
-    setState('busy');
+    setState('wallet');
     setError(null);
+    setTx(null);
+    let out: unknown;
     try {
-      const out = await wallet.sendTransaction(closeTaskTransaction(contractId, taskId));
-      const failure = (out as { status?: { Failure?: unknown } } | null)?.status?.Failure;
-      if (failure) throw new Error(`the contract refused: ${JSON.stringify(failure).slice(0, 200)}`);
-      setTx(txHashOf(out));
-      setState('done');
+      out = await wallet.sendTransaction(closeTaskTransaction(contractId, taskId));
     } catch (e) {
       setState('idle');
-      setError(`The refund didn't go through: ${(e instanceof Error ? e.message : String(e)).replace(/\.?$/, '.')}`);
+      return setError(`The refund didn't go through: ${(e instanceof Error ? e.message : String(e)).replace(/\.?$/, '.')}`);
     }
+    const hash = txHashOf(out);
+    setTx(hash);
+    let result = readCloseOutcome(out, contractId, taskId);
+    if (result.kind === 'unknown' && hash) {
+      // Some wallets return no outcome: read the transaction from NEAR before saying anything.
+      setState('reading');
+      result = await fetchTxOutcome(rpcFor(network), hash, wallet.account ?? '')
+        .then((o) => readCloseOutcome(o, contractId, taskId), (): CloseResult => ({ kind: 'unknown' }));
+    }
+    if (result.kind === 'refunded') {
+      setAmount(result.amount);
+      setState('done');
+      await fundingRefunded(id, { contract_task_id: taskId, refund_tx: hash }).catch(() => null);
+      return onRefunded();
+    }
+    setState('idle');
+    setError(result.kind === 'refused' ? `The refund didn't go through: ${result.reason.replace(/\.?$/, '.')}`
+      : hash ? "Rook can't tell yet whether the refund went through. Check the transaction before you try again."
+      : "Your wallet didn't say what happened, so Rook can't tell whether the refund went through. Check your wallet's history before you try again.");
   }
-  if (state === 'done') {
-    return <p className="text-sm">Refund sent to your wallet{tx && <> (<a href={explorerTx(network, tx)} target="_blank" rel="noopener noreferrer" className={LINK}>transaction</a>)</>}.</p>;
-  }
+  if (state === 'done') return <p className="text-sm">Refund sent to your wallet: {usdc(amount)} USDC<TxLink network={network} tx={tx} />.</p>;
   return (
     <span className="flex flex-col gap-1">
-      <ActionButton onClick={refund} busy={state === 'busy'} disabled={!wallet.account}>{state === 'busy' ? 'Confirm in your wallet…' : 'Refund to my wallet'}</ActionButton>
-      {error && <span role="alert" className="text-sm text-alert">{error}</span>}
+      <ActionButton onClick={refund} busy={state !== 'idle'} disabled={!wallet.account}>
+        {state === 'wallet' ? 'Confirm in your wallet…' : state === 'reading' ? 'Reading the transaction…' : 'Refund to my wallet'}
+      </ActionButton>
+      {error && <span role="alert" className="text-sm text-alert">{error}<TxLink network={network} tx={tx} /></span>}
     </span>
+  );
+}
+
+/**
+ * A task stopped before Rook bound its funding: where the wallet's transfer is, and the way back. A transfer remembered
+ * only by its hash (the page closed while reading it) is read first, so the refund names the contract task it created.
+ */
+function HeldFunding({ id, sent, want, contractId, network, onChanged }: {
+  id: string; sent: Sent; want: Terms; contractId: string | null; network: Network; onChanged: () => void;
+}) {
+  const wallet = useWallet();
+  const unread = !sent.refunded && !sent.contract_task_id ? sent.tx_hash : null;
+  const [note, setNote] = useState<string | null>(null);
+  const [tries, setTries] = useState(0);
+  useEffect(() => {
+    if (!unread || !contractId || !wallet.account) return;
+    const account = wallet.account;
+    let live = true;
+    setNote(null);
+    void lookUpFunding(network, unread, account, contractId).then(async (r) => {
+      if (!live) return;
+      if (r.kind === 'unknown') return setNote("Rook can't read it from NEAR yet.");
+      if (r.kind === 'created') {
+        const bad = fundingMismatch(r, want, account);
+        if (bad) return setNote(`It created contract task ${r.task_id}, which isn't this plan's funding: ${bad}.`);
+        await rememberTransfer(id, { tx_hash: unread, contract_task_id: r.task_id }).catch(() => null);
+      } else await forgetTransfer(id, unread).catch(() => null); // it moved no USDC
+      onChanged();
+    });
+    return () => { live = false; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- read once per hash; `want` and `onChanged` don't change which transfer it is
+  }, [unread, contractId, wallet.account, network, id, tries]);
+
+  if (sent.refunded) return <p className="mt-3">Your funding went back to your wallet<TxLink network={network} tx={sent.refund_tx} />.</p>;
+  if (sent.contract_task_id) {
+    return (
+      <div className="mt-3">
+        <p>Your wallet&apos;s funding transfer is still in contract task <span className="font-mono">{sent.contract_task_id}</span><TxLink network={network} tx={sent.tx_hash} />. Take it back to your wallet:</p>
+        {contractId && <div className="mt-3"><RefundButton id={id} contractId={contractId} taskId={sent.contract_task_id} network={network} onRefunded={onChanged} /></div>}
+      </div>
+    );
+  }
+  return (
+    <div className="mt-3">
+      <p>Your wallet sent a funding transfer<TxLink network={network} tx={sent.tx_hash} />. {note ?? (contractId ? 'Reading what it did…' : '')}</p>
+      {note && <div className="mt-3"><ActionButton onClick={() => setTries((n) => n + 1)}>Read it again</ActionButton></div>}
+    </div>
   );
 }
 
@@ -702,6 +874,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   const [actError, setActError] = useState<string | null>(null);
   const [funding, setFunding] = useState<Funding | null>(null);
   const [fundingConfirmed, setFundingConfirmed] = useState(false);
+  const [fundingBusy, setFundingBusy] = useState(false); // the funding step has the wallet open or a transfer in hand
   const [autoFund, setAutoFund] = useState(false); // approved here with one click: the wallet opens right away
   const status = snap?.task.status;
   const { mode, paymentsOff, noMoney, chain, network } = useMode();
@@ -709,12 +882,15 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   // Approved but not yet funded (chain mode): the run starts only once the funding is bound, so this survives a reload.
   // The in-memory ledger starts the run at once, so there this state is gone in a moment.
   const awaitingFunding = status === 'approved' && !snap?.ledger && !noMoney;
+  // A transfer already sent needs no new instructions (the mode names the contract, the plan gives the terms). Asking
+  // again would count its own contract task against the funder's open-task limit, and fail at that limit.
+  const sentLive = !!snap?.funding_sent && !snap.funding_sent.refunded;
   const fundingAsked = useRef(false);
   useEffect(() => {
-    if (!awaitingFunding || funding || fundingConfirmed || fundingAsked.current) return;
+    if (!awaitingFunding || sentLive || funding || fundingConfirmed || fundingAsked.current) return;
     fundingAsked.current = true; // approve again: the orchestrator repeats the funding instructions for an approved task
     void approve(id).then((out) => (out.ok ? out.funding && setFunding(out.funding) : setActError(out.message)));
-  }, [awaitingFunding, funding, fundingConfirmed, id]);
+  }, [awaitingFunding, sentLive, funding, fundingConfirmed, id]);
   const known = tasks?.find((t) => t.id === id)?.status;
   const [revealing, setRevealing] = useState(fresh); // a plan just drafted here: agents land first, then the plan
   const onAgentsDone = useCallback(() => { setRevealing(false); onRevealed(id); }, [id, onRevealed]);
@@ -762,8 +938,8 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   const { task, plan, receipts, ledger, final_result } = snap;
   const visible = feed.slice(0, shown);
   // Never "Running" before the budget is locked: approved with no ledger yet is the funding step, and a task stopped
-  // before any funding never ran.
-  const unfunded = (task.status === 'approved' || task.status === 'killed') && !ledger && !feed.length;
+  // before any funding never ran. Only money says the run started, not any feed line (a kill adds one regardless).
+  const unfunded = (task.status === 'approved' || task.status === 'killed') && !moneyMoved(snap, events);
   const started = !['draft', 'planned', 'cancelled'].includes(task.status) && !unfunded && !(task.status === 'failed' && !feed.length);
   const live = started && !settled;
   const spent = visible.reduce((sum, l) => sum + (l.paid ?? 0), 0);
@@ -801,13 +977,14 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
             Here&apos;s the plan. The caps add up to <span className="font-medium">{usdc(plan.budget.allocated_atomic)} USDC</span>
             {BigInt(plan.budget.reserve_atomic || 0) > 0n && <>, and up to {usdc(plan.budget.reserve_atomic)} USDC more can come from the reserve when a subtask needs more than its cap</>}.{' '}
             {started ? 'You approved it.' : task.status === 'cancelled' ? 'You cancelled it, so nothing was spent.' : task.status === 'approved' ? 'You approved it. Nothing has been spent yet.' : task.status !== 'killed' ? 'Nothing has been spent.'
-              : snap.funding_sent ? <>You stopped it before Rook started the run, so no agent was paid. Your wallet&apos;s funding transfer is still in contract task <span className="font-mono">{snap.funding_sent.contract_task_id}</span>; take it back below.</>
               : 'You stopped it before Rook started the run, so no agent was paid.'}
           </p>
           <PlanCard plan={plan} usage={usage} />
           {plan.dropped.length > 0 && <p className="mt-2 text-sm text-ink/65">Left out: {plan.dropped.map((d) => `${d.title} (${d.reason})`).join(', ')}</p>}
-          {task.status === 'killed' && unfunded && snap.funding_sent && contractId && (
-            <div className="mt-3"><RefundButton contractId={contractId} taskId={snap.funding_sent.contract_task_id} network={network} /></div>
+          {/* Stopped before Rook bound the wallet's transfer: whatever the feed shows, its USDC is the funder's to take back. */}
+          {task.status === 'killed' && !ledger && snap.funding_sent && (
+            <HeldFunding id={id} sent={snap.funding_sent} want={(funding && termsOf(funding)) ?? planTerms(task.budget_atomic, plan)}
+              contractId={contractId} network={network} onChanged={refetch} />
           )}
           {task.status === 'planned' && (
             <div className="rook-in mt-4 flex flex-wrap gap-3" style={{ animationDelay: `${250 + plan.subtasks.length * 90}ms` }}>
@@ -827,7 +1004,8 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
         <RookMessage>
           {fundingConfirmed
             ? <Working label="Funding confirmed. Starting the run" />
-            : <FundingStep id={id} plan={plan} funding={funding} sent={snap.funding_sent ?? null} stopping={busy === 'stop'} onStop={() => act('stop')} autoStart={autoFund}
+            : <FundingStep id={id} plan={plan} budget={task.budget_atomic} funding={funding} sent={snap.funding_sent ?? null} contractId={contractId}
+                stopping={busy === 'stop'} onStop={() => act('stop')} autoStart={autoFund} onBusy={setFundingBusy} onChanged={refetch}
                 onConfirmed={() => { setFundingConfirmed(true); refetch(); router.refresh(); }} />}
         </RookMessage>
       )}
@@ -842,7 +1020,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
               {' '}Spent {usdc(spent)} of {usdc(task.budget_atomic)} USDC{simNote}
               {reserveUsed > 0 && <span className="text-ink/65">, {usdc(reserveUsed)} from the reserve</span>}
             </p>
-            {!TERMINAL.has(task.status) && <ActionButton onClick={() => act('stop')} busy={busy === 'stop'}>{busy === 'stop' ? 'Stopping…' : 'Stop'}</ActionButton>}
+            {!TERMINAL.has(task.status) && <ActionButton onClick={() => act('stop')} busy={busy === 'stop'} disabled={fundingBusy}>{busy === 'stop' ? 'Stopping…' : 'Stop'}</ActionButton>}
           </div>
           <Activity lines={visible} live={live} caughtUp={caughtUp} closing={task.status === 'aggregating' || task.status === 'closing' || task.status === 'closed'} outcome={task.status} timed={!!timed.current} />
         </RookMessage>

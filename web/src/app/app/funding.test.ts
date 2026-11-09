@@ -3,7 +3,10 @@
 // (contract/budget/src/lib.rs: emit() and ft_on_transfer's refund log). Run: npx tsx --test src/app/app/*.test.ts
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { closeTaskTransaction, fetchTxOutcome, fundingTerms, fundingTransaction, isWalletCancel, readFundingOutcome, txHashOf, untilFinal, type Funding } from './funding';
+import {
+  closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
+  readCloseOutcome, readFundingOutcome, termsOf, txHashOf, untilFinal, type Funding,
+} from './funding';
 
 const F: Funding = {
   contract_id: 'rook.near', usdc: '17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1', network: 'mainnet',
@@ -45,8 +48,71 @@ test('reads the contract task id from task_created', () => {
     { executor_id: 'rook.near', logs: [event('task_created', { task_id: '1a', funder: 'ops.near', budget: '3000000', reserve: '600000', caps: ['1000000', '800000'] })] },
     { executor_id: F.usdc, logs: [] },
   ]);
-  assert.deepEqual(readFundingOutcome(o, 'rook.near'), { kind: 'created', task_id: '1a', funder: 'ops.near', budget: '3000000' });
+  assert.deepEqual(readFundingOutcome(o, 'rook.near'), { kind: 'created', task_id: '1a', funder: 'ops.near', budget: '3000000', reserve: '600000', caps: ['1000000', '800000'] });
   assert.equal(txHashOf(o), '9xQ1oFz3pW7Zb6cQx6m3c7cR8mN4m2Qe5yVfK1sLdTzA');
+});
+
+test('a contract task is this plan\'s funding only with its budget, reserve, caps and funder', () => {
+  const created = { kind: 'created' as const, task_id: '1a', funder: 'ops.near', budget: '3000000', reserve: '600000', caps: ['1000000', '800000'] };
+  const want = termsOf(F)!;
+  assert.deepEqual(want, { budget: '3000000', reserve: '600000', caps: ['1000000', '800000'] });
+  assert.equal(fundingMismatch(created, want, 'ops.near'), null);
+  // The plan gives the same terms when the instructions aren't in: hired subtasks' caps in plan order.
+  const sub = (cap_atomic: string, self_do = false) => ({ id: cap_atomic, title: 't', cap_atomic, self_do, criteria: [], candidates: [] });
+  const plan = { subtasks: [sub('1000000'), sub('0', true), sub('800000')], budget: { reserve_atomic: '600000', allocated_atomic: '1800000' } };
+  assert.deepEqual(planTerms('3000000', plan), want);
+
+  // Another task's transfer, another account's, or a different plan: never this one.
+  assert.match(fundingMismatch({ ...created, funder: 'alice.near' }, want, 'ops.near') ?? '', /sent by alice\.near, not ops\.near/);
+  assert.match(fundingMismatch({ ...created, budget: '5000000' }, want, 'ops.near') ?? '', /budget is 5\.00 USDC, not 3\.00 USDC/);
+  assert.match(fundingMismatch({ ...created, reserve: '0' }, want, 'ops.near') ?? '', /reserve is 0\.00 USDC/);
+  assert.match(fundingMismatch({ ...created, caps: ['800000', '1000000'] }, want, 'ops.near') ?? '', /caps are 0\.80 USDC, 1\.00 USDC/);
+  assert.match(fundingMismatch({ ...created, caps: null, funder: null }, want, 'ops.near') ?? '', /unnamed account.*caps are missing/);
+});
+
+test('a failed confirm offers the refund only when Rook will never run that contract task', () => {
+  assert.equal(confirmFailure('contract task 1a does not match the approved plan: caps differ'), 'refund');
+  assert.equal(confirmFailure('task is killed, funded needs approved'), 'refund');
+  assert.equal(confirmFailure('task is cancelled, funded needs approved'), 'refund');
+  // Another confirm is binding it, or has: a refund could cut the starting run short.
+  assert.equal(confirmFailure('task t_1 or contract task 1a is already being checked'), 'refetch');
+  assert.equal(confirmFailure('task is already funded by contract task 1a'), 'refetch');
+  assert.equal(confirmFailure('contract task 1a already funds t_2'), 'refetch');
+  assert.equal(confirmFailure('task is running, funded needs approved'), 'refetch');
+  assert.equal(confirmFailure("This task's funding is already contract task 1a, so Rook won't confirm contract task 1b for it."), 'refetch');
+  assert.equal(confirmFailure("Rook's services aren't running. Start them with pnpm dev, then try again."), 'retry');
+  assert.equal(confirmFailure('no contract task 1a'), 'retry');
+});
+
+test('a refund counts only with the contract\'s word for it', () => {
+  const closed = (ok: boolean, task_id = '1a') => event('task_closed', { task_id, funder: 'ops.near', refund: '3000000', ok, deleted: ok });
+  const value = (v: string) => ({ SuccessValue: btoa(v) });
+  // close_task -> ft_transfer to the funder -> on_task_closed, which logs task_closed and returns true.
+  const refunded = outcome([
+    { executor_id: 'rook.near', logs: [], status: { SuccessReceiptId: 'r1' } },
+    { executor_id: F.usdc, logs: [], status: value('') },
+    { executor_id: 'rook.near', logs: [closed(true)], status: value('true') },
+  ], value('true'));
+  assert.deepEqual(readCloseOutcome(refunded, 'rook.near', '1a'), { kind: 'refunded', amount: '3000000' });
+
+  // The refund transfer failed (say the wallet has no USDC storage): the contract kept the USDC, and returned false.
+  const kept = outcome([
+    { executor_id: 'rook.near', logs: [], status: { SuccessReceiptId: 'r1' } },
+    { executor_id: F.usdc, logs: [], status: { Failure: { ActionError: { index: 0, kind: { FunctionCallError: { ExecutionError: 'The account ops.near is not registered' } } } } } },
+    { executor_id: 'rook.near', logs: [closed(false)], status: value('false') },
+  ], value('false'));
+  assert.equal(readCloseOutcome(kept, 'rook.near', '1a').kind, 'refused');
+
+  // The contract refused the close: already refunded and deleted, or a subtask still holds money.
+  const panicked = { Failure: { ActionError: { index: 0, kind: { FunctionCallError: { ExecutionError: 'Smart contract panicked: unknown task' } } } } };
+  assert.deepEqual(readCloseOutcome(outcome([{ executor_id: 'rook.near', logs: [], status: panicked }], panicked), 'rook.near', '1a'), { kind: 'refused', reason: 'Smart contract panicked: unknown task' });
+
+  // No evidence: no outcome, no event, an event for another task, or one logged by another account.
+  assert.deepEqual(readCloseOutcome(undefined, 'rook.near', '1a'), { kind: 'unknown' });
+  assert.deepEqual(readCloseOutcome({ transaction: { hash: 'h' } }, 'rook.near', '1a'), { kind: 'unknown' });
+  assert.deepEqual(readCloseOutcome(outcome([{ executor_id: 'rook.near', logs: [] }], value('true')), 'rook.near', '1a'), { kind: 'unknown' });
+  assert.deepEqual(readCloseOutcome(outcome([{ executor_id: 'rook.near', logs: [closed(true, '1b')] }], value('true')), 'rook.near', '1a'), { kind: 'unknown' });
+  assert.deepEqual(readCloseOutcome(outcome([{ executor_id: 'evil.near', logs: [closed(true)] }], value('true')), 'rook.near', '1a'), { kind: 'unknown' });
 });
 
 test('ignores a task_created logged by any other account', () => {
@@ -129,6 +195,16 @@ test('confirming retries only while the just-created contract task is not final 
   const missing = async () => (++n, { ok: false, message: 'no contract task 1a' });
   assert.equal((await untilFinal(missing, 4, 1)).message, 'no contract task 1a');
   assert.equal(n, 4);
+});
+
+test('a task stopped before its funding was bound never ran, though the kill adds a ledger line', () => {
+  const none = { ledger: null, receipts: [] };
+  assert.equal(moneyMoved(none, []), false);
+  assert.equal(moneyMoved(none, [{ type: 'task_status' }, { type: 'ledger', data: { op: 'kill' } }]), false);
+  assert.equal(moneyMoved(none, [{ type: 'ledger', data: { op: 'restored' } }]), true);
+  assert.equal(moneyMoved(none, [{ type: 'hire_sent' }]), true);
+  assert.equal(moneyMoved({ ledger: null, receipts: [{}] }, []), true);
+  assert.equal(moneyMoved({ ledger: { spent_atomic: '0' }, receipts: [] }, []), true);
 });
 
 test('wallet cancellations read as a choice', () => {

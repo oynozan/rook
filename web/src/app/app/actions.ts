@@ -1,7 +1,7 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { recordFundingSent, takeDraftSlot } from './db';
+import { forgetFundingOf, forgetUnreadFunding, fundingSent, markFundingRefunded, recordFundingSent, takeDraftSlot } from './db';
 import { untilFinal, type Funding } from './funding';
 import { approveTask, cancelTask, createTask, fundedTask, getMode, getTask, killTask, OrchestratorDown } from './orchestrator';
 import { currentAccount } from './session';
@@ -82,21 +82,68 @@ export async function approve(id: string) { return asOwner((owner) => approveTas
 export async function cancel(id: string) { return asOwner((owner) => cancelTask(id, owner)); }
 export async function stop(id: string) { return asOwner((owner) => killTask(id, owner)); }
 
+const TX_HASH = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/;
+const CONTRACT_TASK = /^[0-9a-z]{1,20}$/;
+const txOf = (v: unknown) => (typeof v === 'string' && TX_HASH.test(v) ? v : null);
+
+// Funding records are keyed by task and signed-in account, so writing one needs no orchestrator: a record only ever
+// changes what this account's own page offers, and the page shows tasks only to their owner.
+
+/**
+ * The wallet returned the funding transfer's hash. Remembered before anything reads the outcome or calls Rook, so a
+ * reload, a closed tab or a restarting orchestrator never leads to a second transfer. With `contract_task_id`, the
+ * page read what the transfer created.
+ */
+export async function rememberTransfer(id: string, input: { tx_hash: string; contract_task_id?: string | null }): Promise<{ ok: boolean }> {
+  const owner = await currentAccount();
+  const tx = txOf(input?.tx_hash);
+  const cid = input?.contract_task_id == null ? null : String(input.contract_task_id);
+  if (!owner || !tx || (cid !== null && !CONTRACT_TASK.test(cid))) return { ok: false };
+  return { ok: recordFundingSent(String(id), owner, { tx_hash: tx, contract_task_id: cid }) };
+}
+
+/** The remembered transfer moved no USDC (it failed, or the contract refunded it at once): the page may offer it again. */
+export async function forgetTransfer(id: string, tx_hash: string) {
+  const owner = await currentAccount();
+  const tx = txOf(tx_hash);
+  if (owner && tx) forgetUnreadFunding(String(id), owner, tx);
+}
+
 /**
  * The wallet's funding transfer created contract task `contract_task_id`. It is remembered first, so a reload shows
- * "confirm" instead of offering to fund twice; then the orchestrator checks the contract task against the plan.
+ * "confirm" instead of offering to fund twice; then the orchestrator checks the contract task against the plan. A task
+ * whose funding is already a different contract task keeps it.
  */
 export async function confirmFunding(id: string, input: { contract_task_id: string; tx_hash: string | null }): Promise<ActResult> {
   const owner = await currentAccount();
   if (!owner) return { ok: false, message: SIGN_IN };
   const cid = String(input?.contract_task_id ?? '');
-  const tx = typeof input?.tx_hash === 'string' && /^[1-9A-HJ-NP-Za-km-z]{43,44}$/.test(input.tx_hash) ? input.tx_hash : null;
-  if (!/^[0-9a-z]{1,20}$/.test(cid)) return { ok: false, message: 'That contract task id is not valid.' };
-  try {
-    if ((await getTask(id, owner)).task.owner !== owner) return { ok: false, message: `No task ${id}.` };
-  } catch (e) {
-    return { ok: false, message: e instanceof OrchestratorDown ? DOWN : `No task ${id}.` };
+  if (!CONTRACT_TASK.test(cid)) return { ok: false, message: 'That contract task id is not valid.' };
+  if (!recordFundingSent(id, owner, { contract_task_id: cid, tx_hash: txOf(input?.tx_hash) })) {
+    const was = fundingSent(id, owner);
+    return { ok: false, message: `This task's funding is already ${was?.contract_task_id ? `contract task ${was.contract_task_id}` : 'another transfer'}, so Rook won't confirm contract task ${cid} for it.` };
   }
-  recordFundingSent(id, owner, { contract_task_id: cid, tx_hash: tx });
-  return untilFinal(() => act(() => fundedTask(id, cid, owner)));
+  const out = await untilFinal(() => act(() => fundedTask(id, cid, owner)));
+  // That contract task funds another of this account's tasks: it isn't this one's, so this one can be funded again.
+  const other = !out.ok && out.message.match(/^contract task \S+ already funds (\S+)/)?.[1];
+  if (other && other !== id) forgetFundingOf(id, owner, cid);
+  return out;
+}
+
+/**
+ * The funder's close_task refunded contract task `contract_task_id` (the page read the contract's task_closed event).
+ * The record says so, so the page stops saying the USDC is in the contract; and a task still waiting for that funding is
+ * stopped, since it can't run without it. A task whose funding is another contract task (bound or not) is left alone.
+ */
+export async function fundingRefunded(id: string, input: { contract_task_id: string; refund_tx: string | null }): Promise<ActResult> {
+  const owner = await currentAccount();
+  if (!owner) return { ok: false, message: SIGN_IN };
+  const cid = String(input?.contract_task_id ?? '');
+  if (!CONTRACT_TASK.test(cid)) return { ok: false, message: 'That contract task id is not valid.' };
+  if (!markFundingRefunded(id, owner, cid, txOf(input?.refund_tx))) return { ok: true };
+  return act(async () => {
+    const { task, ledger } = await getTask(id, owner);
+    const waiting = !['closed', 'cancelled', 'killed', 'failed'].includes(task.status) && (!ledger || ledger.contract_task_id === cid);
+    return task.owner === owner && waiting ? killTask(id, owner) : {};
+  });
 }

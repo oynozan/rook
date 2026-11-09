@@ -67,8 +67,11 @@ export type TaskSnapshot = {
     contract_id?: string | null; contract_task_id?: string; subtasks?: LedgerSub[];
   } | null;
   final_result: { final_markdown: string; abandoned: string[] } | null;
-  /** Added by this web server (api/tasks/[id]): a funding transfer the browser reported for a task not yet running. */
-  funding_sent?: { contract_task_id: string; tx_hash: string | null } | null;
+  /**
+   * Added by this web server (api/tasks/[id]): a funding transfer the browser reported for a task not yet running.
+   * contract_task_id is null while only its hash is known; refunded once the funder's close_task took the USDC back.
+   */
+  funding_sent?: { contract_task_id: string | null; tx_hash: string | null; refunded: boolean; refund_tx: string | null } | null;
 };
 
 export type RookEvent = { seq: number; type: string; subtask_id?: string; data: any };
