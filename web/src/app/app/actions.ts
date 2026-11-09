@@ -91,9 +91,9 @@ async function act(run: () => Promise<object & { funding?: Funding }>, action?: 
     if (e instanceof OrchestratorDown) return { ok: false, message: DOWN };
     const message = e instanceof Error ? e.message : '';
     const status = e instanceof OrchestratorError ? e.status : null;
-    // The task or its conversation moved on since the page loaded (a revision sent from another tab, say): the list
-    // catches up, so the page shows what changed.
-    if (status === 409) refreshSidebar();
+    // A button refused because the task or its conversation moved on since the page loaded (a revision sent from
+    // another tab, say): the list catches up, so the page shows what changed.
+    if (action && status === 409) refreshSidebar();
     if (!action) {
       const out = fundingCallFailure(status, message);
       if (!out.raw) console.error('[web] funding:', message || e);
