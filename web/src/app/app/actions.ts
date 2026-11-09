@@ -16,9 +16,10 @@ export type DraftResult =
 
 /**
  * `raw`: the message is the orchestrator's own refusal (a 4xx), which the funding step reads (funding.ts confirmFailure)
- * and words for the page. Without it the message is a sentence for people, shown as it is.
+ * and words for the page. Without it the message is a sentence for people, shown as it is. `final`: asking again can
+ * never work (refusals.ts actionRefusal), so the page offers no Try again.
  */
-export type ActResult = { ok: true; funding?: Funding } | { ok: false; message: string; raw?: true };
+export type ActResult = { ok: true; funding?: Funding } | { ok: false; message: string; raw?: true; final?: true };
 
 // Each draft spends NEAR AI credit on the planner, so one account can't drain it. ponytail: per account only; many
 // throwaway accounts still add up, so the planner's own ROOK_LLM_MAX_USD cap is the backstop.
@@ -101,7 +102,7 @@ async function act(run: () => Promise<object & { funding?: Funding }>, action?: 
     }
     const plain = actionRefusal(action, status, message);
     if (!plain.known) console.error(`[web] ${action}:`, message || e);
-    return { ok: false, message: plain.message };
+    return { ok: false, message: plain.message, ...(plain.final ? { final: true as const } : {}) };
   }
 }
 

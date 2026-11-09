@@ -420,8 +420,8 @@ function TxLink({ network, tx }: { network: Network; tx: string | null }) {
  */
 function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contractId, onConfirmed, onStop, stopping, autoStart, onBusy, onChanged }: {
   id: string; plan: PlanView; budget: string; funding: Funding | null;
-  /** Why the funding instructions didn't load (a sentence), and how to ask for them again. */
-  trouble: string | null; onRetry: () => void;
+  /** Why the funding instructions didn't load (a sentence), and how to ask for them again (null: asking can never work). */
+  trouble: string | null; onRetry: (() => void) | null;
   sent: TaskSnapshot['funding_sent'];
   /** The contract to read and refund from when Rook couldn't repeat the funding instructions. */
   contractId: string | null;
@@ -700,8 +700,8 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
       <div className="rounded-2xl border border-ink/15 p-4">
         {trouble ? <p role="alert">{trouble}</p> : <Working label="Getting the funding transfer ready" />}
         <div className="mt-4 flex flex-wrap gap-3">
-          {trouble && <ActionButton primary onClick={onRetry} disabled={stopping}>Try again</ActionButton>}
-          <ActionButton onClick={onStop} busy={stopping}>{stopping ? 'Cancelling…' : 'Cancel'}</ActionButton>
+          {trouble && onRetry && <ActionButton primary onClick={onRetry} disabled={stopping}>Try again</ActionButton>}
+          <ActionButton primary={!!trouble && !onRetry} onClick={onStop} busy={stopping}>{stopping ? 'Cancelling…' : 'Cancel'}</ActionButton>
         </div>
         {error && <p role="alert" className="mt-3 text-alert">{error}</p>}
       </div>
@@ -1149,7 +1149,8 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised }: { id:
   const sentLive = !!snap?.funding_sent && !snap.funding_sent.refunded;
   const fundingAsked = useRef(false);
   // Why the funding instructions didn't come: the funding step says so, with Try again (which clears it) and Cancel.
-  const [fundingTrouble, setFundingTrouble] = useState<string | null>(null);
+  // `final`: asking again can never work (a 0 USDC cap), so only Cancel is offered.
+  const [fundingTrouble, setFundingTrouble] = useState<{ message: string; final?: true } | null>(null);
   useEffect(() => {
     if (!awaitingFunding || sentLive || funding || fundingConfirmed || fundingTrouble !== null || fundingAsked.current) return;
     fundingAsked.current = true; // approve again: the orchestrator repeats the funding instructions for an approved task
@@ -1158,7 +1159,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised }: { id:
       .then((out) => {
         fundingAsked.current = false;
         if (out.ok && out.funding) return setFunding(out.funding);
-        setFundingTrouble(out.ok ? FUNDING_NOT_READY : out.message);
+        setFundingTrouble(out.ok ? { message: FUNDING_NOT_READY } : { message: out.message, ...(out.final ? { final: true as const } : {}) });
         refetch(); // the task may have moved on meanwhile (stopped, or funded from another page)
       });
   }, [awaitingFunding, sentLive, funding, fundingConfirmed, fundingTrouble, id, refetch]);
@@ -1300,7 +1301,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised }: { id:
         <RookMessage>
           {fundingConfirmed
             ? <Working label="Funding confirmed. Starting the run" />
-            : <FundingStep id={id} plan={plan} budget={task.budget_atomic} funding={funding} trouble={fundingTrouble} onRetry={() => setFundingTrouble(null)}
+            : <FundingStep id={id} plan={plan} budget={task.budget_atomic} funding={funding} trouble={fundingTrouble?.message ?? null} onRetry={fundingTrouble?.final ? null : () => setFundingTrouble(null)}
                 sent={snap.funding_sent ?? null} contractId={contractId}
                 stopping={busy === 'stop'} onStop={() => act('stop')} autoStart={autoFund} onBusy={setFundingBusy} onChanged={refetch}
                 onConfirmed={() => { setFundingConfirmed(true); refetch(); router.refresh(); }} />}

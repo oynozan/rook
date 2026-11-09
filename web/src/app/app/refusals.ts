@@ -26,9 +26,10 @@ const CHAIN_READ = /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|-> \d{3}$|NEA
 
 /**
  * `status`: the orchestrator's HTTP status, or null when it never answered with one. `known` false: a failure on Rook's
- * side or a refusal these words don't name, so the orchestrator's own message belongs in the server log.
+ * side or a refusal these words don't name, so the orchestrator's own message belongs in the server log. `final`:
+ * asking again can never work, so the page offers no Try again.
  */
-export function actionRefusal(action: TaskAction, status: number | null, message: string): { message: string; known: boolean } {
+export function actionRefusal(action: TaskAction, status: number | null, message: string): { message: string; known: boolean; final?: true } {
   const known = (text: string) => ({ message: text, known: true });
   if (status === 404 && /^no task /.test(message)) return known("Rook has no task at this link for the wallet you're signed in with.");
   if (status === 409) {
@@ -40,8 +41,12 @@ export function actionRefusal(action: TaskAction, status: number | null, message
     // Stop on a page that still showed the run after the report was written.
     if (/^the report is written/.test(message)) return known('This task has already finished. Rook is sending the unspent USDC back to your wallet.');
     if (/^the plan has no subtasks/.test(message)) return known("This plan has nothing to run, so it can't be started.");
-    // A plan drafted before 0 USDC quotes were dropped: asking again can never work, only a new plan can.
-    if (/0 USDC cap/.test(message)) return known('This plan has a part capped at 0 USDC, which the Rook contract refuses. Draft the task again.');
+    // A plan drafted before 0 USDC quotes were dropped: asking again can never work, only a new plan can. Approved, it
+    // waits for its funding, so it is cancelled first; still planned, a new message revises it.
+    if (/^this plan has a 0 USDC cap\b/.test(message)) {
+      const next = action === 'fund' ? 'Cancel it and draft the task again.' : 'Draft the task again.';
+      return { ...known(`This plan has a part capped at 0 USDC, which the Rook contract refuses. ${next}`), final: true };
+    }
     if (/^live market: paying agents/.test(message)) return known("Paying live agents isn't switched on yet, so this plan can't be started.");
     m = /already has (\d+) open tasks on the contract/.exec(message);
     if (m) {

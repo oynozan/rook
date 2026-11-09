@@ -30,10 +30,13 @@ test('known refusals: no task for this account, an empty plan, payments off, the
   assert.match(limit, /refund it to your wallet\.$/);
   assert.equal(words('approve', 409, "budget 0.05 USDC is below the contract's minimum of 0.10 USDC"),
     "This task's budget is below the contract's smallest, 0.10 USDC. Draft it again with a larger budget.");
-  // A plan with a 0 USDC cap: drafting again is the only way, on the button and on the funding step's re-ask.
-  const zero = 'This plan has a part capped at 0 USDC, which the Rook contract refuses. Draft the task again.';
-  assert.deepEqual(actionRefusal('approve', 409, 'this plan has a 0 USDC cap; draft the task again'), { message: zero, known: true });
-  assert.equal(words('fund', 409, 'this plan has a 0 USDC cap; draft the task again'), zero);
+  // A plan with a 0 USDC cap: drafting again is the only way, so asking again is never offered. On the funding step the
+  // plan is approved and waits for its funding: it is cancelled first.
+  const zero = 'This plan has a part capped at 0 USDC, which the Rook contract refuses.';
+  assert.deepEqual(actionRefusal('approve', 409, 'this plan has a 0 USDC cap; draft the task again'), { message: `${zero} Draft the task again.`, known: true, final: true });
+  assert.deepEqual(actionRefusal('fund', 409, 'this plan has a 0 USDC cap; draft the task again'), { message: `${zero} Cancel it and draft the task again.`, known: true, final: true });
+  assert.equal(words('approve', 409, 'this plan has a 10 USDC cap'), "Rook couldn't get this task started right now. Try again in a moment."); // not a 0 cap
+  assert.equal(actionRefusal('approve', 409, 'task is cancelled, approve needs planned').final, undefined);
 });
 
 test('anything else gets a plain fallback per button, and is marked for the server log', () => {
