@@ -323,5 +323,21 @@ test("hires in the plan's candidate order, not by price; the next /plan carries 
   assert.ok(PlanRequest.safeParse(body).success);
   assert.ok(body.history['holders-good'].pass >= 1);
   assert.ok(Object.values(body.history).every((h: any) => h.pass + h.fail > 0)); // judged receipts only
-  await call(`${orch.url}/tasks/${next.id}/cancel`, {});
+  await until(async () => (await snap(next.id)).task.status === 'failed'); // its plan is empty
+});
+
+test('a plan with every part dropped ends the task as failed, with the reason in plain words and the plan kept', async () => {
+  const cases: [string[], RegExp][] = [
+    [['no fitting agent', 'no fitting agent'], /^No agent on the market can do any part of this task\.$/],
+    [['over budget'], /^Every part costs more than this budget allows; try a larger budget\.$/],
+    [['no fitting agent', 'over budget'], /^No agent on the market can do some parts of this task, and the others cost more than this budget allows\.$/],
+  ];
+  for (const [reasons, want] of cases) {
+    plan = { subtasks: [], dropped: reasons.map((reason, i) => ({ title: `Part ${i + 1}`, reason })), budget: budget('0'), notes: [], llm_calls: [] };
+    const created = await call(`${orch.url}/tasks`, { prompt: 'p', budget_usdc: '1' });
+    assert.equal(created.status, 'failed');
+    assert.match(created.error, want);
+    assert.deepEqual(created.plan.dropped.map((d: any) => d.reason), reasons);
+    await assert.rejects(call(`${orch.url}/tasks/${created.id}/approve`, {}), /approve needs planned/);
+  }
 });

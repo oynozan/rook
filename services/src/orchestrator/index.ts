@@ -160,6 +160,13 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
           if (isTerminal(t.status)) return;
           setPlan(t, plan);
           emit(t, 'plan', plan);
+          if (!plan.subtasks.length) {
+            // Every part was dropped: nothing can be approved, so the task ends here, keeping the plan for its drop list.
+            t.error = emptyPlanReason(plan.dropped);
+            emit(t, 'error', { kind: 'no_plan', message: t.error });
+            setStatus(t, 'failed');
+            return;
+          }
           setStatus(t, 'planned');
         } catch (e: any) {
           if (isTerminal(t.status)) return; // killed while planning: stays killed
@@ -296,6 +303,15 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       db?.close();
     },
   };
+}
+
+/** Why a plan with no subtasks can't run, in plain words, from its drop reasons (plan.ts buildPlan). */
+export function emptyPlanReason(dropped: Plan['dropped']): string {
+  const over = dropped.some((d) => d.reason === 'over budget');
+  const none = dropped.some((d) => d.reason !== 'over budget');
+  if (over && none) return 'No agent on the market can do some parts of this task, and the others cost more than this budget allows.';
+  if (over) return 'Every part costs more than this budget allows; try a larger budget.';
+  return 'No agent on the market can do any part of this task.';
 }
 
 /** Contract caps in plan order (self_do subtasks have none), Rook n -> contract n, and the reserve the contract will compute. */
