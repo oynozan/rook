@@ -256,7 +256,7 @@ test('caps never fall below the first-ranked price, and the drop rule follows ra
     if (!s) continue; // the cap did not fit the budget
     const cap = BigInt(s.cap_atomic), first = BigInt(all[0].price_atomic), reserve = BigInt(p20.budget.reserve_atomic);
     assert.ok(cap >= first && cap <= 2n * first, `case ${i}`);
-    assert.equal(reserve, (20_000_000n * BigInt(Math.min(9000, Number(((20_000_000n - cap) * 10_000n) / 20_000_000n)))) / 10_000n, `case ${i}`);
+    assert.equal(reserve, (20_000_000n * BigInt(Math.min(9000, Math.floor(Number(((20_000_000n - cap) * 10_000n) / 20_000_000n) / 100) * 100))) / 10_000n, `case ${i}`);
     assert.equal(s.candidates[0].handle, all[0].handle, `case ${i}`);
     assert.deepEqual(s.candidates.map((c) => c.handle), all.filter((c) => BigInt(c.price_atomic) <= cap + reserve).map((c) => c.handle), `case ${i}`);
   }
