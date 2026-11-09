@@ -106,6 +106,11 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     if (typeof owner === 'string' && t.owner !== owner) throw new HttpError(404, `no task ${id}`);
     return t;
   };
+  /** A newer message is being planned as a revision of `t`, a planned task: its plan replaces `t` once ready (8.9). */
+  const beingRevised = (t: Task) => t.status === 'planned' && [...tasks.values()].some((x) => {
+    const parent = x.status === 'draft' && x.parent_id !== null ? tasks.get(x.parent_id) : undefined;
+    return parent !== undefined && openPlan(ancestors(parent, tasks)) === t;
+  });
 
   // With ROOK_DB set, tasks survive restarts. A plan waiting for approval carries on, and so does a chain-mode task
   // waiting for its funding transaction. A chain-mode task bound to a contract task is rebuilt from the contract before
@@ -266,9 +271,13 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       if (config.market === 'live' && !chain) {
         throw new HttpError(409, 'live market: paying agents needs ROOK_LEDGER=chain (signer, chain-gateway, budget contract); see docs/x402-payments-plan.md');
       }
+      // A newer message is revising this plan, and its plan replaces this one once ready: two live plans otherwise.
+      const revising = () => { if (beingRevised(t)) throw new HttpError(409, 'Wait for the revised plan below.'); };
+      revising();
       if (chain && !isFree(t)) {
         // Rook never creates the task on chain: the human funds it with the caps they approve, then calls /funded.
         const funding = await fundingInstructions(t, await contractCfg(), !!reprint);
+        revising(); // sent while the funding was being read
         setStatus(t, 'approved');
         return { ...taskView(t), funding };
       }

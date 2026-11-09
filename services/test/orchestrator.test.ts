@@ -399,7 +399,7 @@ test('a follow-up on a finished task gives the planner the earlier messages and 
   await call(`${orch.url}/tasks/${third.id}/cancel`, {});
 });
 
-test('a revision replaces the plan it changes once its own plan is ready; a reply that is not a task leaves that plan usable', async () => {
+test('a revision replaces the plan it changes once its own plan is ready, and that plan waits for it; a reply that is not a task leaves that plan usable', async () => {
   plan = holdersPlan();
   const first = await call(`${orch.url}/tasks`, { prompt: 'Due diligence on the NEAR token', budget_usdc: '3', owner: 'alice.near' });
   assert.equal(first.status, 'planned');
@@ -421,20 +421,33 @@ test('a revision replaces the plan it changes once its own plan is ready; a repl
   assert.deepEqual(evs.at(-1).data, { from: 'planned', to: 'cancelled' });
   await assert.rejects(call(`${orch.url}/tasks/${first.id}/approve`, { owner: 'alice.near' }), /cancelled/);
 
-  // A plan approved while its revision was being drafted runs on: the revision does not cancel it.
-  plan = holdersPlan();
-  const runs = await call(`${orch.url}/tasks`, { prompt: 'Revise me', budget_usdc: '1', owner: 'alice.near' });
+  // While a revision is being planned, the plan it changes can't be approved, even through a failed reply: running it
+  // would leave two live plans. Once the revision is ready, it replaces that plan.
+  const approve = (id: string) => call(`${orch.url}/tasks/${id}/approve`, { owner: 'alice.near' });
+  const waits = (e: any) => e.status === 409 && e.message === 'Wait for the revised plan below.';
   let open!: () => void;
-  planGate = new Promise((ok) => (open = ok));
-  const late = await call(`${orch.url}/tasks`, { prompt: 'Make it shorter', budget_usdc: '1', owner: 'alice.near', parent_id: runs.id, wait: false });
-  assert.equal(late.status, 'draft');
-  await call(`${orch.url}/tasks/${runs.id}/approve`, { owner: 'alice.near' });
-  open();
-  planGate = Promise.resolve();
-  await until(async () => (await snap(late.id)).task.status === 'planned');
-  const ran = await ended(runs.id);
+  const gate = () => { planGate = new Promise((ok) => (open = ok)); };
+  const release = () => { open(); planGate = Promise.resolve(); };
+  plan = holdersPlan();
+  const base = await call(`${orch.url}/tasks`, { prompt: 'Revise me', budget_usdc: '1', owner: 'alice.near' });
+  const nod = await call(`${orch.url}/tasks`, { prompt: 'go ahead', budget_usdc: '1', owner: 'alice.near', parent_id: base.id });
+  gate();
+  const shorter = await call(`${orch.url}/tasks`, { prompt: 'Make it shorter', budget_usdc: '1', owner: 'alice.near', parent_id: nod.id, wait: false });
+  assert.equal(shorter.status, 'draft');
+  await assert.rejects(approve(base.id), waits);
+  release();
+  await until(async () => (await snap(shorter.id)).task.status === 'planned');
+  assert.deepEqual([(await snap(base.id)).task.status, (await snap(base.id)).task.replaced_by], ['cancelled', shorter.id]);
+
+  // A revision that fails leaves the plan as it was, and it can run then.
+  gate();
+  const reply2 = await call(`${orch.url}/tasks`, { prompt: 'go ahead', budget_usdc: '1', owner: 'alice.near', parent_id: shorter.id, wait: false });
+  await assert.rejects(approve(shorter.id), waits);
+  release();
+  await until(async () => (await snap(reply2.id)).task.status === 'failed');
+  assert.equal((await approve(shorter.id)).status, 'approved');
+  const ran = await ended(shorter.id);
   assert.deepEqual([ran.task.status, ran.task.replaced_by], ['closed', null]);
-  await call(`${orch.url}/tasks/${late.id}/cancel`, {});
 });
 
 test('a failed reply under a plan never hides it: once that plan runs, a message waits for the run, then follows up on it', async () => {
