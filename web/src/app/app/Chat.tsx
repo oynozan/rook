@@ -2,7 +2,7 @@
 
 import { AnimatePresence, motion } from 'motion/react';
 import { usePathname, useRouter } from 'next/navigation';
-import { Fragment, useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { Fragment, useCallback, useEffect, useId, useRef, useState, type ReactNode, type Ref } from 'react';
 import { Mark } from '@/components/Navbar';
 import { useSmoothScroll } from '@/components/SmoothScroll';
 import { AiStatus } from '@/components/ui/ai-status';
@@ -10,8 +10,9 @@ import { WebSearch, type WebSource } from '@/components/ui/web-search';
 import { approve, cancel, confirmFunding, draftTask, forgetContractTask, forgetTransfer, fundingInstructions, fundingRefunded, rememberTransfer, stop, type ActResult } from './actions';
 import { go } from './AppShell';
 import { Composer, type ComposerErrors, type ComposerThread } from './Composer';
+import { attemptNote, canEdit, canSendAgain, messageProblem, redoWait, shownInstead, shownTasks } from './chat-actions';
 import { conversationOf, revisedPlan } from './conversations';
-import { parseBudget } from './draft';
+import { checkDraft, parseBudget } from './draft';
 import { alertLine, deliveredParts, problemLine, skipReason } from './feed';
 import {
   balanceProblem, closeTaskTransaction, confirmFailure, contractHasTask, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
@@ -147,14 +148,103 @@ function useTask(id: string | null, account: string | null): Loaded {
 
 // ---- pieces of the thread ----
 
-function UserMessage({ prompt, budget, animate }: { prompt: string; budget: string; animate?: boolean }) {
+/** `note`: it took another message's place ("Edited", "Sent again"). `onEdit`: the newest message, still editable. */
+function UserMessage({ prompt, budget, animate, note, onEdit, editRef }: {
+  prompt: string; budget: string; animate?: boolean; note?: string | null; onEdit?: () => void; editRef?: Ref<HTMLButtonElement>;
+}) {
   return (
-    <div className={`flex justify-end ${animate ? 'rook-in' : ''}`}>
+    <div className={`flex flex-col items-end ${animate ? 'rook-in' : ''}`}>
       <div className="max-w-[85%] rounded-3xl rounded-br-md bg-ink/5 px-4 py-2.5 sm:px-5 sm:py-3">
         <p className="leading-snug whitespace-pre-wrap sm:text-lg">{prompt}</p>
-        <p className="mt-1 text-right text-sm text-ink/65">Budget {budget} USDC</p>
+        <p className="mt-1 text-right text-sm text-ink/65">Budget {budget} USDC{note && <span className="text-ink/55"> · {note}</span>}</p>
       </div>
+      {onEdit && (
+        <button
+          ref={editRef}
+          type="button"
+          onClick={onEdit}
+          className="-mb-2 inline-flex min-h-11 cursor-pointer items-center gap-1.5 rounded-full px-3 text-sm text-ink/65 transition-colors hover:bg-ink/5 hover:text-ink active:translate-y-px motion-reduce:transition-none"
+        >
+          <svg className="size-3.5" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+            <path d="M11.4 2.35a1.3 1.3 0 0 1 1.84 1.84L5.5 11.93l-2.75.82.82-2.75z" />
+          </svg>
+          Edit<span className="sr-only"> message</span>
+        </button>
+      )}
     </div>
+  );
+}
+
+/**
+ * The newest message, edited in place: its text and its budget. Enter saves (Shift+Enter starts a new line), Escape
+ * cancels. Save stays off until something changed: the same message again is "Send again".
+ */
+function MessageEditor({ prompt, budget, saving, errors, onSave, onCancel }: {
+  prompt: string; budget: string; saving: boolean; errors: ComposerErrors | null;
+  onSave: (prompt: string, budget: string) => void; onCancel: () => void;
+}) {
+  const [text, setText] = useState(prompt);
+  const [amount, setAmount] = useState(budget);
+  const area = useRef<HTMLTextAreaElement>(null);
+  const uid = useId();
+  useEffect(() => {
+    const el = area.current;
+    if (!el) return;
+    el.focus();
+    el.setSelectionRange(el.value.length, el.value.length);
+  }, []);
+  const was = parseBudget(budget), now = parseBudget(amount);
+  const changed = text.trim() !== prompt.trim() || (now.ok && was.ok ? now.atomic !== was.atomic : amount.trim() !== budget.trim());
+  const save = () => { if (!saving && changed) onSave(text, amount); };
+  const invalid = !!(errors?.prompt || errors?.budget);
+  return (
+    <form
+      noValidate
+      aria-label="Edit your message"
+      onSubmit={(e) => { e.preventDefault(); save(); }}
+      onKeyDown={(e) => { if (e.key === 'Escape' && !saving) { e.preventDefault(); e.stopPropagation(); onCancel(); } }}
+      className={`ml-auto w-full max-w-[85%] rounded-3xl rounded-br-md border bg-surface p-2 shadow-sm shadow-ink/5 transition-[border-color,box-shadow] duration-200 focus-within:ring-4 motion-reduce:transition-none sm:p-3 ${invalid ? 'border-alert/50 focus-within:ring-alert/10' : 'border-ink/15 focus-within:border-accent/50 focus-within:ring-accent/10'}`}
+    >
+      <textarea
+        ref={area}
+        aria-label="Your message"
+        aria-invalid={!!errors?.prompt}
+        aria-describedby={errors?.prompt ? `${uid}-prompt` : undefined}
+        value={text}
+        onChange={(e) => setText(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key !== 'Enter' || e.shiftKey || e.nativeEvent.isComposing) return;
+          e.preventDefault();
+          save();
+        }}
+        rows={2}
+        className="field-sizing-content block max-h-64 min-h-11 w-full resize-none overflow-y-auto bg-transparent px-2 pt-1.5 pb-1 leading-snug outline-none sm:px-3 sm:text-lg"
+      />
+      <div className="mt-1 flex flex-wrap items-center gap-2">
+        <label className={`inline-flex h-11 cursor-text items-center gap-1.5 rounded-full px-4 whitespace-nowrap text-ink/65 ring-inset transition-colors duration-200 focus-within:ring-2 motion-reduce:transition-none ${errors?.budget ? 'bg-alert/10 text-ink ring-1 ring-alert/50 focus-within:ring-alert/50' : 'bg-ink/5 hover:bg-ink/10 focus-within:bg-surface focus-within:ring-accent/50'}`}>
+          Budget
+          <input
+            inputMode="decimal"
+            autoComplete="off"
+            aria-invalid={!!errors?.budget}
+            aria-describedby={errors?.budget ? `${uid}-budget` : undefined}
+            value={amount}
+            onChange={(e) => setAmount(e.target.value)}
+            className="field-sizing-content max-w-[9ch] min-w-[2ch] bg-transparent font-medium text-ink tabular-nums outline-none"
+          />
+          USDC
+        </label>
+        <div className="ml-auto flex gap-2 max-sm:w-full">
+          <ActionButton onClick={onCancel} disabled={saving}>Cancel</ActionButton>
+          <ActionButton primary submit busy={saving} disabled={!changed} title={changed ? undefined : 'Change the message or its budget first'}>
+            {saving ? 'Saving…' : 'Save'}
+          </ActionButton>
+        </div>
+      </div>
+      {errors?.prompt && <p id={`${uid}-prompt`} className="mt-2 px-2 text-sm text-alert sm:px-3">{errors.prompt}</p>}
+      {errors?.budget && <p id={`${uid}-budget`} className="mt-2 px-2 text-sm text-alert sm:px-3">{errors.budget}</p>}
+      {errors?.message && <p role="alert" className="mt-2 px-2 text-sm text-alert sm:px-3">{errors.message}</p>}
+    </form>
   );
 }
 
@@ -180,11 +270,12 @@ function Working({ label }: { label: string }) {
   );
 }
 
-function ActionButton({ onClick, busy, disabled, title, primary, children }: { onClick: () => void; busy?: boolean; disabled?: boolean; title?: string; primary?: boolean; children: ReactNode }) {
+/** `submit`: the form's submit button (no onClick needed). */
+function ActionButton({ onClick, busy, disabled, title, primary, submit, children }: { onClick?: () => void; busy?: boolean; disabled?: boolean; title?: string; primary?: boolean; submit?: boolean; children: ReactNode }) {
   const off = disabled || busy;
   return (
     <button
-      type="button"
+      type={submit ? 'submit' : 'button'}
       onClick={onClick}
       disabled={off}
       title={title}
@@ -1122,11 +1213,32 @@ const UNREACHABLE = "This page couldn't reach Rook. Check your connection and tr
 /** A plan Rook cancelled because a message below it revised it. */
 const REPLACED = 'Replaced by the revised plan below.';
 
-/** `revised`: a newer message is revising this plan and is still being planned, so the plan waits for it. */
-function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised }: { id: string; loaded: Loaded; tasks: TaskSummary[] | null; onGrow: () => void; fresh: boolean; onRevealed: (id: string) => void; revised: boolean }) {
+/**
+ * The newest message drafted again in its place, as it was ("Send again") or edited. Resolves with what went wrong, or
+ * null once the new message is sent.
+ */
+type Redo = (old: { id: string; parent_id: string | null; prompt: string; budget_atomic: string }, prompt: string, budget: string) => Promise<ComposerErrors | null>;
+
+/**
+ * `revised`: a newer message is revising this plan and is still being planned, so the plan waits for it. `onRedo`: this
+ * is the newest message and nothing above it is planning or running, so it can be sent again or edited; `redoing`:
+ * that is under way; `locked`: another message is being sent.
+ */
+function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo, redoing, locked }: {
+  id: string; loaded: Loaded; tasks: TaskSummary[] | null; onGrow: () => void; fresh: boolean; onRevealed: (id: string) => void; revised: boolean;
+  onRedo?: Redo; redoing: boolean; locked: boolean;
+}) {
   const { snap, events, problem, refetch } = loaded;
   const router = useRouter();
   const wallet = useWallet();
+  const [editing, setEditing] = useState(false);
+  const [editErrors, setEditErrors] = useState<ComposerErrors | null>(null);
+  const [againError, setAgainError] = useState<string | null>(null);
+  const editButton = useRef<HTMLButtonElement>(null);
+  const facts = snap ? { status: snap.task.status, subtasks: snap.plan ? snap.plan.subtasks.length : null, ledger: !!snap.ledger } : null;
+  const editable = !!onRedo && !!facts && !!wallet.account && canEdit(facts);
+  const resendable = !!onRedo && !!facts && !!wallet.account && canSendAgain(facts);
+  useEffect(() => { if (!editable) setEditing(false); }, [editable]); // a newer message came, or the plan was approved
   const [busy, setBusy] = useState<'approve' | 'cancel' | 'stop' | null>(null);
   const [actError, setActError] = useState<string | null>(null);
   const [funding, setFunding] = useState<Funding | null>(null);
@@ -1210,6 +1322,27 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised }: { id:
     refetch();
   }
 
+  const openEditor = () => { setEditErrors(null); setAgainError(null); setEditing(true); };
+  const closeEditor = () => {
+    setEditing(false);
+    setEditErrors(null);
+    requestAnimationFrame(() => editButton.current?.focus());
+  };
+  // Checked here first, as the composer does; the action checks again. Once sent, this message makes way for the new one.
+  async function saveEdit(prompt: string, budget: string) {
+    if (!snap || !onRedo) return;
+    const check = checkDraft({ prompt, budget }, mode);
+    if (!check.ok) return setEditErrors({ prompt: check.prompt, budget: check.budget });
+    setEditErrors(null);
+    setEditErrors(await onRedo({ ...snap.task, parent_id: snap.task.parent_id ?? null }, check.prompt, check.usdc));
+  }
+  async function sendAgain() {
+    if (!snap || !onRedo) return;
+    setAgainError(null);
+    const out = await onRedo({ ...snap.task, parent_id: snap.task.parent_id ?? null }, snap.task.prompt, usdc(snap.task.budget_atomic));
+    if (out) setAgainError(out.message ?? out.budget ?? out.prompt ?? null);
+  }
+
   if (problem === 'missing') return <RookMessage><p>Rook has no task at this link for the wallet you&apos;re signed in with. If another wallet drafted it, sign in with that one.</p></RookMessage>;
   if (problem === 'signin') return <RookMessage><p>Connect your wallet to see this task.</p></RookMessage>;
   if (problem === 'down' && !snap) return <RookMessage><p>Rook&apos;s services are unreachable right now. This page reconnects on its own once they&apos;re back.</p></RookMessage>;
@@ -1231,9 +1364,15 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised }: { id:
   if (started) for (const s of snap.subtasks ?? []) { const l = ledger?.subtasks?.find((x) => x.n === s.n); if (l) usage.set(s.id, l); }
   const delivered = deliveredParts(snap.subtasks ?? [], titles);
 
+  // The message's own problem (not a task, a budget out of range): editing it is what helps, so that comes first.
+  const aboutMessage = messageProblem(task.error);
+  const editMessage = editable && !editing && <ActionButton primary={aboutMessage || !resendable} onClick={openEditor} disabled={locked || redoing || !!busy}>Edit message</ActionButton>;
+
   return (
     <>
-      <UserMessage prompt={task.prompt} budget={usdc(task.budget_atomic)} />
+      {editing && onRedo
+        ? <MessageEditor prompt={task.prompt} budget={usdc(task.budget_atomic)} saving={redoing} errors={editErrors} onSave={(p, b) => void saveEdit(p, b)} onCancel={closeEditor} />
+        : <UserMessage prompt={task.prompt} budget={usdc(task.budget_atomic)} note={attemptNote(task)} onEdit={editable && !locked && !redoing && !busy ? openEditor : undefined} editRef={editButton} />}
 
       {(task.status === 'draft' || (plan && (revealing || plan.subtasks.some((s) => s.candidates.length > 0)))) && (
         <RookMessage still={fresh}>
@@ -1244,6 +1383,13 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised }: { id:
         <RookMessage>
           <p>Rook couldn&apos;t draft a plan for this task.</p>
           {task.error && <p className="mt-1 text-sm text-ink/65">{plannerReason(task.error)}</p>}
+          {resendable && !editing && (
+            <div className="mt-3 flex flex-wrap gap-3">
+              {aboutMessage && editMessage}
+              <ActionButton primary={!aboutMessage} onClick={() => void sendAgain()} busy={redoing} disabled={locked}>{redoing ? 'Sending…' : 'Send again'}</ActionButton>
+            </div>
+          )}
+          {againError && <p role="alert" className="mt-2 text-sm text-alert">{againError}</p>}
         </RookMessage>
       )}
 
@@ -1253,6 +1399,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised }: { id:
           <p>Rook couldn&apos;t draft a plan for this task.</p>
           {task.error && <p className="mt-1 text-sm text-ink/65">{task.error}</p>}
           {plan.dropped.length > 0 && <ul className="mt-2 text-sm text-ink/65">{plan.dropped.map((d, i) => <li key={i}>{d.title}: {d.reason}</li>)}</ul>}
+          {editMessage && <div className="mt-3 flex flex-wrap gap-3">{editMessage}</div>}
         </RookMessage>
       )}
 
@@ -1280,12 +1427,12 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised }: { id:
           )}
           {task.status === 'planned' && (
             <div className="rook-in mt-4 flex flex-wrap gap-3" style={{ animationDelay: `${250 + plan.subtasks.length * 90}ms` }}>
-              <ActionButton primary onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account || paymentsOff || !!funds.short || revised}
+              <ActionButton primary onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account || paymentsOff || !!funds.short || revised || redoing}
                 title={paymentsOff ? 'Paying live agents is not switched on yet' : !wallet.account ? 'Connect your wallet first' : funds.short ? 'Your wallet holds less USDC than this budget' : revised ? 'Wait for the revised plan below' : undefined}>
                 {busy === 'approve' ? (funds.checking ? 'Checking your USDC balance…' : chain && !free ? 'Preparing the transfer…' : 'Starting…') : free ? 'Start' : paymentsOff ? 'Approve' : noMoney ? 'Run simulation' : `Fund ${usdc(task.budget_atomic)} USDC and start`}
               </ActionButton>
               {funds.short && <ActionButton onClick={() => void funds.check()} busy={funds.checking}>{funds.checking ? 'Checking…' : 'Check again'}</ActionButton>}
-              <ActionButton onClick={() => act('cancel')} busy={busy === 'cancel'}>Cancel</ActionButton>
+              <ActionButton onClick={() => act('cancel')} busy={busy === 'cancel'} disabled={redoing}>Cancel</ActionButton>
             </div>
           )}
           {task.status === 'planned' && revised && <p className="mt-2 text-sm text-ink/60">Your newer message is revising this plan. Wait for the revised plan below.</p>}
@@ -1378,11 +1525,12 @@ function TaskThread({ account, hidden, onReady, onSummary, ...props }: ThreadPro
   const { snap, problem } = loaded;
   useEffect(() => { if (snap || problem) onReady(id); }, [snap, problem, id, onReady]);
   const t = snap?.task;
-  const [status, prompt, created, parent, budget] = [t?.status, t?.prompt, t?.created_at, t?.parent_id ?? null, t?.budget_atomic];
+  const [status, prompt, created, parent, budget, supersedes] = [t?.status, t?.prompt, t?.created_at, t?.parent_id ?? null, t?.budget_atomic, t?.supersedes ?? null];
   const hasPlan = !!snap?.plan?.subtasks.length;
+  // superseded_by is left to the list: a snapshot loaded before an edit in another tab would override it.
   useEffect(() => {
-    if (status && prompt !== undefined && created) onSummary(id, { id, status, prompt, created_at: created, parent_id: parent, budget_atomic: budget, has_plan: hasPlan });
-  }, [id, status, prompt, created, parent, budget, hasPlan, onSummary]);
+    if (status && prompt !== undefined && created) onSummary(id, { id, status, prompt, created_at: created, parent_id: parent, budget_atomic: budget, has_plan: hasPlan, supersedes });
+  }, [id, status, prompt, created, parent, budget, hasPlan, supersedes, onSummary]);
   useEffect(() => () => onSummary(id, null), [id, onSummary]);
   return hidden ? null : <Thread {...props} loaded={loaded} />;
 }
@@ -1404,8 +1552,11 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
   const wallet = useWallet();
   const parts = pathname.split('/').filter(Boolean); // ['app', id?]
   const id = parts[1] ? decodeURIComponent(parts[1]) : null;
-  const [sending, setSending] = useState<{ prompt: string; budget: string; id?: string } | null>(null);
+  // `note`: a message sent again or edited, shown as such. `redoing`: the newest message, being sent again or edited.
+  const [sending, setSending] = useState<{ prompt: string; budget: string; id?: string; note?: string } | null>(null);
+  const [redoing, setRedoing] = useState<string | null>(null);
   const [errors, setErrors] = useState<ComposerErrors | null>(null);
+  const { chain } = useMode();
   const scroller = useRef<HTMLDivElement>(null);
   const ease = useEase();
   const justDrafted = useRef(new Set<string>());
@@ -1421,11 +1572,18 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
     const { [task]: _gone, ...rest } = k;
     return rest;
   }), []);
-  const conversation = id ? conversationOf(withKnown(tasks, sent, live), id) : null;
-  const ids = conversation ? conversation.tasks.map((t) => t.id) : id ? [id] : [];
+  const known = withKnown(tasks, sent, live);
+  // A link to a message that was sent again or edited shows the message in its place, which the address then names.
+  const shownId = id ? shownInstead(known, id) : null;
+  useEffect(() => { if (id && shownId && shownId !== id) window.history.replaceState(null, '', `/app/${shownId}`); }, [id, shownId]);
+  const conversation = shownId ? conversationOf(shownTasks(known), shownId) : null;
+  const ids = conversation ? conversation.tasks.map((t) => t.id) : shownId ? [shownId] : [];
   const revised = conversation ? revisedPlan(conversation.tasks) : null;
-  const thread: ComposerThread | null = id
-    ? { parent: conversation?.latest.id ?? id, current: conversation?.current ?? null, budget_atomic: conversation?.latest.budget_atomic }
+  // The newest message can be sent again or edited, unless what it acts on is planning or running.
+  const newest = conversation?.latest.id ?? shownId;
+  const redoBlocked = conversation ? redoWait(conversation.tasks, chain) : null;
+  const thread: ComposerThread | null = shownId
+    ? { parent: conversation?.latest.id ?? shownId, current: conversation?.current ?? null, budget_atomic: conversation?.latest.budget_atomic }
     : null;
   const onReady = useCallback((task: string) => setSending((s) => (s?.id === task ? null : s)), []);
 
@@ -1440,22 +1598,44 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
     // network, or the web server restarting): then the composer gets its text back and says so.
     const out = await draftTask({ prompt, budget, parent_id }).catch(() => ({ kind: 'error' as const, message: UNREACHABLE }));
     if (out.kind === 'planned') {
-      // Keep showing this message until the task has loaded, so the thread takes over with no gap. The conversation
-      // counts it at once, so the tasks above it stay on the page.
-      justDrafted.current.add(out.id);
-      const b = parseBudget(budget);
-      setSent((s) => [...s, {
-        id: out.id, status: 'draft', prompt: prompt.trim(), created_at: new Date().toISOString(), parent_id: parent_id ?? null,
-        ...(b.ok ? { budget_atomic: b.atomic.toString() } : {}),
-      }]);
+      placed(out.id, prompt, budget, parent_id ?? null);
       setSending((s) => s && { ...s, id: out.id });
-      go(`/app/${out.id}`);
       return true;
     }
     setSending(null);
     setErrors(out.kind === 'invalid' ? { prompt: out.prompt, budget: out.budget } : { message: out.message });
     return false;
   }
+
+  /**
+   * A message just drafted. It shows as sent until its task has loaded, so the thread takes over with no gap, and the
+   * conversation counts it at once, so the tasks above it stay on the page (and the one it supersedes leaves).
+   */
+  function placed(task: string, prompt: string, budget: string, parent_id: string | null, supersedes?: string) {
+    justDrafted.current.add(task);
+    const b = parseBudget(budget);
+    setSent((s) => [...s, {
+      id: task, status: 'draft', prompt: prompt.trim(), created_at: new Date().toISOString(), parent_id,
+      ...(supersedes ? { supersedes } : {}), ...(b.ok ? { budget_atomic: b.atomic.toString() } : {}),
+    }]);
+    go(`/app/${task}`);
+  }
+
+  /** The newest message, sent again or edited: the new one takes its place once Rook has it. */
+  const redo: Redo = async (old, prompt, budget) => {
+    if (sending || redoing) return { message: 'Wait until the message being sent is in.' };
+    setRedoing(old.id);
+    setErrors(null);
+    const out = await draftTask({ prompt, budget, supersedes: old.id }).catch(() => ({ kind: 'error' as const, message: UNREACHABLE }));
+    setRedoing(null);
+    if (out.kind === 'invalid') return { prompt: out.prompt, budget: out.budget };
+    if (out.kind === 'error') return { message: out.message };
+    const b = parseBudget(budget);
+    const edited = prompt.trim() !== old.prompt.trim() || !b.ok || b.atomic !== BigInt(old.budget_atomic);
+    placed(out.id, prompt, budget, old.parent_id, old.id);
+    setSending({ prompt: prompt.trim(), budget, id: out.id, note: edited ? 'Edited' : 'Sent again' });
+    return null;
+  };
 
   // A failed send's errors are about that send: not the next page, nor the next sign-in ("Sign in first" is wrong once
   // the owner signed in again). A sign-out keeps them: a send refused for a lapsed session signs the page out after the
@@ -1516,11 +1696,12 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
               {/* Every task of the conversation, oldest first, each with its own plan, run and report. */}
               {ids.map((task) => (
                 <TaskThread key={`${task}:${wallet.account}`} id={task} account={wallet.account} hidden={sending?.id === task} onReady={onReady} onSummary={onSummary}
-                  tasks={tasks} onGrow={follow} fresh={justDrafted.current.has(task)} onRevealed={onRevealed} revised={revised === task} />
+                  tasks={tasks} onGrow={follow} fresh={justDrafted.current.has(task)} onRevealed={onRevealed} revised={revised === task}
+                  onRedo={task === newest && !redoBlocked ? redo : undefined} redoing={redoing === task} locked={!!sending || (redoing !== null && redoing !== task)} />
               ))}
               {sending && (
                 <>
-                  <UserMessage animate prompt={sending.prompt} budget={sending.budget} />
+                  <UserMessage animate prompt={sending.prompt} budget={sending.budget} note={sending.note} />
                   <RookMessage><AgentSearch plan={null} animate={false} onGrow={follow} /></RookMessage>
                 </>
               )}
@@ -1530,7 +1711,7 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
 
         {/* Glides between the centre of the home screen and the bottom of a conversation. */}
         <motion.div layout="position" transition={ease} className={`mx-auto w-full max-w-208 md:px-8 px-2.5 pb-2.5 sm:px-5 ${home ? 'sm:mt-8 sm:pb-16' : 'sm:pb-5'}`}>
-          <Composer onSend={send} errors={errors} sending={!!sending} compact={!home} thread={thread} />
+          <Composer onSend={send} errors={errors} sending={!!sending || !!redoing} compact={!home} thread={thread} />
         </motion.div>
       </div>
     </div>

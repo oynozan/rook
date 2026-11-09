@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { forgetFundingOf, forgetUnreadFunding, fundingSent, giveBackDraftSlot, markFundingRefunded, recordFundingSent, takeDraftSlot } from './db';
+import { redoRefusal } from './chat-actions';
 import { amountsNamed } from './conversations';
 import { checkDraft, draftRefusal, followUpRefusal } from './draft';
 import { CONTRACT_TASK, draftShortfall, TX_HASH, untilFinal, type Funding } from './funding';
@@ -34,7 +35,8 @@ function signInFirst() {
 
 // Every action acts as the signed-in account from the session cookie. The browser can't name an account.
 // parent_id: the conversation's newest task, which this message follows (the orchestrator checks it is the account's).
-export async function draftTask(input: { prompt: string; budget: string; parent_id?: string }): Promise<DraftResult> {
+// supersedes, instead: the newest message, sent again or edited; this one takes its place, after the same task.
+export async function draftTask(input: { prompt: string; budget: string; parent_id?: string; supersedes?: string }): Promise<DraftResult> {
   const owner = await currentAccount();
   if (!owner) return { kind: 'error', message: signInFirst() };
 
@@ -54,9 +56,10 @@ export async function draftTask(input: { prompt: string; budget: string; parent_
     return { kind: 'error', message: `You've drafted ${DRAFTS_PER_HOUR} plans in the last hour, the most Rook allows. Try again in ${Math.ceil(slot.retryInS / 60)} min.` };
   }
 
+  const supersedes = typeof input?.supersedes === 'string' && input.supersedes ? input.supersedes : undefined;
   try {
-    const parent = typeof input?.parent_id === 'string' && input.parent_id ? input.parent_id : undefined;
-    const task = await createTask(check.prompt, check.usdc, owner, parent);
+    const parent = typeof input?.parent_id === 'string' && input.parent_id && !supersedes ? input.parent_id : undefined;
+    const task = await createTask(check.prompt, check.usdc, owner, parent, supersedes);
     refreshSidebar();
     return { kind: 'planned', id: task.id };
   } catch (e) {
@@ -64,6 +67,12 @@ export async function draftTask(input: { prompt: string; budget: string; parent_
     if (e instanceof OrchestratorDown) return { kind: 'error', message: DOWN };
     const refused = e instanceof OrchestratorError && e.status === 400 ? draftRefusal(e.message) : null;
     if (refused) return { kind: 'invalid', ...refused };
+    // The message was edited or sent again from another tab, or has a newer one: the list catches up, so the page shows it.
+    const redo = supersedes && e instanceof OrchestratorError ? redoRefusal(e.status, e.message) : null;
+    if (redo) {
+      refreshSidebar();
+      return { kind: 'error', message: redo };
+    }
     const follow = e instanceof OrchestratorError ? followUpRefusal(e.status, e.message) : null;
     if (follow) {
       // The page's view of the conversation was out of date (a message sent from another tab, or a list that failed to

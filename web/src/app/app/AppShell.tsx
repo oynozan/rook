@@ -7,6 +7,7 @@ import { useEffect, useRef, useState, type MouseEvent, type ReactNode, type Ref 
 import { Mark } from '@/components/Navbar';
 import { useSmoothScroll } from '@/components/SmoothScroll';
 import { ThemeToggle } from '@/components/ui/theme-toggle';
+import { shownTasks } from './chat-actions';
 import { conversations } from './conversations';
 import { useMode } from './mode';
 import type { TaskSummary } from './orchestrator';
@@ -74,7 +75,7 @@ function TaskList({ tasks, onNavigate }: { tasks: TaskSummary[] | null; onNaviga
   if (!tasks.length) return <p className="px-3 text-sm text-ink/65">Tasks you draft will appear here.</p>;
   return (
     <ul>
-      {conversations(tasks).map((c) => {
+      {conversations(shownTasks(tasks)).map((c) => {
         const href = `/app/${c.latest.id}`;
         const current = c.tasks.some((t) => pathname === `/app/${t.id}`); // any of its tasks' pages shows it
         const status = c.current.status;
@@ -132,7 +133,7 @@ function ComposeIcon({ className }: { className: string }) {
 function SidebarContent({ tasks, rail = false, toggleLabel = 'Close sidebar', onToggle, onNavigate, onExpand, avatarRef }: SidebarProps) {
   const wallet = useWallet();
   const fade = `transition-opacity ${GLIDE} ${rail ? 'opacity-0' : ''}`;
-  const busy = !!tasks && conversations(tasks).some((c) => ACTIVE.has(c.current.status));
+  const busy = !!tasks && conversations(shownTasks(tasks)).some((c) => ACTIVE.has(c.current.status));
   return (
     <>
       <div className="relative flex h-17 shrink-0 items-center pl-5.5">
