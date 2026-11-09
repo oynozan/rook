@@ -28,10 +28,20 @@ async function retry<T>(fn: () => Promise<T>, tries = 3): Promise<T> {
 
 /** An authorization the signer handed out, minus the header: enough to settle or clear it after a restart. */
 export type AuthMeta = { payment_hash: string; amount: string; expires_at_block: number | null; nonce: string | null };
-/** Stored in the task document: the contract task, Rook n -> contract n, sub-accounts, outstanding authorizations. */
-export type ChainBinding = { contract_task_id: string; nmap: Record<string, number>; accounts: Record<string, string>; auths: Record<string, AuthMeta> };
-type Bound = { cid: string; nmap: Map<number, number>; accounts: Map<number, string>; auths: Map<number, AuthMeta> };
+/**
+ * Stored in the task document: the contract task and the contract and network it is on, Rook n -> contract n,
+ * sub-accounts, outstanding authorizations. Bindings stored before contract_id existed have neither field.
+ */
+export type ChainBinding = {
+  contract_task_id: string; contract_id?: string; network?: string;
+  nmap: Record<string, number>; accounts: Record<string, string>; auths: Record<string, AuthMeta>;
+};
+type Bound = { cid: string; contract_id: string; network: string; nmap: Map<number, number>; accounts: Map<number, string>; auths: Map<number, AuthMeta> };
 const toMap = <V>(o: Record<string, V> | undefined) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k), v] as [number, V]));
+/** A stored binding made on another contract or network: restore leaves its task alone and binds nothing. */
+export class OtherContract extends Error { override name = 'OtherContract'; }
+/** What a contract task still holds for its funder (a late return after a close lands in unallocated). */
+const owed = (ct: any) => BigInt(ct.unallocated ?? 0) + BigInt(ct.reserve_remaining ?? 0);
 /** Balance reads after a landed delegate before its payment is booked unpaid (about a second apart live). */
 const LANDED_READS = 15;
 
@@ -39,8 +49,12 @@ export type ChainLedger = Ledger & {
   bind(task_id: string, contract_task_id: string, nmap: Map<number, number>): void;
   contractTaskOf(task_id: string): string | null;
   binding(task_id: string): ChainBinding | null;
-  /** Rebuilds the books from the contract; `saved` is the ledger view stored with the task (to tell landed payments). */
-  restore(task_id: string, b: ChainBinding, t: { funder: string; budget: bigint; reserve_share: number; saved: any }): Promise<{ status: string; killed: boolean; notes: string[] }>;
+  /**
+   * Rebuilds the books from the contract; `saved` is the ledger view stored with the task (to tell landed payments).
+   * Throws OtherContract for a binding made on another contract; binds only once the contract task was read.
+   * `deleted`: the contract deleted the task (refunded before any subtask was funded), so the books are closed.
+   */
+  restore(task_id: string, b: ChainBinding, t: { funder: string; budget: bigint; reserve_share: number; saved: any }): Promise<{ status: string; killed: boolean; deleted?: boolean; notes: string[] }>;
   /**
    * The hire's settled transfer as an indexer shows it (chain-gateway /payment, retried there); null when not found.
    * `index`: how many of the sub-account's payments to pay_to came before this one.
@@ -88,6 +102,13 @@ export function createChainLedger(): ChainLedger {
     }
   };
 
+  /**
+   * Deletes a sub-account through the signer, its NEAR back to the contract: one Returned, or a failed funding attempt
+   * whose account was created. The signer refuses one that holds USDC or an authorization; a failure only leaves NEAR behind.
+   */
+  const reclaim = (task_id: string, n: number, c: { task_id: string; n: number; account_id: string }) =>
+    signer('/reclaim', c).catch((e) => console.warn(`[orchestrator] ${task_id} subtask ${n}: reclaim ${c.account_id} failed: ${e?.message ?? e}`));
+
   /** Clears the signer's authorization: at once when terminal_unpaid, else once the delegate ran or expired (409 until then). */
   async function clearAuth(c: { task_id: string; n: number }, terminal_unpaid: boolean) {
     for (;;) {
@@ -101,11 +122,14 @@ export function createChainLedger(): ChainLedger {
   }
 
   return {
-    bind(task_id, cid, nmap) { bound.set(task_id, { cid, nmap, accounts: new Map(), auths: new Map() }); },
+    bind(task_id, cid, nmap) { bound.set(task_id, { cid, contract_id: config.contractId, network: config.nearNetwork, nmap, accounts: new Map(), auths: new Map() }); },
     contractTaskOf: (task_id) => bound.get(task_id)?.cid ?? null,
     binding(task_id) {
       const x = bound.get(task_id);
-      return x ? { contract_task_id: x.cid, nmap: Object.fromEntries(x.nmap), accounts: Object.fromEntries(x.accounts), auths: Object.fromEntries(x.auths) } : null;
+      return x ? {
+        contract_task_id: x.cid, contract_id: x.contract_id, network: x.network,
+        nmap: Object.fromEntries(x.nmap), accounts: Object.fromEntries(x.accounts), auths: Object.fromEntries(x.auths),
+      } : null;
     },
 
     /** The human funded the task with ft_transfer_call; POST /tasks/:id/funded checked it. Only the mirror opens here. */
@@ -119,6 +143,9 @@ export function createChainLedger(): ChainLedger {
       const { subtasks } = await gateway(`/task/${encodeURIComponent(c.task_id)}`);
       const s = subtasks.find((x: any) => x.n === c.n);
       if (s?.status !== 'Funded' || BigInt(s.cap) !== cap) {
+        // A failed attempt whose account was created keeps its 0.06 NEAR and holds no USDC: deleted now, while it is
+        // still the subtask's current account (a retry makes another one current, and the signer checks that).
+        if (s?.status === 'Failed' && s.account_exists) await reclaim(task_id, n, { task_id: c.task_id, n: c.n, account_id: s.account_id });
         throw funding ?? new LedgerError(`subtask ${c.n} is ${s?.status ?? 'missing'} on chain (cap ${s?.cap})`);
       }
       if (funding) console.warn(`[orchestrator] ${task_id} subtask ${n}: /fund reported ${funding.message}, but the subtask is Funded on chain`);
@@ -186,14 +213,21 @@ export function createChainLedger(): ChainLedger {
       }
       const amount = m.returnLeftover(task_id, n);
       if (onChain !== amount) console.warn(`[orchestrator] ${task_id} subtask ${n}: returned ${onChain} on chain, ${amount} in Rook's books`);
-      // The emptied sub-account is deleted, its NEAR back to the contract; a failure only leaves that NEAR behind.
-      await signer('/reclaim', c).catch((e) => console.warn(`[orchestrator] ${task_id} subtask ${n}: reclaim ${c.account_id} failed: ${e?.message ?? e}`));
+      await reclaim(task_id, n, c); // the emptied sub-account is deleted, its NEAR back to the contract
       return amount;
     },
 
     async closeTask(task_id) {
       for (const s of m.view(task_id)?.subtasks ?? []) if (s.returned_atomic === null) throw new LedgerError(`subtask ${s.n} has not returned its leftover`);
-      await svc(gateway('/close', { task_id: b(task_id).cid }));
+      const cid = b(task_id).cid;
+      const refused = await svc(gateway('/close', { task_id: cid })).then(() => null, (e) => e);
+      if (refused) {
+        // The funder may close a killed task first. Returns still reach it and this close refunds them, but with nothing
+        // left to refund the contract answers "task is already closed": closed for good, as its own view confirms.
+        const got = refused instanceof LedgerError ? await retry(() => gateway(`/task/${encodeURIComponent(cid)}`)).catch(() => null) : null;
+        const done = got?.task?.status === 'Closed' && owed(got.task) === 0n && got.subtasks.every((s: any) => s.status === 'Returned' || s.status === 'Failed');
+        if (!done) throw refused;
+      }
       return m.closeTask(task_id);
     },
 
@@ -239,8 +273,17 @@ export function createChainLedger(): ChainLedger {
     },
 
     async restore(task_id, bd, t) {
-      const x: Bound = { cid: bd.contract_task_id, nmap: toMap(bd.nmap), accounts: toMap(bd.accounts), auths: toMap(bd.auths) };
-      bound.set(task_id, x);
+      // Contract task ids are counters that start at 0 on every contract (testnet and mainnet runs may share one
+      // database), so a binding holds only on the contract and network it was made on. An older binding does not say;
+      // the ledger view stored with its task does, and so do its sub-account ids (t<task>-<n>.<contract>).
+      const made = bd.contract_id ? { contract_id: bd.contract_id, network: bd.network } : { contract_id: t.saved?.contract_id, network: t.saved?.network };
+      const here = `${config.contractId} (${config.nearNetwork})`;
+      if ((made.contract_id && made.contract_id !== config.contractId) || (made.network && made.network !== config.nearNetwork)) {
+        throw new OtherContract(`it was funded on ${made.contract_id ?? 'another contract'} (${made.network ?? 'another network'}), and this Rook runs ${here}`);
+      }
+      const stray = Object.values(bd.accounts ?? {}).find((a) => !a.endsWith(`.${config.contractId}`));
+      if (stray) throw new OtherContract(`its sub-account ${stray} is not one of ${config.contractId}'s`);
+      const x: Bound = { cid: bd.contract_task_id, contract_id: config.contractId, network: config.nearNetwork, nmap: toMap(bd.nmap), accounts: toMap(bd.accounts), auths: toMap(bd.auths) };
       // A funding, top-up or refund in flight resolves within a few blocks: wait for it rather than guess.
       let ct: any, subs: any[] = [];
       for (let i = 0; ; i++) {
@@ -249,17 +292,22 @@ export function createChainLedger(): ChainLedger {
           throw e;
         });
         if (got === null) {
-          // The contract deletes a task closed with no subtask ever funded: its whole budget went back to the funder.
           if (x.accounts.size) throw new Error(`contract task ${x.cid} is gone but Rook funded sub-accounts for it`);
+          if (!made.contract_id) throw new OtherContract(`contract task ${x.cid} is not on ${here}, and this older binding does not say which contract it was funded on`);
+          // The contract deletes a task closed with no subtask ever funded: its whole budget went back to the funder.
+          // Its id is never handed out again, so nothing is bound.
           m.createTask(task_id, t.funder, t.budget, t.reserve_share);
           m.closeTask(task_id);
-          return { status: 'Closed', killed: false, notes: [`contract task ${x.cid} was closed with nothing funded and deleted; its budget went back to the funder`] };
+          return { status: 'Closed', killed: false, deleted: true, notes: [`contract task ${x.cid} was closed with nothing funded and deleted; its budget went back to the funder`] };
         }
         ({ task: ct, subtasks: subs } = got);
         if (ct.status !== 'Closing' && !subs.some((s) => s.status === 'Funding' || s.status === 'ToppingUp')) break;
         // ponytail: 30 polls; a transfer stuck longer needs the owner's resolve_stuck, then another restart.
         if (i >= 30) throw new Error(`contract task ${x.cid} still has a transfer in flight; the owner may need resolve_stuck`);
         await sleep(Math.max(200, Math.min(config.pollMs, 2000)));
+      }
+      if (BigInt(ct.budget) !== t.budget || (t.funder && ct.funder !== t.funder)) {
+        throw new OtherContract(`contract task ${x.cid} on ${here} holds ${ct.budget} from ${ct.funder}, not this task's ${t.budget} from ${t.funder || 'its funder'}`);
       }
       const notes: string[] = [];
       m.createTask(task_id, t.funder, t.budget, t.reserve_share);
@@ -270,7 +318,12 @@ export function createChainLedger(): ChainLedger {
         m.authorize(task_id, n, { scheme: 'exact', network: R, asset: R, payTo: R, amount: amount.toString(), maxTimeoutSeconds: 1 }, allow, { header: '', payment_hash });
       for (const [n, k] of x.nmap) {
         const cs = subs.find((s) => s.n === k);
-        if (!cs || cs.status === 'Failed') { x.accounts.delete(n); x.auths.delete(n); continue; } // the run funds it (again)
+        if (!cs || cs.status === 'Failed') { // the run funds it (again)
+          x.accounts.delete(n); x.auths.delete(n);
+          // A failed attempt whose account was created keeps its NEAR: deleted before a retry makes another account current.
+          if (cs?.account_exists) await reclaim(task_id, n, { task_id: x.cid, n: k, account_id: cs.account_id });
+          continue;
+        }
         x.accounts.set(n, cs.account_id);
         const cap = BigInt(cs.cap), funded = cap + BigInt(cs.topped_up);
         m.fundSubtask(task_id, n, cap);
@@ -290,7 +343,10 @@ export function createChainLedger(): ChainLedger {
         }
         if (cs.status === 'Returned') m.returnLeftover(task_id, n);
       }
-      if (ct.status === 'Closed') { try { m.closeTask(task_id); } catch (e: any) { notes.push(`closed on chain, not in Rook's books: ${e.message}`); } }
+      // A return that reached the task after its close sits in it until another close_task: Rook's books stay open for it.
+      if (ct.status === 'Closed' && owed(ct) > 0n) notes.push(`closed on chain, but ${owed(ct)} returned after the close is still in the contract task; Rook's close_task refunds it`);
+      else if (ct.status === 'Closed') { try { m.closeTask(task_id); } catch (e: any) { notes.push(`closed on chain, not in Rook's books: ${e.message}`); } }
+      bound.set(task_id, x);
       return { status: ct.status, killed: ct.killed === true, notes };
     },
   };

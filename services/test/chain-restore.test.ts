@@ -17,7 +17,7 @@ const { openStore } = await import('../src/orchestrator/db.ts');
 type Running = Awaited<ReturnType<typeof serve>>;
 
 // ---- the fake contract, balances and signer state ----
-type CSub = { n: number; account_id: string; cap: string; topped_up: string; returned: string; status: string; attempt: number; pending_top_up: string };
+type CSub = { n: number; account_id: string; cap: string; topped_up: string; returned: string; status: string; attempt: number; pending_top_up: string; account_exists?: boolean };
 const contract = new Map<string, { task: any; subs: CSub[] }>();
 const bal = new Map<string, bigint>();
 const auths = new Map<string, { amount: bigint; landed: boolean; until: number }>(); // account -> outstanding authorization
@@ -26,7 +26,9 @@ const acct = (cid: string, n: number) => `t${cid}-${n}.rook.test`;
 const openContractTask = (cid: string, caps: string[]) =>
   contract.set(cid, { task: { funder: 'owner.test', budget: '1000000', reserve: '200000', caps, status: 'Open', killed: false }, subs: [] });
 const sub = (cid: string, n: number) => contract.get(cid)!.subs.find((s) => s.n === n)!;
+const fundedSub = (cid: string, n: number, cap: string): CSub => ({ n, account_id: acct(cid, n), cap, topped_up: '0', returned: '0', status: 'Funded', attempt: 0, pending_top_up: '0', account_exists: true });
 let authTtlMs = 60_000;
+let openTasks = 0; // the funder's open tasks on the contract (its limit is 1 below)
 
 // ---- the fake market: an agent's A2A task stays WORKING until a test moves it ----
 const PRICE: Record<string, string> = { slowpoke: '300000', stubborn: '100000', hangs: '100000', alpha: '100000', beta: '100000' };
@@ -60,13 +62,25 @@ before(async () => {
       if (!amount) throw new HttpError(409, 'empty');
       bal.set(body.account_id, 0n);
       Object.assign(sub(body.task_id, body.n), { status: 'Returned', returned: String(amount) });
+      // like the contract: a return to a Closed task waits in it for another close_task
+      const t = contract.get(body.task_id)!.task;
+      if (t.status === 'Closed') t.unallocated = String(BigInt(t.unallocated ?? 0) + amount);
       calls.push(`return ${body.account_id} ${amount}`);
       return { tx_hash: 'r', amount: String(amount) };
+    },
+    'POST /reclaim': ({ body }) => { // like the signer: a Returned account, or a failed attempt's created one, at 0 USDC
+      const s = sub(body.task_id, body.n);
+      if (s.account_id !== body.account_id) throw new HttpError(409, 'not the current account');
+      if (s.status !== 'Returned' && !(s.status === 'Failed' && s.account_exists)) throw new HttpError(409, `subtask is ${s.status}`);
+      if (bal.get(body.account_id)) throw new HttpError(409, 'still holds USDC');
+      calls.push(`reclaim ${body.account_id}`);
+      return { tx_hash: 'd', beneficiary: 'rook.test' };
     },
     'POST /kill': ({ body }) => (calls.push(`signer-kill ${body.task_id}`), { killed: true }),
   }, 0));
   servers.push(await serve('mock-chain-gateway', {
-    'GET /config': () => ({ network: 'testnet', contract_id: 'rook.test', owner: 'owner.test', usdc: 'usdc.test' }),
+    'GET /config': () => ({ network: 'testnet', contract_id: 'rook.test', owner: 'owner.test', usdc: 'usdc.test', max_open_tasks: 1 }),
+    'GET /open-tasks': () => ({ open: openTasks }),
     'GET /task/:id': ({ params }) => {
       const x = contract.get(params.id);
       if (!x) throw new HttpError(404, `no contract task ${params.id}`);
@@ -75,6 +89,10 @@ before(async () => {
     'POST /fund': async ({ body }) => {
       if (body.task_id === 'slow') await new Promise((ok) => setTimeout(ok, 300)); // a kill lands while this is in flight
       const x = contract.get(body.task_id)!, cap = x.task.caps[body.n - 1];
+      if (body.task_id === 'failx') { // a kill landed between create_account and the transfer: the account exists, no USDC
+        x.subs.push({ ...fundedSub(body.task_id, body.n, cap), status: 'Failed' });
+        throw new HttpError(502, 'fund_subtask failed: callback returned false (rolled back)');
+      }
       x.subs.push({ n: body.n, account_id: acct(body.task_id, body.n), cap, topped_up: '0', returned: '0', status: 'Funded', attempt: 0, pending_top_up: '0' });
       bal.set(acct(body.task_id, body.n), BigInt(cap));
       calls.push(`fund ${body.task_id}/${body.n}`);
@@ -90,7 +108,9 @@ before(async () => {
     'POST /close': ({ body }) => {
       const x = contract.get(body.task_id)!;
       if (x.subs.some((s) => s.status === 'Funded')) throw new HttpError(502, 'close_task failed: a subtask has not returned its leftover');
-      x.task.status = 'Closed';
+      // like the contract: a Closed task closes again only to refund what reached it after its close
+      if (x.task.status === 'Closed' && !BigInt(x.task.unallocated ?? 0)) throw new HttpError(502, 'close_task failed: Smart contract panicked: task is already closed');
+      Object.assign(x.task, { status: 'Closed', unallocated: '0' });
       calls.push(`close ${body.task_id}`);
       return { tx_hash: 'c', success: true };
     },
@@ -257,7 +277,7 @@ test('a killed task with money still on chain is unwound when the services start
 
 const cand = (handle: string) => ({ handle, name: handle, description: handle, sla_seconds: 60, success_rate: null, delivered_jobs: 0, price_atomic: PRICE[handle], quote: row(PRICE[handle]) });
 /** A task as the orchestrator stores it, for the next start to load: one subtask, bound to contract task `cid`. */
-function storeTask(id: string, status: string, cid: string, sub: object, auths: object, balance: string) {
+function storeTask(id: string, status: string, cid: string, sub: object, auths: object, balance: string, chain: object = {}) {
   const ts = new Date().toISOString();
   const store = openStore(process.env.ROOK_DB!);
   store.save({
@@ -268,7 +288,7 @@ function storeTask(id: string, status: string, cid: string, sub: object, auths: 
       criteria: [{ id: 'c1', kind: 'contains', description: 'x', spec: { pattern: '.' } }],
       n: 1, status: 'working', final_outcome: null, rehire_count: 0, tried: [], hires: [], evaluations: [], accepted: null, ...sub,
     } as any],
-    chain: { contract_task_id: cid, nmap: { 1: 1 }, accounts: { 1: acct(cid, 1) }, auths: auths as any },
+    chain: { contract_task_id: cid, nmap: { 1: 1 }, accounts: { 1: acct(cid, 1) }, auths: auths as any, ...chain },
     ledger_saved: { closed: false, subtasks: [{ n: 1, balance_atomic: balance }] },
   });
   store.close();
@@ -352,11 +372,170 @@ test('a killed task the owner closed on chain with a sub-account still Funded: R
 test('restore: a contract task deleted by an empty close counts as closed, its whole budget refunded', async () => {
   const { createChainLedger } = await import('../src/orchestrator/chain-ledger.ts');
   const l = createChainLedger();
-  const r = await l.restore('T-gone', { contract_task_id: 'gone', nmap: { 1: 1 }, accounts: {}, auths: {} }, { funder: 'alice.test', budget: 1_000_000n, reserve_share: 0.2, saved: null });
-  assert.equal(r.status, 'Closed');
+  const here = { contract_id: 'rook.test', network: 'testnet' }, t = { funder: 'alice.test', budget: 1_000_000n, reserve_share: 0.2, saved: null };
+  const r = await l.restore('T-gone', { contract_task_id: 'gone', ...here, nmap: { 1: 1 }, accounts: {}, auths: {} }, t);
+  assert.deepEqual([r.status, r.deleted], ['Closed', true]);
   assert.match(r.notes[0], /deleted/);
   const v = l.view('T-gone')!;
   assert.deepEqual([v.closed, String(v.refunded_atomic), String(v.spent_atomic)], [true, '1000000', '0']);
+  assert.equal(l.contractTaskOf('T-gone'), null); // a deleted id is never handed out again: nothing to bind
   // With a funded sub-account on record, a missing contract task is an error, never a silent close.
-  await assert.rejects(l.restore('T-odd', { contract_task_id: 'gone2', nmap: { 1: 1 }, accounts: { 1: 'tgone2-1.rook.test' }, auths: {} }, { funder: 'alice.test', budget: 1_000_000n, reserve_share: 0.2, saved: null }), /gone but Rook funded/);
+  await assert.rejects(l.restore('T-odd', { contract_task_id: 'gone2', ...here, nmap: { 1: 1 }, accounts: { 1: 'tgone2-1.rook.test' }, auths: {} }, t), /gone but Rook funded/);
+  // An older binding that names no contract (nor does its stored view) may be another contract's task: left alone.
+  await assert.rejects(l.restore('T-old', { contract_task_id: 'gone3', nmap: { 1: 1 }, accounts: {}, auths: {} }, t), /does not say which contract/);
+  assert.equal(l.view('T-old'), null);
+});
+
+test('restore refuses a binding made on another contract or network, or another funder\'s task, and binds nothing', async () => {
+  const { createChainLedger, OtherContract } = await import('../src/orchestrator/chain-ledger.ts');
+  const l = createChainLedger();
+  openContractTask('o', ['100000']);
+  const t = { funder: 'owner.test', budget: 1_000_000n, reserve_share: 0.2, saved: null };
+  const bd = (o: object = {}) => ({ contract_task_id: 'o', nmap: { 1: 1 }, accounts: {}, auths: {}, ...o });
+  const other = (re: RegExp) => (e: any) => e instanceof OtherContract && re.test(e.message);
+  await assert.rejects(l.restore('T1', bd({ contract_id: 'rook.old', network: 'testnet' }), t), other(/funded on rook\.old \(testnet\), and this Rook runs rook\.test \(testnet\)/));
+  // An older binding: the ledger view stored with its task names the network, and its sub-account ids the contract.
+  await assert.rejects(l.restore('T2', bd(), { ...t, saved: { contract_id: 'rook.test', network: 'mainnet' } }), other(/\(mainnet\)/));
+  await assert.rejects(l.restore('T3', bd({ accounts: { 1: 'to-1.rook.old' } }), t), other(/to-1\.rook\.old is not one of rook\.test's/));
+  await assert.rejects(l.restore('T4', bd(), { ...t, funder: 'mallory.test' }), other(/from owner\.test, not this task's 1000000 from mallory\.test/));
+  for (const id of ['T1', 'T2', 'T3', 'T4']) assert.deepEqual([l.contractTaskOf(id), l.view(id)], [null, null]);
+  assert.equal((await l.restore('T5', bd(), t)).status, 'Open'); // an older binding nothing contradicts
+  assert.deepEqual([l.contractTaskOf('T5'), l.binding('T5')!.contract_id, l.binding('T5')!.network], ['o', 'rook.test', 'testnet']);
+  l.bind('T6', 'p', new Map([[1, 1]]));
+  assert.deepEqual([l.binding('T6')!.contract_id, l.binding('T6')!.network], ['rook.test', 'testnet']);
+});
+
+test('a task bound on another contract is left as it is, and its contract task id does not block /funded here', async () => {
+  process.env.ROOK_DB = join(dir, 'stale.sqlite');
+  // A testnet run's task, bound to its contract task 'k', in the database a run against this contract shares.
+  storeTask('t_stale', 'running', 'k', { cap_atomic: '100000' }, {}, '100000', { contract_id: 'rook.old', network: 'testnet' });
+  const orch = await start(0);
+  try {
+    assert.equal((await snap(orch, 't_stale')).task.status, 'running');
+    const id = await fundedAndWorking(orch, 'alpha', 'k'); // this contract's task 'k', a stranger's id twin
+    assert.equal((await snap(orch, id)).ledger.contract_task_id, 'k');
+    assert.equal(calls.filter((c) => c === 'keys k/1').length, 1); // the new task's funding only
+  } finally { await orch.close(); }
+  const store = openStore(process.env.ROOK_DB!);
+  const stale = store.load().find((d) => d.id === 't_stale')!;
+  store.close();
+  assert.equal(stale.status, 'running');
+  assert.match(stale.events.at(-1)!.data.message, /funded on rook\.old \(testnet\), and this Rook runs rook\.test \(testnet\)\. It is left as it is/);
+});
+
+test('a task whose contract task was refunded and deleted before Rook funded anything is cancelled after a restart, not run', async () => {
+  process.env.ROOK_DB = join(dir, 'deleted.sqlite');
+  storeTask('t_deleted', 'funded', 'del', { cap_atomic: '100000', candidates: [cand('alpha')] }, {}, '0', { accounts: {}, contract_id: 'rook.test', network: 'testnet' });
+  const orch = await start(0);
+  try {
+    const s = await snap(orch, 't_deleted'); // settled before the API listens
+    assert.deepEqual([s.task.status, s.ledger.closed, s.ledger.refunded_atomic, s.ledger.spent_atomic], ['cancelled', true, '1000000', '0']);
+    assert.ok(!calls.includes('keys del/1'));
+    const evs = await events(orch, 't_deleted');
+    assert.match(evs.find((e) => e.data.op === 'refunded_before_run').data.note, /refunded to its funder and deleted before Rook funded any subtask/);
+  } finally { await orch.close(); }
+});
+
+test('unwind: an authorization waited out on one sub-account does not hold back the other sub-account\'s return', async () => {
+  process.env.ROOK_DB = join(dir, 'two-subs.sqlite');
+  const [a1, a2] = [acct('h', 1), acct('h', 2)];
+  openContractTask('h', ['300000', '200000']);
+  contract.get('h')!.subs.push(fundedSub('h', 1, '300000'), fundedSub('h', 2, '200000'));
+  bal.set(a1, 300_000n); bal.set(a2, 200_000n);
+  auths.set(a1, { amount: 100_000n, landed: false, until: Date.now() + 1500 }); // its hire is not on record: waited out
+  const ts = new Date().toISOString();
+  const s = (n: number, cap: string) => ({
+    id: `s${n}`, title: 'T', brief: 'b', search_terms: [], criteria: [], cap_atomic: cap, deadline_s: 60, self_do: false, candidates: [],
+    n, status: 'working', final_outcome: null, rehire_count: 0, tried: [], hires: [], evaluations: [], accepted: null,
+  });
+  const store = openStore(process.env.ROOK_DB);
+  store.save({
+    id: 't_two', prompt: 'p', budget_atomic: '1000000', reserve_share: 0.2, funder: 'owner.test', owner: null, status: 'killed', error: null,
+    created_at: ts, updated_at: ts, plan: null, receipts: [], events: [], final_result: null, llm_calls: [], subtasks: [s(1, '300000'), s(2, '200000')] as any,
+    chain: { contract_task_id: 'h', nmap: { 1: 1, 2: 2 }, accounts: { 1: a1, 2: a2 }, auths: { 1: { payment_hash: 'ph-h', amount: '100000', expires_at_block: 1, nonce: '1' } } },
+    ledger_saved: { closed: false, subtasks: [{ n: 1, balance_atomic: '300000' }, { n: 2, balance_atomic: '200000' }] },
+  });
+  store.close();
+  const orch = await start(0);
+  try {
+    const x = await until(async () => { const v = await snap(orch, 't_two'); return v.ledger?.closed ? v : false; });
+    const at = (c: string) => { const i = calls.indexOf(c); assert.ok(i >= 0, `${c} missing:\n${calls.join('\n')}`); return i; };
+    assert.ok(at(`return ${a2} 200000`) < at(`expire ${a1} landed=false`));
+    assert.ok(at(`expire ${a1} landed=false`) < at(`return ${a1} 300000`) && at(`return ${a1} 300000`) < at('close h'));
+    assert.deepEqual([x.ledger.spent_atomic, x.ledger.refunded_atomic], ['0', '1000000']);
+  } finally { await orch.close(); }
+});
+
+test('after the funder closed a killed task, an emptied sub-account is marked empty and Rook books the task closed', async () => {
+  process.env.ROOK_DB = join(dir, 'funder-closed.sqlite');
+  const account = acct('m', 1);
+  openContractTask('m', ['300000']);
+  // The funder's kill_task, then close_task: refunded, nothing left in the task. The hire had spent the whole cap.
+  Object.assign(contract.get('m')!.task, { status: 'Closed', killed: true, unallocated: '0', reserve_remaining: '0' });
+  contract.get('m')!.subs.push(fundedSub('m', 1, '300000'));
+  bal.set(account, 0n);
+  storeTask('t_funder_closed', 'killed', 'm', { cap_atomic: '300000' }, {}, '0');
+  const orch = await start(0);
+  try {
+    const s = await until(async () => { const x = await snap(orch, 't_funder_closed'); return x.ledger?.closed ? x : false; });
+    assert.ok(calls.includes('mark-empty m/1 true') && calls.includes(`reclaim ${account}`));
+    assert.ok(!calls.includes('close m')); // the contract answered "task is already closed": nothing left to refund
+    assert.deepEqual([sub('m', 1).status, s.ledger.spent_atomic, s.ledger.invariant_holds], ['Returned', '300000', true]);
+    const evs = await events(orch, 't_funder_closed');
+    assert.equal(evs.at(-1).data.op, 'closeTask');
+    assert.ok(!evs.some((e) => e.type === 'error' && /closeTask/.test(e.data.message)));
+  } finally { await orch.close(); }
+});
+
+test('a return that reached a Closed task after its close is refunded by Rook\'s close_task after a restart', async () => {
+  process.env.ROOK_DB = join(dir, 'late-return.sqlite');
+  openContractTask('n', ['300000']);
+  // The funder closed the killed task; then subtask 1 returned 100 000, which waits in the Closed task.
+  Object.assign(contract.get('n')!.task, { status: 'Closed', killed: true, unallocated: '100000', reserve_remaining: '0' });
+  contract.get('n')!.subs.push({ ...fundedSub('n', 1, '300000'), status: 'Returned', returned: '100000' });
+  storeTask('t_late', 'killed', 'n', { cap_atomic: '300000' }, {}, '100000');
+  const orch = await start(0);
+  try {
+    const s = await until(async () => { const x = await snap(orch, 't_late'); return x.ledger?.closed ? x : false; });
+    assert.ok(calls.includes('close n'));
+    assert.deepEqual([contract.get('n')!.task.unallocated, s.ledger.spent_atomic, s.ledger.refunded_atomic], ['0', '200000', '800000']);
+  } finally { await orch.close(); }
+});
+
+test('a funding attempt that failed after its account was created: the account is deleted, at funding and at restore', async () => {
+  const { createChainLedger } = await import('../src/orchestrator/chain-ledger.ts');
+  const l = createChainLedger();
+  openContractTask('failx', ['300000']);
+  l.bind('T-fx', 'failx', new Map([[1, 1]]));
+  l.createTask('T-fx', 'owner.test', 1_000_000n, 0.2);
+  await assert.rejects(async () => { await l.fundSubtask('T-fx', 1, 300_000n); }, /callback returned false/);
+  assert.ok(calls.includes(`reclaim ${acct('failx', 1)}`));
+  // After a restart, restore finds such an attempt and deletes its account before the run funds the subtask again.
+  openContractTask('fr', ['300000']);
+  contract.get('fr')!.subs.push({ ...fundedSub('fr', 1, '300000'), status: 'Failed' });
+  const r = await createChainLedger().restore('T-fr', { contract_task_id: 'fr', contract_id: 'rook.test', network: 'testnet', nmap: { 1: 1 }, accounts: { 1: acct('fr', 1) }, auths: {} },
+    { funder: 'owner.test', budget: 1_000_000n, reserve_share: 0.2, saved: null });
+  assert.equal(r.status, 'Open');
+  assert.ok(calls.includes(`reclaim ${acct('fr', 1)}`));
+  // An attempt that failed before create_account has no account to delete.
+  openContractTask('fn', ['300000']);
+  contract.get('fn')!.subs.push({ ...fundedSub('fn', 1, '300000'), status: 'Failed', account_exists: false });
+  await createChainLedger().restore('T-fn', { contract_task_id: 'fn', contract_id: 'rook.test', network: 'testnet', nmap: { 1: 1 }, accounts: {}, auths: {} },
+    { funder: 'owner.test', budget: 1_000_000n, reserve_share: 0.2, saved: null });
+  assert.ok(!calls.includes(`reclaim ${acct('fn', 1)}`));
+});
+
+test('approving again to reprint the funding instructions skips the open-task limit: the funder\'s own transfer counts toward it', async () => {
+  process.env.ROOK_DB = join(dir, 'reprint.sqlite');
+  const orch = await start(0);
+  try {
+    const t = await call(`${orch.url}/tasks`, { prompt: 'alpha', budget_usdc: '1', owner: 'alice.test' });
+    openTasks = 0;
+    assert.equal((await call(`${orch.url}/tasks/${t.id}/approve`, { owner: 'alice.test' })).funding.amount_atomic, '1000000');
+    openTasks = 1; // her transfer created the contract task, and the limit is 1
+    const again = await call(`${orch.url}/tasks/${t.id}/approve`, { owner: 'alice.test' });
+    assert.deepEqual([again.status, again.funding.amount_atomic], ['approved', '1000000']);
+    const next = await call(`${orch.url}/tasks`, { prompt: 'beta', budget_usdc: '1', owner: 'alice.test' });
+    await assert.rejects(call(`${orch.url}/tasks/${next.id}/approve`, { owner: 'alice.test' }), /alice\.test already has 1 open tasks/);
+  } finally { await orch.close(); openTasks = 0; }
 });

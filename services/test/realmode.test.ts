@@ -10,7 +10,7 @@ const TOKEN = 'realmode-test-token-0123456789abcdef';
 Object.assign(process.env, { ROOK_LLM: 'canned', ROOK_MARKET: 'sim', ROOK_LEDGER: 'sim', ROOK_SERVICE_TOKEN: TOKEN, ROOK_DB: '' });
 
 const { serve } = await import('../src/shared/http.ts');
-const { config, profileProblems } = await import('../src/shared/config.ts');
+const { config, foreignKeys, profileProblems } = await import('../src/shared/config.ts');
 const orchestrator = await import('../src/orchestrator/index.ts');
 const planner = await import('../src/planner/index.ts');
 type Running = Awaited<ReturnType<typeof serve>>;
@@ -67,6 +67,19 @@ test('live profile lists everything missing; role keys are checked only where th
   assert.deepEqual(problems(noSignerKey, 'chain-gateway'), []);
   assert.match(problems(LIVE, 'simulator').join('\n'), /simulator does not run in the live profile/);
   assert.match(problems({ ...LIVE, ROOK_SERVICE_TOKEN: 'short' }).join('\n'), /at least 32 characters/);
+});
+
+test('keys: the admin key reaches no service, and each service keeps only its own role variables', () => {
+  const env = {
+    ROOK_ADMIN_KEY: 'ed25519:admin', ADMIN_WALLET_PRIVATE_KEY: 'ed25519:admin', ROOK_ADMIN_ACCOUNT: 'admin.near', NEAR_RPC_URL: 'http://127.0.0.1:9',
+    ROOK_SIGNER_ACCOUNT: 's', ROOK_SIGNER_KEY: 'ed25519:s', ROOK_SIGNER_KEY_DIR: '/keys', ROOK_ORCHESTRATOR_ACCOUNT: 'o', ROOK_ORCHESTRATOR_KEY: 'ed25519:o',
+  };
+  const admin = ['ADMIN_WALLET_PRIVATE_KEY', 'ROOK_ADMIN_KEY'], signer = ['ROOK_SIGNER_ACCOUNT', 'ROOK_SIGNER_KEY', 'ROOK_SIGNER_KEY_DIR'];
+  const orch = ['ROOK_ORCHESTRATOR_ACCOUNT', 'ROOK_ORCHESTRATOR_KEY'];
+  const dropped = (service: string) => foreignKeys(service, env).sort();
+  assert.deepEqual(dropped('signer'), [...admin, ...orch].sort());
+  assert.deepEqual(dropped('chain-gateway'), [...admin, ...signer].sort());
+  for (const s of ['orchestrator', 'planner', 'evaluator', 'market-gateway', 'simulator']) assert.deepEqual(dropped(s), [...admin, ...signer, ...orch].sort(), s);
 });
 
 test('pnpm live (dev.ts --live) and a service started alone refuse to start, listing what is missing', { timeout: 120_000 }, async () => {

@@ -54,6 +54,25 @@ test('quotes that failed or do not match the /x402 recipients are dropped', () =
   assert.ok(p.notes.some((n) => n.includes('evil') && n.includes('/x402')));
 });
 
+test('a quote whose payment window is over ROOK_MAX_PAYMENT_TIMEOUT_S (default 15000 s, about 4 h) is dropped with a note', () => {
+  const ttl = (handle: string, maxTimeoutSeconds: number): [string, QuoteResult] => [handle, { ok: true, row: { ...(row('100000') as any).row, maxTimeoutSeconds } }];
+  const plan = () => buildPlan(input({
+    draft: [sub('a')],
+    selected: [[agent('four-hours'), agent('a-day'), agent('fraction')]],
+    quotes: Object.fromEntries([ttl('four-hours', 15_000), ttl('a-day', 87_000), ttl('fraction', 60.5)]),
+  }));
+  const saved = process.env.ROOK_MAX_PAYMENT_TIMEOUT_S;
+  delete process.env.ROOK_MAX_PAYMENT_TIMEOUT_S;
+  try {
+    const p = plan();
+    assert.deepEqual(p.subtasks[0].candidates.map((c) => c.handle), ['four-hours']); // Rook would refuse the others at hire time
+    assert.ok(p.notes.includes('"a": quote from a-day dropped: payment window 87000 s is not from 1 to 15000 s (ROOK_MAX_PAYMENT_TIMEOUT_S)'), p.notes.join('\n'));
+    assert.ok(p.notes.some((n) => n.includes('fraction') && n.includes('60.5 s')));
+    process.env.ROOK_MAX_PAYMENT_TIMEOUT_S = '90000';
+    assert.deepEqual(plan().subtasks[0].candidates.map((c) => c.handle).sort(), ['a-day', 'four-hours']);
+  } finally { if (saved === undefined) delete process.env.ROOK_MAX_PAYMENT_TIMEOUT_S; else process.env.ROOK_MAX_PAYMENT_TIMEOUT_S = saved; }
+});
+
 test('budget fitting walks priority order: over budget becomes self_do when allowed, else dropped', () => {
   // budget 1.00, reserve share 0.20 -> 0.80 to allocate; the caps take 0.50, so the other 0.50 becomes the reserve
   const p = buildPlan(input({

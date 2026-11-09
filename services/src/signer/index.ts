@@ -196,14 +196,18 @@ export async function start(port = config.ports.signer): Promise<Running> {
 
     /**
      * Deletes a finished sub-account so its NEAR goes back to the contract (beneficiary): only once the contract marks
-     * the subtask Returned and the account holds no USDC and no authorization. First storage_unregister on USDC, so
-     * that deposit comes back too; if that fails the account is deleted anyway (losing only the deposit).
+     * the subtask Returned, or Failed with its account created (a funding attempt that failed after create_account:
+     * 0.06 NEAR, never any USDC; its key comes from the attempt in the account id), and only while the account holds
+     * no USDC and no authorization. First storage_unregister on USDC, so that deposit comes back too; if that fails
+     * the account is deleted anyway (losing only the deposit).
      */
     'POST /reclaim': async ({ body }) => {
       const task_id = String(body?.task_id ?? ''), n = Number(body?.n), account_id = String(body?.account_id ?? '');
       if (auths.has(`${task_id}/${n}`)) refuse(`subtask ${n} has an outstanding authorization`);
       const { cfg, sub, key } = await subtask(task_id, n, account_id);
-      if (sub.status !== 'Returned') refuse(`subtask ${n} is ${sub.status}, not Returned`);
+      if (sub.status !== 'Returned' && !(sub.status === 'Failed' && sub.account_exists === true)) {
+        refuse(`subtask ${n} is ${sub.status}${sub.status === 'Failed' ? ' and its account was never created' : ''}, not Returned`);
+      }
       if ((await ftBalance(cfg.usdc, account_id)) !== 0n) refuse(`${account_id} still holds USDC`);
       let unregister: string | null = null;
       if (await viewCall(cfg.usdc, 'storage_balance_of', { account_id })) {
