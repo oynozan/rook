@@ -93,6 +93,7 @@ before(async () => {
     'GET /config': () => ({ network: 'testnet', contract_id: 'rook.test', owner: 'owner.test', usdc: 'usdc.test', max_open_tasks: 1 }),
     'GET /open-tasks': () => ({ open: openTasks }),
     'GET /task/:id': ({ params }) => {
+      hiccup('task');
       const x = contract.get(params.id);
       if (!x) throw new HttpError(404, `no contract task ${params.id}`);
       return { task: x.task, subtasks: x.subs };
@@ -295,7 +296,7 @@ test('a killed task with money still on chain is unwound when the services start
 
 const cand = (handle: string) => ({ handle, name: handle, description: handle, sla_seconds: 60, success_rate: null, delivered_jobs: 0, price_atomic: PRICE[handle], quote: row(PRICE[handle]) });
 /** A task as the orchestrator stores it, for the next start to load: one subtask, bound to contract task `cid`. */
-function storeTask(id: string, status: string, cid: string, sub: object, auths: object, balance: string, chain: object = {}) {
+function storeTask(id: string, status: string, cid: string, sub: object, auths: object, balance: string, chain: object = {}, doc: object = {}) {
   const ts = new Date().toISOString();
   const store = openStore(process.env.ROOK_DB!);
   store.save({
@@ -308,6 +309,7 @@ function storeTask(id: string, status: string, cid: string, sub: object, auths: 
     } as any],
     chain: { contract_task_id: cid, nmap: { 1: 1 }, accounts: { 1: acct(cid, 1) }, auths: auths as any, ...chain },
     ledger_saved: { closed: false, subtasks: [{ n: 1, balance_atomic: balance }] },
+    ...doc,
   });
   store.close();
 }
@@ -421,6 +423,62 @@ test('restore refuses a binding made on another contract or network, or another 
   assert.deepEqual([l.contractTaskOf('T5'), l.binding('T5')!.contract_id, l.binding('T5')!.network], ['o', 'rook.test', 'testnet']);
   l.bind('T6', 'p', new Map([[1, 1]]));
   assert.deepEqual([l.binding('T6')!.contract_id, l.binding('T6')!.network], ['rook.test', 'testnet']);
+});
+
+/** A task restarted while closing with its report: its hire paid 200 000 of the 300 000 cap, the rest still in the sub-account. */
+function storeClosing(id: string, cid: string) {
+  openContractTask(cid, ['300000']);
+  contract.get(cid)!.subs.push(fundedSub(cid, 1, '300000'));
+  bal.set(acct(cid, 1), 100_000n);
+  storeTask(id, 'closing', cid, { cap_atomic: '300000', status: 'passed', final_outcome: 'passed' }, {}, '100000', { contract_id: 'rook.test', network: 'testnet' },
+    { final_result: { final_markdown: 'report', attribution: [], abandoned: [] } });
+}
+const restoreErrors = (doc: { events: { type: string; data: any }[] }) => doc.events.filter((e) => e.type === 'error' && e.data.kind === 'restore');
+
+test('a restore that fails at start is tried again once the API listens, until a shutdown; the next start finishes the close', async () => {
+  process.env.ROOK_DB = join(dir, 'restore-again.sqlite');
+  storeClosing('t_again', 'ra');
+  failing.set('task', 999); // the chain gateway can't read the contract
+  let orch = await start(0);
+  try {
+    assert.equal((await snap(orch, 't_again')).task.status, 'closing'); // the API listens meanwhile
+    await until(async () => (failing.get('task') ?? 0) <= 993); // the try at start (3 reads), then another
+  } finally { await orch.close(); }
+  await new Promise((ok) => setTimeout(ok, 1200)); // a try under way at the shutdown finishes its reads
+  const left = failing.get('task');
+  await new Promise((ok) => setTimeout(ok, 500));
+  assert.equal(failing.get('task'), left); // the shutdown stopped the tries
+  const store = openStore(process.env.ROOK_DB!);
+  const doc = store.load().find((d) => d.id === 't_again')!;
+  store.close();
+  assert.equal(doc.status, 'closing');
+  const errs = restoreErrors(doc);
+  assert.equal(errs.length, 1); // reported once, however often it failed
+  assert.match(errs[0].data.message, /^after a restart Rook could not rebuild contract task ra: .*Rook tries again, waiting longer each time\.$/);
+
+  failing.set('task', 3); // the try at start fails again; the next one reads the contract
+  orch = await start(0);
+  try {
+    const s = await until(async () => { const x = await snap(orch, 't_again'); return x.task.status === 'closed' ? x : false; });
+    assert.deepEqual([s.final_result.final_markdown, s.ledger.spent_atomic, s.ledger.refunded_atomic], ['report', '200000', '800000']);
+    assert.ok(calls.includes(`return ${acct('ra', 1)} 100000`) && calls.includes('close ra'));
+  } finally { await orch.close(); failing.clear(); }
+});
+
+test('a task stopped while its restore is being tried again: once the books are rebuilt, what it holds comes back', async () => {
+  process.env.ROOK_DB = join(dir, 'restore-kill.sqlite');
+  openContractTask('rk', ['300000']);
+  contract.get('rk')!.subs.push(fundedSub('rk', 1, '300000'));
+  bal.set(acct('rk', 1), 100_000n); // 200 000 was paid before the restart
+  storeTask('t_again_kill', 'running', 'rk', { cap_atomic: '300000' }, {}, '100000', { contract_id: 'rook.test', network: 'testnet' });
+  failing.set('task', 3); // the try at start fails
+  const orch = await start(0);
+  try {
+    assert.equal((await call(`${orch.url}/tasks/t_again_kill/kill`, {})).status, 'killed');
+    const s = await until(async () => { const x = await snap(orch, 't_again_kill'); return x.ledger?.closed ? x : false; });
+    assert.deepEqual([s.task.status, s.ledger.killed, s.ledger.spent_atomic, s.ledger.refunded_atomic], ['killed', true, '200000', '800000']);
+    assert.ok(calls.includes(`return ${acct('rk', 1)} 100000`) && calls.includes('close rk'));
+  } finally { await orch.close(); failing.clear(); }
 });
 
 test('a task bound on another contract is left as it is, and its contract task id does not block /funded here', async () => {

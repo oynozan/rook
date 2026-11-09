@@ -109,8 +109,9 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
 
   // With ROOK_DB set, tasks survive restarts. A plan waiting for approval carries on, and so does a chain-mode task
   // waiting for its funding transaction. A chain-mode task bound to a contract task is rebuilt from the contract before
-  // the API listens, then resumed (or, killed or failed with money still on chain, unwound). Any other task that was
-  // mid-run is marked failed: a sim-ledger task's balances lived in memory only.
+  // the API listens (a rebuild that fails is tried again after it listens), then resumed (or, killed or failed with
+  // money still on chain, unwound). Any other task that was mid-run is marked failed: a sim-ledger task's balances lived
+  // in memory only.
   const db = config.dbPath ? openStore(config.dbPath) : null;
   if (db) {
     for (const doc of db.load()) tasks.set(doc.id, fromDoc(doc));
