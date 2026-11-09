@@ -186,6 +186,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         paying: chain !== null, simulated: config.simulated,
         // Any signed-in account funds its own task; the contract's limits on that (null without the chain).
         min_budget_atomic: chain && c ? c.min_budget.toString() : null, max_open_tasks: chain ? c?.max_open_tasks ?? null : null,
+        max_budget_atomic: config.maxBudgetAtomic.toString(), // POST /tasks refuses more (ROOK_MAX_BUDGET_USDC)
         contract_owner: chain ? c?.owner ?? null : null,
       };
     },
