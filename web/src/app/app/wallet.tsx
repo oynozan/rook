@@ -46,6 +46,7 @@ const pause = (ms: number) => new Promise<null>((ok) => setTimeout(() => ok(null
 export function WalletProvider({ account: signedIn, children }: { account: string | null; children: ReactNode }) {
   const router = useRouter();
   const connector = useRef<NearConnector | null>(null);
+  const signingOut = useRef<Promise<void> | null>(null); // Disconnect signing the wallet out
   const [account, setAccount] = useState<string | null>(signedIn);
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -113,6 +114,7 @@ export function WalletProvider({ account: signedIn, children }: { account: strin
       setError(null);
       setConnecting(true);
       try {
+        await signingOut.current; // a Disconnect still signing the wallet out: the wallet list comes after it
         const { data: challenge } = await post<{ message: string; recipient: string; nonce: string }>('/api/auth/challenge');
         const c = await getConnector();
         const signed = await sign(c, { message: challenge.message, recipient: challenge.recipient, nonce: fromBase64(challenge.nonce) });
@@ -130,12 +132,12 @@ export function WalletProvider({ account: signedIn, children }: { account: strin
       }
     },
     async disconnect() {
-      try {
-        await connector.current?.disconnect();
-      } catch {
-        // The wallet may already be gone. Either way, the session ends.
-      }
+      // The wallet signs out too, or the next Connect signs straight back in as this account. After a reload there is no
+      // connector yet, so one is made for it. The wallet may already be gone; either way the session ends.
+      const walletSignOut = getConnector().then((c) => c.disconnect()).catch(() => {});
+      signingOut.current = walletSignOut;
       await endSession();
+      await walletSignOut;
     },
     async sendTransaction(tx) {
       if (!account) throw new Error('Sign in with your NEAR wallet first.');
