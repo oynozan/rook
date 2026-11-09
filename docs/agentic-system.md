@@ -81,7 +81,7 @@ Response (`Plan`):
 }
 ```
 
-A `self_do` subtask also carries `self_do_reason`: `no_agent` when no candidate was left after quoting, `over_budget` when candidates were quoted but no price fit what was left of `allocatable_atomic` (a bigger budget would hire one).
+A `self_do` subtask also carries `self_do_reason`: `no_agent` when no candidate was left after quoting, `over_budget` when candidates were quoted but no price fit what was left of `allocatable_atomic` (a bigger budget would hire one). An `over_budget` subtask also carries `self_do_need_atomic`, its cheapest quoted price: what one hire would have cost, so a client can name a budget that hires one.
 
 `Candidate`: `{ handle, name, description, sla_seconds, success_rate, delivered_jobs, price_atomic, quote: AcceptsRow, p_pass, expected_cost_atomic, rank_reason }`. `p_pass` is the pass chance (0 to 1, 3 decimals), `expected_cost_atomic` = ceil(price / pass chance), `rank_reason` one sentence such as `0.10 USDC / 0.842 pass chance (market 12 of 14, Rook 3 of 3) = 0.11875 USDC expected` (section 5.2 step 4).
 

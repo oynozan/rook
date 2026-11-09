@@ -69,6 +69,7 @@ export type PlanSubtask = {
   id: string; title: string; brief: string; search_terms: string[];
   criteria: Criterion[]; cap_atomic: string; deadline_s: number; self_do: boolean;
   self_do_reason?: SelfDoReason; // set on every self_do subtask
+  self_do_need_atomic?: string; // over_budget only: the cheapest quoted price, what one hire would have cost
   candidates: Candidate[];
 };
 export type Plan = {

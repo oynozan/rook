@@ -131,6 +131,8 @@ test('budget fitting walks priority order: over budget becomes self_do when allo
   assert.deepEqual(p.subtasks.map((s) => [s.id, s.title, s.self_do, s.cap_atomic, s.self_do_reason]), [
     ['s1', 'first', false, '500000', undefined], ['s2', 'big-ok', true, '0', 'over_budget'], ['s3', 'nobody-ok', true, '0', 'no_agent'],
   ]);
+  // An over-budget part says what one hire would have cost (its cheapest quote), so the app can name a budget.
+  assert.deepEqual(p.subtasks.map((s) => s.self_do_need_atomic), [undefined, '400000', undefined]);
   assert.equal(p.subtasks[1].deadline_s, 0);
   assert.deepEqual(p.dropped, [{ title: 'big-no', reason: 'over budget' }, { title: 'nobody', reason: 'no fitting agent' }]);
 });
@@ -479,6 +481,7 @@ test('sweep over several subtasks: caps fit the allocatable budget, every listed
       const overBudget = s ? s.self_do_reason === 'over_budget' : p.dropped.some((x) => x.title === d.title && x.reason === 'over budget');
       if (overBudget) assert.ok(prices.length && prices.every((x) => x > allocatable - taken), `case ${i} ${d.title}`);
       else assert.equal(prices.length, 0, `case ${i} ${d.title}`);
+      if (s) assert.equal(s.self_do_need_atomic, overBudget ? prices.reduce((a, b) => (b < a ? b : a)).toString() : undefined, `case ${i} ${d.title}`);
     });
   }
 });

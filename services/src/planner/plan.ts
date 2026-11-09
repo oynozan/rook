@@ -77,7 +77,7 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
   const allocatable = input.budget_atomic - share(input.budget_atomic, input.reserve_share);
 
   // Steps 4 to 7, in priority order. `draftIdx` keeps the draft position for cross-check rewriting.
-  type Kept = { draftIdx: number; d: DraftSubtask; candidates: Candidate[]; cap: bigint; self_do: boolean; self_do_reason?: SelfDoReason };
+  type Kept = { draftIdx: number; d: DraftSubtask; candidates: Candidate[]; cap: bigint; self_do: boolean; self_do_reason?: SelfDoReason; need?: bigint };
   const kept: Kept[] = [];
   let allocated = 0n;
   // First pass: a subtask is hired when one of its agents fits what is left to allocate, at that agent's price. The
@@ -99,7 +99,9 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
     const self_do_reason: SelfDoReason = quoted.length ? 'over_budget' : 'no_agent';
     if (!d.self_do_ok) { dropped.push({ title: d.title, reason: quoted.length ? 'over budget' : 'no fitting agent' }); return; }
     if (quoted.length) notes.push(`"${d.title}" is self_do: no candidate's price fits the ${left} left to allocate`);
-    kept.push({ draftIdx, d, candidates: [], cap: 0n, self_do: true, self_do_reason });
+    // Over budget: the cheapest quote is what one hire would have cost, so a client can name the budget that hires one.
+    const need = quoted.length ? quoted.map(price).reduce((a, b) => (b < a ? b : a)) : undefined;
+    kept.push({ draftIdx, d, candidates: [], cap: 0n, self_do: true, self_do_reason, need });
   });
 
   // Second pass, same order: raise each cap toward fallbackCap, as far as the allocatable budget allows.
@@ -151,6 +153,7 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
       deadline_s: k.self_do ? 0 : Math.min(Math.max(...k.candidates.map((c) => c.sla_seconds)), config.hirePatienceS),
       self_do: k.self_do,
       ...(k.self_do ? { self_do_reason: k.self_do_reason } : {}),
+      ...(k.need !== undefined ? { self_do_need_atomic: k.need.toString() } : {}),
       candidates: k.candidates,
     };
   });
