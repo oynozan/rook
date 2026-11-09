@@ -1,4 +1,7 @@
+import type { Metadata } from 'next';
 import { Navbar } from '@/components/Navbar';
+
+export const metadata: Metadata = { title: 'Page not found', robots: { index: false } };
 
 export default function NotFound() {
   return (

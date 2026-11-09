@@ -1,0 +1,2 @@
+# The web server's own store: sessions, spent sign-in nonces, draft counts (src/app/app/db.ts)
+/.data/
