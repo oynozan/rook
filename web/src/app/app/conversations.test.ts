@@ -2,7 +2,7 @@
 // Run: npx tsx --test src/app/app/*.test.ts
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { amountsNamed, conversationOf, conversations, currentTask, outgoing, placeholderFor, revisedPlan, sameTaskAt, waitReason } from './conversations';
+import { amountsNamed, budgetField, conversationOf, conversations, currentTask, outgoing, placeholderFor, revisedPlan, sameTaskAt, waitReason } from './conversations';
 import type { TaskSummary } from './orchestrator';
 
 const task = (id: string, minute: number, o: Partial<TaskSummary> = {}): TaskSummary =>
@@ -91,6 +91,16 @@ test('a changed budget alone asks for the same task at that budget; typed words 
   assert.equal(outgoing('', 'abc', planned), ''); // the budget field says what is wrong with it
   assert.equal(outgoing('', '1.50', task('b', 1, { budget_atomic: undefined })), ''); // older services: budget unknown
   assert.equal(outgoing('', '1.50', null), '');
+});
+
+test("the Budget field follows the conversation's budget, but keeps one the user typed until it is sent", () => {
+  assert.equal(budgetField('3.00', undefined, '1500000'), '1.50'); // a conversation opened: its budget
+  assert.equal(budgetField('3.00', '3000000', '1000000'), '1.00'); // the plan was made at the total its message named
+  assert.equal(budgetField('3', '3000000', '5000000'), '5.00'); // the same amount, typed another way
+  // Changed to 1.5, then Rook refused the send for a newer message, which the list now shows: the typed 1.5 stays.
+  assert.equal(budgetField('1.5', '3000000', '2000000'), '1.5');
+  assert.equal(budgetField('abc', '3000000', '2000000'), 'abc'); // the field says what is wrong with it
+  assert.equal(budgetField('1.5', '1500000', '1000000'), '1.00'); // sent at 1.5 and planned at a named 1.00
 });
 
 test('amounts a message names as money, which the wallet check before drafting may use instead of the Budget field', () => {

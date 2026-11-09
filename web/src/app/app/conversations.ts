@@ -2,6 +2,7 @@
 // task page shows one, and the composer sends into it. Pure functions, so the tests use them.
 // Run: npx tsx --test src/app/app/*.test.ts
 import { parseBudget } from './draft';
+import { usdc } from './funding';
 import type { TaskSummary } from './orchestrator';
 
 export type Conversation = {
@@ -75,6 +76,17 @@ export function waitReason(status: string, chain = false): string | null {
   if (status === 'approved' && chain) return 'Fund or cancel the plan above before sending more.';
   if (RUNNING.has(status)) return 'Wait for this run to finish, or stop it, before sending more.';
   return null;
+}
+
+/**
+ * The composer's Budget field when the budget a conversation starts from (its newest task's, atomic) moves from `was` to
+ * `next`: after a message is sent, once a plan made at a total its message named is ready, or on another conversation.
+ * The field follows, unless it holds a budget the user typed: that stays until it is sent, so a send Rook refused (a
+ * newer message from another tab moved the conversation on) keeps it for sending again.
+ */
+export function budgetField(field: string, was: string | undefined, next: string): string {
+  const b = parseBudget(field);
+  return was === undefined || (b.ok && b.atomic === BigInt(was)) ? usdc(next) : field;
 }
 
 /** What a changed budget alone sends: the same task again, at that budget. */

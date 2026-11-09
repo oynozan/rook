@@ -2,9 +2,8 @@
 
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
-import { outgoing, placeholderFor, waitReason } from './conversations';
+import { budgetField, outgoing, placeholderFor, waitReason } from './conversations';
 import { checkDraft, parseBudget } from './draft';
-import { usdc } from './funding';
 import { useMode } from './mode';
 import type { TaskSummary } from './orchestrator';
 import { useWallet } from './wallet';
@@ -33,9 +32,16 @@ export function Composer({ onSend, errors, sending, compact, thread }: {
 }) {
   const [prompt, setPrompt] = useState('');
   const [budget, setBudget] = useState('3.00');
-  // A conversation's budget starts at its newest task's, and again after each message.
+  // A conversation's budget starts at its newest task's, and again after each message, unless the field holds one the
+  // user typed and hasn't sent yet.
   const parent = thread?.parent, startBudget = thread?.budget_atomic;
-  useEffect(() => { if (parent && startBudget) setBudget(usdc(startBudget)); }, [parent, startBudget]);
+  const lastStart = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    if (!parent || !startBudget) return;
+    const was = lastStart.current;
+    lastStart.current = startBudget;
+    setBudget((field) => budgetField(field, was, startBudget));
+  }, [parent, startBudget]);
   const current = thread?.current ?? null;
   const wallet = useWallet();
   const { mode, chain } = useMode();
