@@ -123,9 +123,10 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     console.log(`[orchestrator] ${tasks.size} task${tasks.size === 1 ? '' : 's'} loaded from ${config.dbPath}${resume.length ? `, ${resume.length} resumed from the chain` : ''}`);
   }
 
-  // Chain mode: a killed or failed task returns its money after the terminal status; its stream stays open until then.
+  // A killed or failed task returns its money after the terminal status; its stream stays open until then. In chain
+  // mode only a task bound to a contract task holds money (a plan that hires no agent has books of 0, never on chain).
   // ponytail: a closeTask that keeps failing leaves the stream open until the client goes; the errors still stream.
-  const moving = (t: Task) => chain !== null && chain.contractTaskOf(t.id) !== null && ledger.view(t.id)?.closed === false;
+  const moving = (t: Task) => ledger.view(t.id)?.closed === false && (chain === null || chain.contractTaskOf(t.id) !== null);
   /** The contract's settings, read once from the chain-gateway (null until it answers). */
   let chainCfg: ChainCfg | null = null;
   const contractCfg = async (): Promise<ChainCfg | null> => {

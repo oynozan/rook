@@ -219,7 +219,7 @@ test('restart mid-hire: rebuilt from the contract, the hire is polled again by i
   } finally { await orch.close(); }
 });
 
-test('kill in chain mode: the authorization is waited out, the sub-account returned and the task closed; kill_task stays the funder\'s', async () => {
+test('kill in chain mode: the authorization is waited out, the sub-account returned and the task closed; kill_task stays the funder\'s, in the CLI\'s /kill answer', async () => {
   authTtlMs = 300; // the agent refuses CancelTask, so only the authorization's expiry frees the money
   const orch = await start(0);
   try {
@@ -235,10 +235,10 @@ test('kill in chain mode: the authorization is waited out, the sub-account retur
     assert.ok(calls.includes('signer-kill b'));
     assert.ok(calls.indexOf(`expire ${acct('b', 1)} landed=false`) < calls.indexOf(`return ${acct('b', 1)} 100000`));
     assert.ok(calls.includes('close b'));
-    // Every step is recorded after the killed status, and the event names the owner's kill_task.
+    // Every step is recorded after the killed status. The event only says the money comes back: no command in the stream.
     const evs = await events(orch, id);
     const at = evs.findIndex((e) => e.type === 'task_status' && e.data.to === 'killed');
-    assert.match(evs.find((e) => e.type === 'ledger' && e.data.op === 'kill').data.human_action, /funder's call: near contract call-function .* kill_task json-args '\{"task_id":"b"\}'/);
+    assert.deepEqual(evs.find((e) => e.type === 'ledger' && e.data.op === 'kill').data, { op: 'kill', returning: true });
     assert.deepEqual(evs.slice(at + 1).filter((e) => e.type === 'ledger').map((e) => e.data.op), ['clearing', 'release', 'returnLeftover', 'closeTask']);
     assert.equal(evs.find((e) => e.data.op === 'clearing').data.how, 'wait');
   } finally { await orch.close(); authTtlMs = 60_000; }

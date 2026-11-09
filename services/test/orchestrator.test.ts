@@ -194,8 +194,7 @@ test('kill releases the authorization, cancels the A2A task and stops hiring', a
 
   const killed = await call(`${orch.url}/tasks/${created.id}/kill`, {});
   assert.equal(killed.status, 'killed');
-  await new Promise((ok) => setTimeout(ok, 200));
-  const s = await snap(created.id);
+  const s = await until(async () => { const x = await snap(created.id); return x.ledger.closed ? x : false; });
   assert.equal(s.task.status, 'killed');
   assert.equal(s.ledger.killed, true);
   assert.equal(s.ledger.subtasks[0].authorized_atomic, null);
@@ -206,7 +205,12 @@ test('kill releases the authorization, cancels the A2A task and stops hiring', a
   const evs = (await fetch(`${orch.url}/tasks/${created.id}/events`).then((r) => r.text())).split('\n\n').filter(Boolean);
   const killAt = evs.findIndex((e) => e.includes('"op":"kill"'));
   assert.ok(killAt > 0 && !evs.slice(killAt).some((e) => e.includes('event: hire_sent')));
-  assert.match(evs.at(-1)!, /"to":"killed"/);
+  // After the killed status only the unwind: the sim books close too, so the refund shows.
+  const killedAt = evs.findIndex((e) => /"to":"killed"/.test(e));
+  assert.deepEqual(evs.slice(killedAt + 1).map((e) => e.match(/"op":"(\w+)"|"to":"(\w+)"/)!.slice(1).join('')), ['returnLeftover', 'returned', 'closeTask']);
+  assert.match(evs.at(-1)!, /"op":"closeTask"/);
+  assert.ok(!evs[killAt].includes('near contract')); // no CLI command in the stream
+  assert.deepEqual([s.ledger.closed, s.ledger.refunded_atomic], [true, '1000000']);
   await assert.rejects(call(`${orch.url}/tasks/${created.id}/kill`, {}), /already killed/);
 });
 

@@ -265,15 +265,14 @@ export async function unwind(ledger: Ledger, t: Task, why: string, afterRun = fa
 }
 
 /**
- * Kill switch (section 8.7). Synchronous, so no loop can emit between the ledger kill and the killed status. In chain
- * mode the funds then come back (unwind); the contract's own kill_task is the funder's call, which the event says.
+ * Kill switch (section 8.7). Synchronous, so no loop can emit between the ledger kill and the killed status. The funds
+ * then come back (unwind). The contract's own kill_task is the funder's call: the CLI's /kill answer prints it.
  */
 export function kill(ledger: Ledger, t: Task) {
   ledger.kill(t.id);
-  const chain = onChain(ledger) && ledger.contractTaskOf(t.id) !== null ? ledger : null;
-  emit(t, 'ledger', { op: 'kill', ...(chain ? {
-    human_action: `Rook signs no more payments for this task and returns what its sub-accounts hold. Stopping it on the contract too is its funder's call: ${chain.killCommand(t.id, t.funder)}`,
-  } : {}) });
+  const chain = onChain(ledger) && ledger.contractTaskOf(t.id) !== null;
+  // `returning`: money is on chain for this task, and the unwind sends it back to the funder.
+  emit(t, 'ledger', { op: 'kill', ...(chain ? { returning: true } : {}) });
   t.abort.abort();
   const sending = new Set<number>();
   for (const f of t.inflight.values()) {
@@ -290,7 +289,8 @@ export function kill(ledger: Ledger, t: Task) {
     }
   }
   setStatus(t, 'killed');
-  if (chain) void unwind(ledger, t, 'after kill', true).catch((e) => console.error('[orchestrator] unwind after kill', e));
+  // In every mode: the sim ledger's books close too, so a stopped run shows its refund (no books: nothing to do).
+  void unwind(ledger, t, 'after kill', true).catch((e) => console.error('[orchestrator] unwind after kill', e));
 }
 
 /**
