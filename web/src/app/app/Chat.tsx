@@ -7,12 +7,12 @@ import { Mark } from '@/components/Navbar';
 import { useSmoothScroll } from '@/components/SmoothScroll';
 import { AiStatus } from '@/components/ui/ai-status';
 import { WebSearch, type WebSource } from '@/components/ui/web-search';
-import { approve, cancel, confirmFunding, draftTask, forgetTransfer, fundingInstructions, fundingRefunded, rememberTransfer, stop, type ActResult } from './actions';
+import { approve, cancel, confirmFunding, draftTask, forgetContractTask, forgetTransfer, fundingInstructions, fundingRefunded, rememberTransfer, stop, type ActResult } from './actions';
 import { go } from './AppShell';
 import { Composer, type ComposerErrors } from './Composer';
 import { alertLine, deliveredParts, problemLine, skipReason } from './feed';
 import {
-  balanceProblem, closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
+  balanceProblem, closeTaskTransaction, confirmFailure, contractHasTask, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
   moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, termsOf, txHashOf, usdc, whoseTransfer,
   type CloseResult, type Funding, type FundingResult, type Terms,
 } from './funding';
@@ -438,7 +438,19 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
       if (/already funds/.test(out.message)) setMade(null); // another task's contract task: this one can be funded again
       return setError(out.raw ? `Rook didn't start the run from here: ${why}` : why);
     }
-    if (next === 'not_final') return setError("NEAR hasn't finished recording your transfer yet. Your USDC is safe in the Rook contract. Confirm again in a few seconds.");
+    if (next === 'not_final') {
+      // Rook still can't see the contract task after its tries. If the wallet's own view of NEAR, which is ahead of
+      // Rook's, has no such task either, it is gone (refunded and deleted, or an old transfer's), not late: confirming
+      // again would never work, so the plan can be funded again. A read that fails says nothing is gone.
+      setPhase('confirming');
+      const gone = !!contract && await contractHasTask(rpcFor(network), contract, cid).then((has) => !has, () => false);
+      setPhase('idle');
+      if (!gone) return setError("NEAR hasn't finished recording your transfer yet. Your USDC is safe in the Rook contract. Confirm again in a few seconds.");
+      await forgetContractTask(id, cid).catch(() => null);
+      setMade(null);
+      onChanged();
+      return setError(`Contract task ${cid} isn't on the Rook contract any more, so Rook can't start the run from it. Its USDC most likely went back to the wallet that funded it already. Fund the plan again to start the run.`);
+    }
     setError(out.raw ? `Rook didn't start the run: ${why} Your USDC is safe in the Rook contract. Confirm again to start it.` : `${why} Your USDC is safe in the Rook contract.`);
   }
 
@@ -626,6 +638,7 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
           {trouble && <ActionButton primary onClick={onRetry} disabled={stopping}>Try again</ActionButton>}
           <ActionButton onClick={onStop} busy={stopping}>{stopping ? 'Cancelling…' : 'Cancel'}</ActionButton>
         </div>
+        {error && <p role="alert" className="mt-3 text-alert">{error}</p>}
       </div>
     );
   }

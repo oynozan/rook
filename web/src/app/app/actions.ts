@@ -126,6 +126,16 @@ export async function forgetTransfer(id: string, tx_hash: string) {
 }
 
 /**
+ * The page found no contract task `contract_task_id` on the contract (refunded and deleted, or an old transfer's), after
+ * Rook couldn't see it either: no run can start from it, so the record goes and the plan can be funded again.
+ */
+export async function forgetContractTask(id: string, contract_task_id: string) {
+  const owner = await currentAccount();
+  const cid = String(contract_task_id ?? '');
+  if (owner && CONTRACT_TASK.test(cid)) forgetFundingOf(String(id), owner, cid);
+}
+
+/**
  * The wallet's funding transfer created contract task `contract_task_id`. It is remembered first, so a reload shows
  * "confirm" instead of offering to fund twice; then the orchestrator checks the contract task against the plan. A task
  * whose funding is already a different contract task keeps it.

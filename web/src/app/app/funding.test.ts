@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  balanceProblem, closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
+  balanceProblem, closeTaskTransaction, confirmFailure, contractHasTask, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
   moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, termsOf, txHashOf, usdc, whoseTransfer, untilFinal, type Funding,
 } from './funding';
 
@@ -255,15 +255,18 @@ test('a task stopped before its funding was bound never ran, though the kill add
   assert.equal(moneyMoved({ ledger: { spent_atomic: '0' }, receipts: [] }, []), true);
 });
 
+/** A NEAR RPC that answers view calls by method name (an Error: the RPC's error), recording each request body. */
+const viewRpc = (answers: Record<string, unknown>, bodies: any[] = []) => (async (_url: string, init: RequestInit) => {
+  const body = JSON.parse(String(init.body));
+  bodies.push(body);
+  const a = answers[body.params.method_name];
+  if (a instanceof Error) return new Response(JSON.stringify({ error: { cause: { name: a.message } } }));
+  return new Response(JSON.stringify({ result: { result: [...new TextEncoder().encode(JSON.stringify(a))], logs: [] } }));
+}) as unknown as typeof fetch;
+
 test("reads the wallet's USDC balance and registration from NEAR before the wallet opens", async () => {
   const bodies: any[] = [];
-  const rpc = (answers: Record<string, unknown>) => (async (_url: string, init: RequestInit) => {
-    const body = JSON.parse(String(init.body));
-    bodies.push(body);
-    const a = answers[body.params.method_name];
-    if (a instanceof Error) return new Response(JSON.stringify({ error: { cause: { name: a.message } } }));
-    return new Response(JSON.stringify({ result: { result: [...new TextEncoder().encode(JSON.stringify(a))], logs: [] } }));
-  }) as unknown as typeof fetch;
+  const rpc = (answers: Record<string, unknown>) => viewRpc(answers, bodies);
 
   const held = await readUsdcBalance('http://rpc', F.usdc, 'alice.near', rpc({ ft_balance_of: '2130000', storage_balance_of: { total: '1250000000000000000000', available: '0' } }));
   assert.deepEqual(held, { balance: 2_130_000n, registered: true });
@@ -290,6 +293,17 @@ test("reads the wallet's USDC balance and registration from NEAR before the wall
   assert.equal(balanceProblem(held, '2130000', 'alice.near'), null);
   assert.equal(balanceProblem({ balance: 5_000n, registered: true }, '2999000', 'alice.near'), 'Your wallet holds 0.005 USDC; this plan needs 2.999 USDC. Add USDC or draft it again with a smaller budget.');
   assert.match(balanceProblem({ balance: 0n, registered: false }, '3000000', 'new.near') ?? '', /^Your account new\.near isn't registered with the USDC contract on NEAR, so it holds no USDC\./);
+});
+
+test("a contract task Rook can't see after its tries is looked up in the wallet's own view: gone, or only late", async () => {
+  const bodies: any[] = [];
+  assert.equal(await contractHasTask('http://rpc', 'rook.near', '1a', viewRpc({ get_task: null }, bodies)), false); // refunded and deleted
+  assert.deepEqual(bodies[0].params, {
+    request_type: 'call_function', finality: 'optimistic', account_id: 'rook.near', method_name: 'get_task', args_base64: btoa('{"task_id":"1a"}'),
+  });
+  assert.equal(await contractHasTask('http://rpc', 'rook.near', '1a', viewRpc({ get_task: { funder: 'ops.near', budget: '3000000', status: 'Open' } })), true);
+  // Can't read it: the caller says nothing is gone.
+  await assert.rejects(contractHasTask('http://rpc', 'rook.near', '1a', viewRpc({ get_task: new Error('UNKNOWN_ACCOUNT') })), /UNKNOWN_ACCOUNT/);
 });
 
 test('the raw texts a failed transfer or refund carries read in plain words', () => {

@@ -262,6 +262,14 @@ export async function readUsdcBalance(rpc: string, token: string, account: strin
   return { balance: BigInt(balance), registered: storage !== null };
 }
 
+/**
+ * Whether the Rook contract holds contract task `task_id` (get_task) in the wallet's own view of NEAR, which is ahead of
+ * Rook's (final). Throws when it can't read.
+ */
+export async function contractHasTask(rpc: string, contract: string, task_id: string, fetchImpl: typeof fetch = fetch): Promise<boolean> {
+  return (await viewFunction(rpc, contract, 'get_task', { task_id }, fetchImpl)) !== null;
+}
+
 /** Why the wallet can't send `amount_atomic`, said before it opens (the transfer would only fail), or null if it can. */
 export function balanceProblem(b: UsdcBalance, amount_atomic: string, account: string): string | null {
   const need = BigInt(amount_atomic);
