@@ -32,6 +32,16 @@ export function typedUsdc(s: string): string {
   return m ? usdc(BigInt(m[1]) * 1_000_000n + BigInt((m[2] ?? '').padEnd(6, '0'))) : s.trim();
 }
 
+/**
+ * Why the funding instructions didn't load, as a sentence. The orchestrator reads its contract's settings from NEAR
+ * for them, so a chain-gateway or RPC failure says that in plain words; Rook's own sentences (services down, signed
+ * out) stay as they are.
+ */
+export function fundingLoadReason(message: string): string {
+  if (/fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|-> \d{3}$|NEAR RPC|chain-gateway/i.test(message)) return "It couldn't read the Rook contract's settings from NEAR just now.";
+  return message.replace(/\.?$/, '.');
+}
+
 /** The account whose wallet must send the funding, or null if any account may. */
 export const fundingFrom = (f: Funding) => f.funder ?? f.owner ?? null;
 

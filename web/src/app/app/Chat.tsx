@@ -7,11 +7,11 @@ import { Mark } from '@/components/Navbar';
 import { useSmoothScroll } from '@/components/SmoothScroll';
 import { AiStatus } from '@/components/ui/ai-status';
 import { WebSearch, type WebSource } from '@/components/ui/web-search';
-import { approve, cancel, confirmFunding, draftTask, forgetTransfer, fundingRefunded, rememberTransfer, stop } from './actions';
+import { approve, cancel, confirmFunding, draftTask, forgetTransfer, fundingRefunded, rememberTransfer, stop, type ActResult } from './actions';
 import { go } from './AppShell';
 import { Composer, type ComposerErrors } from './Composer';
 import {
-  closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
+  closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingLoadReason, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
   readCloseOutcome, readFundingOutcome, termsOf, txHashOf, typedUsdc, usdc, whoseTransfer, type CloseResult, type Funding, type FundingResult, type Terms,
 } from './funding';
 import { explorerTx, NETWORK, rpcFor, type Network } from './network';
@@ -345,8 +345,11 @@ function TxLink({ network, tx }: { network: Network; tx: string | null }) {
  * contract's task_created event names the contract task, and Rook checks it against the plan before running. The
  * transfer's hash is remembered by this web server the moment the wallet returns it, so no reload offers a second one.
  */
-function FundingStep({ id, plan, budget, funding, sent, contractId, onConfirmed, onStop, stopping, autoStart, onBusy, onChanged }: {
-  id: string; plan: PlanView; budget: string; funding: Funding | null; sent: TaskSnapshot['funding_sent'];
+function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contractId, onConfirmed, onStop, stopping, autoStart, onBusy, onChanged }: {
+  id: string; plan: PlanView; budget: string; funding: Funding | null;
+  /** Why the funding instructions didn't load (a sentence), and how to ask for them again. */
+  trouble: string | null; onRetry: () => void;
+  sent: TaskSnapshot['funding_sent'];
   /** The contract to read and refund from when Rook couldn't repeat the funding instructions. */
   contractId: string | null;
   onConfirmed: () => void; onStop: () => void; stopping: boolean;
@@ -573,7 +576,18 @@ function FundingStep({ id, plan, budget, funding, sent, contractId, onConfirmed,
       </div>
     );
   }
-  if (!funding) return <Working label="Getting the funding transfer ready" />;
+  // The instructions are loading, or didn't come: either way the plan can still be cancelled.
+  if (!funding) {
+    return (
+      <div className="rounded-2xl border border-ink/15 p-4">
+        {trouble ? <p role="alert">Rook couldn&apos;t get the funding transfer ready. {trouble}</p> : <Working label="Getting the funding transfer ready" />}
+        <div className="mt-4 flex flex-wrap gap-3">
+          {trouble && <ActionButton primary onClick={onRetry} disabled={stopping}>Try again</ActionButton>}
+          <ActionButton onClick={onStop} busy={stopping}>{stopping ? 'Cancelling…' : 'Cancel'}</ActionButton>
+        </div>
+      </div>
+    );
+  }
 
   const from = fundingFrom(funding);
   const terms = fundingTerms(funding);
@@ -959,11 +973,20 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   // again would count its own contract task against the funder's open-task limit, and fail at that limit.
   const sentLive = !!snap?.funding_sent && !snap.funding_sent.refunded;
   const fundingAsked = useRef(false);
+  // Why the funding instructions didn't come: the funding step says so, with Try again (which clears it) and Cancel.
+  const [fundingTrouble, setFundingTrouble] = useState<string | null>(null);
   useEffect(() => {
-    if (!awaitingFunding || sentLive || funding || fundingConfirmed || fundingAsked.current) return;
+    if (!awaitingFunding || sentLive || funding || fundingConfirmed || fundingTrouble !== null || fundingAsked.current) return;
     fundingAsked.current = true; // approve again: the orchestrator repeats the funding instructions for an approved task
-    void approve(id).then((out) => (out.ok ? out.funding && setFunding(out.funding) : setActError(out.message)));
-  }, [awaitingFunding, sentLive, funding, fundingConfirmed, id]);
+    void approve(id)
+      .catch((): ActResult => ({ ok: false, message: "This page couldn't reach Rook's web server" }))
+      .then((out) => {
+        fundingAsked.current = false;
+        if (out.ok && out.funding) return setFunding(out.funding);
+        setFundingTrouble(fundingLoadReason(out.ok ? "Rook's answer didn't include it" : out.message));
+        refetch(); // the task may have moved on meanwhile (stopped, or funded from another page)
+      });
+  }, [awaitingFunding, sentLive, funding, fundingConfirmed, fundingTrouble, id, refetch]);
   const known = tasks?.find((t) => t.id === id)?.status;
   const [revealing, setRevealing] = useState(fresh); // a plan just drafted here: agents land first, then the plan
   const onAgentsDone = useCallback(() => { setRevealing(false); onRevealed(id); }, [id, onRevealed]);
@@ -1084,7 +1107,8 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
         <RookMessage>
           {fundingConfirmed
             ? <Working label="Funding confirmed. Starting the run" />
-            : <FundingStep id={id} plan={plan} budget={task.budget_atomic} funding={funding} sent={snap.funding_sent ?? null} contractId={contractId}
+            : <FundingStep id={id} plan={plan} budget={task.budget_atomic} funding={funding} trouble={fundingTrouble} onRetry={() => setFundingTrouble(null)}
+                sent={snap.funding_sent ?? null} contractId={contractId}
                 stopping={busy === 'stop'} onStop={() => act('stop')} autoStart={autoFund} onBusy={setFundingBusy} onChanged={refetch}
                 onConfirmed={() => { setFundingConfirmed(true); refetch(); router.refresh(); }} />}
         </RookMessage>

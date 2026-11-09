@@ -4,7 +4,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
+  closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingLoadReason, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
   readCloseOutcome, readFundingOutcome, termsOf, txHashOf, typedUsdc, usdc, whoseTransfer, untilFinal, type Funding,
 } from './funding';
 
@@ -239,6 +239,16 @@ test('a task stopped before its funding was bound never ran, though the kill add
   assert.equal(moneyMoved(none, [{ type: 'hire_sent' }]), true);
   assert.equal(moneyMoved({ ledger: null, receipts: [{}] }, []), true);
   assert.equal(moneyMoved({ ledger: { spent_atomic: '0' }, receipts: [] }, []), true);
+});
+
+test('funding instructions that did not load say why in a sentence', () => {
+  // The orchestrator couldn't read the contract's settings (chain-gateway down, or NEAR RPC failing).
+  for (const m of ['fetch failed', 'GET http://127.0.0.1:7104/config -> 502', 'NEAR RPC query failed: TIMEOUT_ERROR']) {
+    assert.equal(fundingLoadReason(m), "It couldn't read the Rook contract's settings from NEAR just now.", m);
+  }
+  // Rook's own sentences stay, ending in a full stop.
+  assert.equal(fundingLoadReason("Rook's services aren't running. Start them with pnpm dev, then try again."), "Rook's services aren't running. Start them with pnpm dev, then try again.");
+  assert.equal(fundingLoadReason("This page couldn't reach Rook's web server"), "This page couldn't reach Rook's web server.");
 });
 
 test('wallet cancellations read as a choice', () => {
