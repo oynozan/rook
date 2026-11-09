@@ -19,7 +19,7 @@ first.exec(`CREATE TABLE funding_sent (task_id TEXT PRIMARY KEY, account TEXT NO
   INSERT INTO funding_sent VALUES ('t0', 'ops.near', '9', 'H0', 1);`);
 first.close();
 after(() => {
-  (globalThis as { __rookWebDb?: { close(): void } }).__rookWebDb?.close();
+  (globalThis as { __rookWebDbV2?: { close(): void } }).__rookWebDbV2?.close(); // the key db.ts names
   rmSync(dir, { recursive: true, force: true });
 });
 
