@@ -769,8 +769,13 @@ function AgentSearch({ plan, planning, animate, onGrow, onDone }: { plan: PlanVi
   const { live } = useMode();
   // Live agents have real names; the simulator's names are just their handles, so the subtask reads better there.
   const name = (n: string, handle: string, fallback: string) => (n && n !== handle ? n : fallback);
+  // One card per agent, as the search counts them: an agent picked for several subtasks shows once, for its first.
+  const picked = new Map<string, WebSource>();
+  for (const s of plan?.subtasks ?? []) {
+    for (const c of s.candidates) if (!picked.has(c.handle)) picked.set(c.handle, { id: c.handle, title: name(c.name, c.handle, s.title), url: c.handle });
+  }
   const sources: WebSource[] = plan
-    ? plan.subtasks.flatMap((s) => s.candidates.map((c) => ({ id: `${s.id}/${c.handle}`, title: name(c.name, c.handle, s.title), url: c.handle })))
+    ? [...picked.values()]
     : (planning?.found ?? []).map((a) => ({ id: a.handle, title: name(a.name, a.handle, a.title), url: a.handle }));
   const foundCount = planning?.found.length ?? 0;
   const total = sources.length;
