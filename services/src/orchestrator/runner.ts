@@ -2,6 +2,9 @@
 // Agent messages and artifacts are data: they only go to the evaluator and the aggregator, never steer this loop.
 // In chain mode a run survives a restart: restoreTask() rebuilds the books from the contract and runTask() resumes,
 // skipping what is done and polling hires whose payment header was out; unwind() returns what a stopped task holds.
+// Error events carry `message` (for logs and the CLI) and `kind`, which a client words for people: eval_retry,
+// close_retry (retried); payment_lookup, receipt, paid_anyway, unpaid, aggregate, restore_note (notes); abandoned,
+// unchecked, return, close, unwind, run, restore (problems). Agent-related ones name `agent_handle`.
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { cannedAggregate, agentOf, isMerged } from '../planner/canned.ts';
@@ -200,7 +203,7 @@ export async function unwind(ledger: Ledger, t: Task, why: string, afterRun = fa
     t.salvaging = true;
     const step = async (op: string, s: Sub | null, fn: () => bigint | object | Promise<bigint | object>) => {
       try { return await ledgerOp(t, op, s, fn); } catch (e) { // a sim ledger refuses synchronously, so not .catch
-        emit(t, 'error', { message: `${why}, ${op}${s ? ` ${s.id}` : ''}: ${msg(e)}` }, s?.id);
+        emit(t, 'error', { kind: 'unwind', op, message: `${why}, ${op}${s ? ` ${s.id}` : ''}: ${msg(e)}` }, s?.id);
         return null;
       }
     };
@@ -272,10 +275,10 @@ export async function restoreTask(ledger: ChainLedger, t: Task): Promise<(() => 
     const next = e instanceof OtherContract
       ? 'It is left as it is, for a Rook that runs that contract.'
       : 'Nothing was changed; start the services again once the chain gateway answers.';
-    emit(t, 'error', { message: `after a restart Rook could not rebuild contract task ${cid}: ${msg(e)}. ${next}` }, undefined, true);
+    emit(t, 'error', { kind: 'restore', message: `after a restart Rook could not rebuild contract task ${cid}: ${msg(e)}. ${next}` }, undefined, true);
     return null;
   }
-  for (const note of r.notes) emit(t, 'error', { message: `restore: ${note}` }, undefined, true);
+  for (const note of r.notes) emit(t, 'error', { kind: 'restore_note', message: `restore: ${note}` }, undefined, true);
   // Closed on chain with Rook's books still open: the funder or the owner closed a killed task while sub-accounts
   // were still Funded. Returns still reach a Closed task and Rook's close_task refunds them, so it is unwound like any other.
   if (isTerminal(t.status)) return r.status === 'Closed' && ledger.view(t.id)?.closed ? null : () => unwind(ledger, t, 'after restart');
@@ -325,7 +328,7 @@ async function writeReceipt(ledger: Ledger, t: Task, s: Sub, hire: Hire, ev: Eva
   };
   t.receipts.push(receipt);
   if (onChain(ledger)) { // record_receipt on the contract fills receipt_tx; the payment's tx comes from the indexer later
-    try { Object.assign(receipt, await ledger.recordReceipt(t.id, s.n, receipt)); } catch (e) { emit(t, 'error', { message: `receipt on chain: ${msg(e)}` }, s.id); }
+    try { Object.assign(receipt, await ledger.recordReceipt(t.id, s.n, receipt)); } catch (e) { emit(t, 'error', { kind: 'receipt', agent_handle: hire.agent_handle, message: `receipt on chain: ${msg(e)}` }, s.id); }
     if (hire.paid && hire.pay_to) void findPayment(ledger, t, s, hire, receipt);
   }
   emit(t, 'receipt', receipt, s.id);
@@ -342,9 +345,9 @@ async function findPayment(ledger: ChainLedger, t: Task, s: Sub, hire: Hire, rec
       Object.assign(receipt, found);
       emit(t, 'ledger', { op: 'payment_found', receipt_id: receipt.id, agent_handle: hire.agent_handle, ...found }, s.id, true);
     } else {
-      emit(t, 'error', { message: `${hire.agent_handle}: the indexer does not show the payment transaction yet; the balance already showed the payment, so the receipt stands without payment_tx` }, s.id, true);
+      emit(t, 'error', { kind: 'payment_lookup', agent_handle: hire.agent_handle, message: `${hire.agent_handle}: the indexer does not show the payment transaction yet; the balance already showed the payment, so the receipt stands without payment_tx` }, s.id, true);
     }
-  } catch (e) { emit(t, 'error', { message: `payment lookup for ${hire.agent_handle}: ${msg(e)}` }, s.id, true); }
+  } catch (e) { emit(t, 'error', { kind: 'payment_lookup', agent_handle: hire.agent_handle, message: `payment lookup for ${hire.agent_handle}: ${msg(e)}` }, s.id, true); }
 }
 
 /**
@@ -369,7 +372,7 @@ async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Defer
     // An authorization with no saved hire (stored before hires were saved ahead of /send): nothing else is signed for
     // this subtask until it lands or expires. Its agent and deliverable are unknown, so a landed payment only counts as spent.
     const r = await ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n, 'wait', signal));
-    if (typeof r === 'object' && r.settled) emit(t, 'error', { message: 'a payment authorized before the restart, for a hire Rook has no record of, landed on chain; counted as spent' }, s.id);
+    if (typeof r === 'object' && r.settled) emit(t, 'error', { kind: 'paid_anyway', message: 'a payment authorized before the restart, for a hire Rook has no record of, landed on chain; counted as spent' }, s.id);
   }
   for (;;) {
     signal.throwIfAborted();
@@ -402,7 +405,7 @@ async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Defer
       await writeReceipt(ledger, t, s, hire, null); // paid even though the evaluation never finished (kill, evaluator outage)
       if (signal.aborted) throw e;
       // Rook's own outage is not the agent's failure: no verdict, no re-hire spend against a broken evaluator.
-      emit(t, 'error', { message: `evaluation of ${hire.agent_handle} failed, subtask abandoned unjudged: ${msg(e)}` }, s.id);
+      emit(t, 'error', { kind: 'unchecked', agent_handle: hire.agent_handle, message: `evaluation of ${hire.agent_handle} failed, subtask abandoned unjudged: ${msg(e)}` }, s.id);
       return finish(t, s, 'abandoned', done);
     }
     await writeReceipt(ledger, t, s, hire, ev);
@@ -490,7 +493,7 @@ async function endUnpaid(ledger: Ledger, t: Task, s: Sub, hire: Hire, how: 'term
     return out;
   }, { agent_handle: hire.agent_handle });
   if (typeof r !== 'object' || !r.settled) return false;
-  emit(t, 'error', { message: `${hire.agent_handle}: the payment landed on chain although the hire ended unpaid; counted as spent` }, s.id);
+  emit(t, 'error', { kind: 'paid_anyway', agent_handle: hire.agent_handle, message: `${hire.agent_handle}: the payment landed on chain although the hire ended unpaid; counted as spent` }, s.id);
   return true;
 }
 
@@ -553,7 +556,7 @@ async function hire1(ledger: Ledger, t: Task, s: Sub, c: Candidate, row: Accepts
         return a;
       }, { agent_handle: c.handle, payment_hash: hire.payment_hash, outcome: 'unknown' });
       if (paid === 0n) { rejectQuote(t, s, c.handle, `send failed after a 502 and no payment showed on chain: ${sent.error.message}`); return null; }
-      emit(t, 'error', { message: `send to ${c.handle}: ${sent.error.message}; counted as spent` }, s.id);
+      emit(t, 'error', { kind: 'paid_anyway', agent_handle: c.handle, message: `send to ${c.handle}: ${sent.error.message}; counted as spent` }, s.id);
       return hire;
     }
     if (!sent.ok) {
@@ -631,7 +634,7 @@ async function follow(ledger: Ledger, t: Task, s: Sub, c: Candidate, hire: Hire,
     hire.paid = a > 0n;
     return a;
   }, { agent_handle: c.handle, payment_hash: hire.payment_hash });
-  if (paid === 0n) emit(t, 'error', { message: `${c.handle} delivered, but its payment never showed on chain before the authorization expired; booked unpaid` }, s.id);
+  if (paid === 0n) emit(t, 'error', { kind: 'unpaid', agent_handle: c.handle, message: `${c.handle} delivered, but its payment never showed on chain before the authorization expired; booked unpaid` }, s.id);
   return hire;
 }
 
@@ -691,7 +694,7 @@ async function evaluate(t: Task, s: Sub, text: string, parts: Part[], hire_id: s
       signal.throwIfAborted();
       t.llm_calls.push(...paidCalls(e));
       if (attempt >= 3) throw e;
-      emit(t, 'error', { message: `evaluator attempt ${attempt} failed, retrying: ${msg(e)}` }, s.id);
+      emit(t, 'error', { kind: 'eval_retry', message: `evaluator attempt ${attempt} failed, retrying: ${msg(e)}` }, s.id);
       await sleep(Math.min(config.pollMs, 2000) * attempt, undefined, { signal });
     }
   }
@@ -706,6 +709,7 @@ async function evaluate(t: Task, s: Sub, text: string, parts: Part[], hire_id: s
 async function selfDo(t: Task, s: Sub, done: Map<string, Deferred>) {
   const signal = t.abort.signal;
   for (;;) {
+    setSub(t, s, 'working'); // Rook writes it now, as a hired agent works on its part
     const r = await call<{ text: string; llm_calls: LlmCall[] }>(config.urls.planner + '/self-do', {
       task_id: t.id, subtask_id: s.id, brief: s.brief, criteria: s.criteria,
     }, { signal });

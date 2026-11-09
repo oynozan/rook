@@ -46,6 +46,7 @@ let orch: Running;
 before(async () => {
   const planner = await serve('fake-planner', {
     'POST /plan': async ({ body }) => { planRequests.push(body); await planGate; return plan; },
+    'POST /self-do': () => ({ text: 'Rook wrote this part.', llm_calls: [] }),
     'POST /aggregate': ({ body }) => {
       if (body.prompt.includes('AGG-DOWN')) throw new HttpError(502, 'planner LLM failed: cost guard', { llm_calls: [{ cost_usd: 0.01, signature_verified: true }] });
       return {
@@ -340,4 +341,13 @@ test('a plan with every part dropped ends the task as failed, with the reason in
     assert.deepEqual(created.plan.dropped.map((d: any) => d.reason), reasons);
     await assert.rejects(call(`${orch.url}/tasks/${created.id}/approve`, {}), /approve needs planned/);
   }
+});
+
+test("a self_do subtask is 'working' while Rook writes it, and its text is in the snapshot (it has no hire)", async () => {
+  const s = await runToEnd({ subtasks: [{ ...sub('s1', 'Summary', '0', []), self_do: true }], dropped: [], budget: budget('0'), notes: [], llm_calls: [] });
+  assert.equal(s.task.status, 'closed', s.task.error);
+  assert.deepEqual(s.subtasks[0].accepted, { hire_id: null, agent_handle: 'rook:self-do', text: 'Rook wrote this part.' });
+  const evs = (await fetch(`${orch.url}/tasks/${s.task.id}/events`).then((r) => r.text())).split('\n').filter((l) => l.startsWith('data: ')).map((l) => JSON.parse(l.slice(6)));
+  assert.deepEqual(evs.filter((e) => e.type === 'subtask_status').map((e) => e.data.to), ['working', 'evaluating', 'passed', 'returned']);
+  assert.deepEqual([s.ledger.budget_atomic, s.ledger.closed], ['0', true]); // a plan that hires no agent holds nothing
 });

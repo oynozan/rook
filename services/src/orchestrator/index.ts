@@ -116,7 +116,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         : chain
         ? 'It has no contract task on record, so nothing of it is on chain to resume.'
         : 'Its simulated ledger lived in memory only, so the run cannot resume; no real money was involved.'}`;
-      emit(t, 'error', { message: t.error });
+      emit(t, 'error', { kind: 'restart', message: t.error });
       setStatus(t, 'failed');
     }
     for (const go of resume) void go().catch((e) => console.error('[orchestrator] resume after restart', e));
@@ -171,7 +171,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         } catch (e: any) {
           if (isTerminal(t.status)) return; // killed while planning: stays killed
           t.error = `planner: ${e?.message ?? e}`;
-          emit(t, 'error', { message: t.error });
+          emit(t, 'error', { kind: 'planner', message: t.error });
           setStatus(t, 'failed');
         }
       })();
