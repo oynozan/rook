@@ -30,6 +30,9 @@ export type Sub = PlanSubtask & {
 export type Task = {
   id: string; prompt: string; budget_atomic: string; reserve_share: number; funder: string | null;
   owner: string | null; // the NEAR account that drafted it, verified by the web app; null for tasks from the CLI
+  // Conversations: the task this message followed (same owner), and the earlier messages it was planned with, oldest
+  // first (the aggregator reads the task with them). A plan replaced by a revision names the revision.
+  parent_id: string | null; earlier_prompts?: string[]; replaced_by?: string | null;
   status: TaskStatus; error: string | null; created_at: string; updated_at: string;
   plan: Plan | null; subtasks: Sub[]; receipts: ReceiptView[]; events: RookEvent[];
   final_result: { final_markdown: string; attribution: { subtask_id: string; agent_handle: string }[]; abandoned: string[] } | null;
@@ -46,8 +49,8 @@ export type Task = {
   shutdown: AbortController; // aborted when the orchestrator stops: the unwind stops retrying, and the next start resumes it
 };
 type Runtime = 'listeners' | 'abort' | 'inflight' | 'allow' | 'running' | 'unwinding' | 'salvaging' | 'shutdown';
-/** A task without its runtime parts: what SQLite stores. */
-export type TaskDoc = Omit<Task, Runtime>;
+/** A task without its runtime parts: what SQLite stores. Tasks stored before conversations have no parent_id. */
+export type TaskDoc = Omit<Task, Runtime | 'parent_id'> & { parent_id?: string | null };
 
 export const TERMINAL_TASK: TaskStatus[] = ['closed', 'cancelled', 'killed', 'failed'];
 export const isTerminal = (s: TaskStatus) => TERMINAL_TASK.includes(s);
@@ -68,14 +71,15 @@ export function toDoc(t: Task): TaskDoc {
 
 /** A stored task with fresh runtime parts. */
 export function fromDoc(doc: TaskDoc): Task {
-  // Tasks saved before owners existed have none; they stay out of every account's list.
-  return { ...doc, owner: doc.owner ?? null, listeners: new Set(), abort: new AbortController(), inflight: new Map(), allow: [], shutdown: new AbortController() };
+  // Tasks saved before owners existed have none; they stay out of every account's list. Tasks saved before
+  // conversations each start their own.
+  return { ...doc, owner: doc.owner ?? null, parent_id: doc.parent_id ?? null, listeners: new Set(), abort: new AbortController(), inflight: new Map(), allow: [], shutdown: new AbortController() };
 }
 
-export function newTask(prompt: string, budget_atomic: bigint, reserve_share: number, owner: string | null = null): Task {
+export function newTask(prompt: string, budget_atomic: bigint, reserve_share: number, owner: string | null = null, parent_id: string | null = null): Task {
   const ts = now();
   const t: Task = {
-    id: `t_${randomUUID().slice(0, 8)}`, prompt, budget_atomic: budget_atomic.toString(), reserve_share, funder: null, owner,
+    id: `t_${randomUUID().slice(0, 8)}`, prompt, budget_atomic: budget_atomic.toString(), reserve_share, funder: null, owner, parent_id,
     status: 'draft', error: null, created_at: ts, updated_at: ts,
     plan: null, subtasks: [], receipts: [], events: [], final_result: null, llm_calls: [],
     listeners: new Set(), abort: new AbortController(), inflight: new Map(), allow: [], shutdown: new AbortController(),
@@ -144,8 +148,28 @@ export function verdictHistory(tasks: Iterable<Task>): Record<string, AgentHisto
 }
 
 export function taskView(t: Task) {
-  const { id, status, prompt, budget_atomic, reserve_share, funder, owner, error, created_at, updated_at, plan } = t;
-  return { id, status, prompt, budget_atomic, reserve_share, funder, owner, error, created_at, updated_at, plan };
+  const { id, status, prompt, budget_atomic, reserve_share, funder, owner, parent_id, error, created_at, updated_at, plan } = t;
+  return { id, status, prompt, budget_atomic, reserve_share, funder, owner, parent_id, replaced_by: t.replaced_by ?? null, error, created_at, updated_at, plan };
+}
+
+/** The task and the tasks above it in its conversation, nearest first. */
+export function ancestors(t: Task, byId: Map<string, Task>): Task[] {
+  const out: Task[] = [];
+  for (let x: Task | undefined = t; x && !out.includes(x); x = x.parent_id ? byId.get(x.parent_id) : undefined) out.push(x);
+  return out;
+}
+
+/**
+ * The plan a new message after `chain[0]` changes: the nearest planned task, reached only through messages that never
+ * got a plan to run (a reply that is not a task, a planner failure, a draft stopped while planning). Null: the new
+ * message follows up on work that ended.
+ */
+export function openPlan(chain: Task[]): Task | null {
+  for (const x of chain) {
+    if (x.status === 'planned') return x;
+    if (!isTerminal(x.status) || x.subtasks.length) return null;
+  }
+  return null;
 }
 
 export function snapshot(t: Task, ledger: Ledger) {

@@ -89,7 +89,8 @@ const SELF_DO_SOURCE = 'Rook (its own model)';
 export const sourceOf = (s: AggIn['subtasks'][number]) => (!s.agent_handle || s.agent_handle === 'rook:self-do' ? SELF_DO_SOURCE : s.agent_handle);
 
 export function cannedAggregate(req: AggIn): string {
-  const out = [`# ${req.prompt.split('\n')[0].trim()}`, ''];
+  // In a conversation the latest message can be just a change ("make it shorter"): the first message names the task.
+  const out = [`# ${(req.earlier?.[0] ?? req.prompt).split('\n')[0].trim()}`, ''];
   for (const s of req.subtasks.filter(isMerged)) {
     const source = sourceOf(s);
     out.push(`## ${s.title}`, '', `_Source: ${source === SELF_DO_SOURCE ? source : `\`${source}\``}._`, '', s.deliverable_text!.trim(), '');

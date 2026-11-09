@@ -125,6 +125,33 @@ test('a finished task keeps what it spent and refunded, though the in-memory led
   await orch.close();
 });
 
+test("a conversation survives a restart: each task's parent and a replaced plan's revision; older tasks start their own", async () => {
+  const path = freshDb();
+  const ts = new Date().toISOString();
+  const store = openStore(path);
+  store.save({ // stored before conversations: no parent_id
+    id: 't_older', prompt: 'p', budget_atomic: '1000000', reserve_share: 0.2, funder: null, owner: 'alice.near', status: 'cancelled', error: null,
+    created_at: ts, updated_at: ts, plan: null, subtasks: [], receipts: [], events: [], final_result: null, llm_calls: [],
+  });
+  store.close();
+
+  let orch = await start(0);
+  const first = await call(`${orch.url}/tasks`, { prompt: 'Check NEAR holders', budget_usdc: '1', owner: 'alice.near' });
+  const revised = await call(`${orch.url}/tasks`, { prompt: 'Only the top 10', budget_usdc: '1', owner: 'alice.near', parent_id: first.id });
+  await orch.close();
+
+  orch = await start(0);
+  const rows = (await call(`${orch.url}/tasks?owner=alice.near`)).tasks;
+  assert.deepEqual(rows.map((t: any) => [t.id, t.status, t.parent_id]),
+    [['t_older', 'cancelled', null], [first.id, 'cancelled', null], [revised.id, 'planned', first.id]]);
+  assert.equal((await call(`${orch.url}/tasks/${first.id}`)).task.replaced_by, revised.id);
+  // The restored chain still works: the revision takes the next message, as a revision of its plan.
+  const next = await call(`${orch.url}/tasks`, { prompt: 'And the top 100', budget_usdc: '1', owner: 'alice.near', parent_id: revised.id });
+  assert.equal(next.status, 'planned');
+  assert.equal((await call(`${orch.url}/tasks/${revised.id}`)).task.replaced_by, next.id);
+  await orch.close();
+});
+
 test('without ROOK_DB nothing is stored', async () => {
   delete process.env.ROOK_DB;
   let orch = await start(0);

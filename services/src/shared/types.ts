@@ -84,17 +84,30 @@ export type Plan = {
 export const AgentHistory = z.object({ pass: z.number().int().min(0), fail: z.number().int().min(0) });
 export type AgentHistory = z.infer<typeof AgentHistory>;
 export const MAX_HISTORY_HANDLES = 500;
+/** A follow-up's context: at most this many earlier messages (the first one and the latest), and this much of a report. */
+export const CONVERSATION_MESSAGES = 12;
+export const CONVERSATION_REPORT_CHARS = 12_000;
+const Earlier = z.array(z.string().min(1)).min(1).max(CONVERSATION_MESSAGES); // each at most MAX_PROMPT_CHARS (the planner checks)
+/**
+ * The conversation a task's prompt continues (docs/agentic-system.md 5.1). `earlier`: the user's earlier messages, oldest
+ * first. `revising`: the prompt changes a plan that has not run, so the whole revised task is planned. `report`: the
+ * newest report in the conversation, cut to CONVERSATION_REPORT_CHARS.
+ */
+export const Conversation = z.object({ earlier: Earlier, revising: z.boolean(), report: z.string().min(1).max(CONVERSATION_REPORT_CHARS).optional() });
+export type Conversation = z.infer<typeof Conversation>;
 export const PlanRequest = z.object({
   task_id: z.string(), prompt: z.string().min(1), budget_atomic: atomic, reserve_share: z.number().min(0).max(0.9),
   // By agent handle; optional, so the planner also ranks without it (market record only).
   history: z.record(z.string().min(1), AgentHistory)
     .refine((h) => Object.keys(h).length <= MAX_HISTORY_HANDLES, `history lists more than ${MAX_HISTORY_HANDLES} handles`).optional(),
+  conversation: Conversation.optional(),
 });
 export const SelfDoRequest = z.object({
   task_id: z.string(), subtask_id: z.string(), brief: z.string(), criteria: z.array(Criterion),
 });
 export const AggregateRequest = z.object({
   task_id: z.string(), prompt: z.string(),
+  earlier: Earlier.optional(), // the conversation's earlier messages, oldest first: what the prompt changes or builds on
   subtasks: z.array(z.object({
     id: z.string(), title: z.string(), status: z.string(),
     agent_handle: z.string().optional(), deliverable_text: z.string().optional(),

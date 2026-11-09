@@ -40,14 +40,21 @@ const cancelled: string[] = [];
 const a2a = new Map<string, { handle: string; polls: number }>();
 const evalRequests: any[] = [];
 const planRequests: any[] = [];
+const aggRequests: any[] = [];
 const servers: Running[] = [];
 let orch: Running;
 
 before(async () => {
   const planner = await serve('fake-planner', {
-    'POST /plan': async ({ body }) => { planRequests.push(body); await planGate; return plan; },
+    'POST /plan': async ({ body }) => {
+      planRequests.push(body);
+      await planGate;
+      if (body.prompt === 'go ahead') throw new HttpError(422, 'That reads like a go-ahead.');
+      return plan;
+    },
     'POST /self-do': () => ({ text: 'Rook wrote this part.', llm_calls: [] }),
     'POST /aggregate': ({ body }) => {
+      aggRequests.push(body);
       if (body.prompt.includes('AGG-DOWN')) throw new HttpError(502, 'planner LLM failed: cost guard', { llm_calls: [{ cost_usd: 0.01, signature_verified: true }] });
       return {
       final_markdown: body.subtasks.map((s: any) => `## ${s.title} (${s.agent_handle})\n${s.deliverable_text}`).join('\n'),
@@ -354,4 +361,134 @@ test("a self_do subtask is 'working' while Rook writes it, and its text is in th
   const evs = (await fetch(`${orch.url}/tasks/${s.task.id}/events`).then((r) => r.text())).split('\n').filter((l) => l.startsWith('data: ')).map((l) => JSON.parse(l.slice(6)));
   assert.deepEqual(evs.filter((e) => e.type === 'subtask_status').map((e) => e.data.to), ['working', 'evaluating', 'passed', 'returned']);
   assert.deepEqual([s.ledger.budget_atomic, s.ledger.closed], ['0', true]); // a plan that hires no agent holds nothing
+});
+
+// ---- conversations ----
+
+const holdersPlan = () => ({ subtasks: [sub('s1', 'Holders', '300000', [cand('holders-good', '300000')])], dropped: [], budget: budget('300000'), notes: [], llm_calls: [] });
+const ended = (id: string) => until(async () => { const x = await snap(id); return ['closed', 'failed', 'killed'].includes(x.task.status) ? x : false; });
+
+test('a follow-up on a finished task gives the planner the earlier messages and the newest report, and the aggregator the earlier messages', async () => {
+  const first = await runToEnd(holdersPlan(), 'Due diligence on the NEAR token');
+  assert.equal(first.task.status, 'closed', first.task.error);
+  assert.equal(first.task.parent_id, null);
+
+  plan = { subtasks: [sub('s1', 'Contract', '200000', [cand('check-good', '200000')])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] };
+  const follow = await call(`${orch.url}/tasks`, { prompt: 'Now translate it to Turkish', budget_usdc: '2', parent_id: first.task.id });
+  assert.deepEqual([follow.status, follow.parent_id, follow.replaced_by], ['planned', first.task.id, null]);
+  assert.equal(planRequests.at(-1).prompt, 'Now translate it to Turkish');
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Due diligence on the NEAR token'], revising: false, report: first.final_result.final_markdown.trim() });
+  assert.equal((await snap(first.task.id)).task.status, 'closed'); // a finished task stays as it was
+  const rows = (await call(`${orch.url}/tasks`)).tasks;
+  assert.deepEqual(rows.find((x: any) => x.id === follow.id),
+    { id: follow.id, status: 'planned', prompt: 'Now translate it to Turkish', budget_atomic: '2000000', created_at: follow.created_at, parent_id: first.task.id });
+  assert.equal(rows.find((x: any) => x.id === first.task.id).parent_id, null);
+
+  await call(`${orch.url}/tasks/${follow.id}/approve`, {});
+  const second = await ended(follow.id);
+  assert.equal(second.task.status, 'closed', second.task.error);
+  assert.deepEqual(aggRequests.at(-1).earlier, ['Due diligence on the NEAR token']); // "translate it" means little alone
+  assert.equal(aggRequests.at(-1).prompt, 'Now translate it to Turkish');
+
+  // The next message: every earlier message, oldest first, and the newest report (the follow-up's, not the first one's).
+  const third = await call(`${orch.url}/tasks`, { prompt: 'Go deeper on part 2', budget_usdc: '1', parent_id: follow.id });
+  assert.equal(third.status, 'planned');
+  assert.match(second.final_result.final_markdown, /check-good/);
+  assert.deepEqual(planRequests.at(-1).conversation,
+    { earlier: ['Due diligence on the NEAR token', 'Now translate it to Turkish'], revising: false, report: second.final_result.final_markdown.trim() });
+  await call(`${orch.url}/tasks/${third.id}/cancel`, {});
+});
+
+test('a revision replaces the plan it changes once its own plan is ready; a reply that is not a task leaves that plan usable', async () => {
+  plan = holdersPlan();
+  const first = await call(`${orch.url}/tasks`, { prompt: 'Due diligence on the NEAR token', budget_usdc: '3', owner: 'alice.near' });
+  assert.equal(first.status, 'planned');
+
+  // A bare go-ahead is not a task: it fails with the planner's sentence, and the plan above it stays planned.
+  const reply = await call(`${orch.url}/tasks`, { prompt: 'go ahead', budget_usdc: '3', owner: 'alice.near', parent_id: first.id });
+  assert.deepEqual([reply.status, reply.error], ['failed', 'That reads like a go-ahead.']);
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Due diligence on the NEAR token'], revising: true });
+  assert.equal((await snap(first.id)).task.status, 'planned');
+
+  // The next message follows the failed reply, and still revises the plan above it.
+  const revised = await call(`${orch.url}/tasks`, { prompt: 'Same task with a budget of 1.50 USDC.', budget_usdc: '1.5', owner: 'alice.near', parent_id: reply.id });
+  assert.deepEqual([revised.status, revised.budget_atomic, revised.parent_id], ['planned', '1500000', reply.id]);
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Due diligence on the NEAR token', 'go ahead'], revising: true });
+  const old = await call(`${orch.url}/tasks/${first.id}?owner=alice.near`);
+  assert.deepEqual([old.task.status, old.task.replaced_by], ['cancelled', revised.id]);
+  assert.equal((await snap(reply.id)).task.status, 'failed'); // the reply is left as it was
+  const evs = (await fetch(`${orch.url}/tasks/${first.id}/events`).then((r) => r.text())).split('\n').filter((l) => l.startsWith('data: ')).map((l) => JSON.parse(l.slice(6)));
+  assert.deepEqual(evs.at(-1).data, { from: 'planned', to: 'cancelled' });
+  await assert.rejects(call(`${orch.url}/tasks/${first.id}/approve`, { owner: 'alice.near' }), /cancelled/);
+
+  // A plan approved while its revision was being drafted runs on: the revision does not cancel it.
+  plan = holdersPlan();
+  const runs = await call(`${orch.url}/tasks`, { prompt: 'Revise me', budget_usdc: '1', owner: 'alice.near' });
+  let open!: () => void;
+  planGate = new Promise((ok) => (open = ok));
+  const late = await call(`${orch.url}/tasks`, { prompt: 'Make it shorter', budget_usdc: '1', owner: 'alice.near', parent_id: runs.id, wait: false });
+  assert.equal(late.status, 'draft');
+  await call(`${orch.url}/tasks/${runs.id}/approve`, { owner: 'alice.near' });
+  open();
+  planGate = Promise.resolve();
+  await until(async () => (await snap(late.id)).task.status === 'planned');
+  const ran = await ended(runs.id);
+  assert.deepEqual([ran.task.status, ran.task.replaced_by], ['closed', null]);
+  await call(`${orch.url}/tasks/${late.id}/cancel`, {});
+});
+
+test('a message is refused while the task it follows is planning or running, after a newer message, and for another owner', async () => {
+  const send = (parent_id: string, owner?: string) => call(`${orch.url}/tasks`, { prompt: 'More', budget_usdc: '1', parent_id, ...(owner ? { owner } : {}) });
+  const refused = (status: number, message?: string) => (e: any) => e.status === status && (message === undefined || e.message === message);
+
+  let open!: () => void;
+  planGate = new Promise((ok) => (open = ok));
+  plan = holdersPlan();
+  const drafting = await call(`${orch.url}/tasks`, { prompt: 'Holders', budget_usdc: '1', owner: 'bob.near', wait: false });
+  await assert.rejects(send(drafting.id, 'bob.near'), refused(409, 'Wait for the plan to be ready before sending more.'));
+  open();
+  planGate = Promise.resolve();
+  await until(async () => (await snap(drafting.id)).task.status === 'planned');
+
+  // Someone else's task, or none: 404, as on every route. The CLI (no owner) cannot follow an account's task either.
+  await assert.rejects(send(drafting.id, 'carol.near'), refused(404));
+  await assert.rejects(send('t_nothere', 'bob.near'), refused(404));
+  await assert.rejects(send(drafting.id), refused(409));
+
+  // A conversation is a chain: once a task has a follow-up, only the newest task takes the next message.
+  const next = await send(drafting.id, 'bob.near');
+  assert.equal(next.status, 'planned');
+  await assert.rejects(send(drafting.id, 'bob.near'), refused(409, 'This conversation has a newer message: reload the page and send from there.'));
+
+  // Approved and running: wait or stop. Stopped: a follow-up is fine, and it changes no plan.
+  plan = { subtasks: [sub('s1', 'Hang', '200000', [cand('hang', '100000', 60)])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] };
+  const running = await send(next.id, 'bob.near');
+  await call(`${orch.url}/tasks/${running.id}/approve`, { owner: 'bob.near' });
+  await until(async () => (await snap(running.id)).subtasks[0].status === 'working');
+  await assert.rejects(send(running.id, 'bob.near'), refused(409, 'Wait for this run to finish, or stop it, before sending more.'));
+  await call(`${orch.url}/tasks/${running.id}/kill`, { owner: 'bob.near' });
+  plan = holdersPlan();
+  const after = await send(running.id, 'bob.near');
+  assert.equal(after.status, 'planned');
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Holders', 'More', 'More'], revising: false });
+  assert.equal((await snap(running.id)).task.replaced_by, null);
+});
+
+test('the conversation sent to the planner keeps the first and the newest messages, and the newest report cut to size', async () => {
+  const { conversationFor } = await import('../src/orchestrator/index.ts');
+  const { newTask } = await import('../src/orchestrator/store.ts');
+  const { Conversation, CONVERSATION_MESSAGES, CONVERSATION_REPORT_CHARS } = await import('../src/shared/types.ts');
+  const chain = Array.from({ length: 15 }, (_, i) => newTask(`m${i}`, 1_000_000n, 0.2)).reverse(); // nearest first
+  const report = (text: string) => ({ final_markdown: text, attribution: [], abandoned: [] });
+  chain[5].final_result = report('older report');
+  chain[3].final_result = report('x'.repeat(20_000));
+  const c = conversationFor(chain, null);
+  assert.equal(c.earlier.length, CONVERSATION_MESSAGES);
+  assert.deepEqual([c.earlier[0], c.earlier[1], c.earlier.at(-1)], ['m0', 'm4', 'm14']);
+  assert.equal(c.report!.length, CONVERSATION_REPORT_CHARS);
+  assert.match(c.report!, /^x+\n\n\[The rest of the report is left out here\.\]$/);
+  assert.equal(c.revising, false);
+  assert.ok(Conversation.safeParse(c).success);
+  // Short ones go as they are; with no report, there is no report field.
+  assert.deepEqual(conversationFor(chain.slice(-2), chain.at(-1)!), { earlier: ['m0', 'm1'], revising: true });
 });

@@ -4,13 +4,15 @@ import { z } from 'zod';
 import { config, MAX_PROMPT_CHARS } from '../shared/config.ts';
 import { bigintReplacer, call, HttpError, serve, type Ctx, type Routes, type Running } from '../shared/http.ts';
 import { formatUsdc, parseUsdc } from '../shared/money.ts';
-import type { AgentHistory, Plan, RookEvent, X402Config } from '../shared/types.ts';
+import { CONVERSATION_MESSAGES, CONVERSATION_REPORT_CHARS, type AgentHistory, type Conversation, type Plan, type RookEvent, type X402Config } from '../shared/types.ts';
 import { attack } from './attack.ts';
 import { createChainLedger } from './chain-ledger.ts';
 import { createLedger, type Ledger } from './ledger.ts';
 import { kill, restoreTask, runTask, SHUTDOWN } from './runner.ts';
 import { openStore } from './db.ts';
-import { emit, fromDoc, isFree, isTerminal, newTask, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task } from './store.ts';
+import {
+  ancestors, emit, fromDoc, isFree, isTerminal, newTask, openPlan, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task,
+} from './store.ts';
 
 const CreateBody = z.object({
   prompt: z.string().trim().min(1),
@@ -18,19 +20,35 @@ const CreateBody = z.object({
   reserve_share: z.number().min(0).max(0.9).optional(),
   owner: z.string().min(2).max(64).optional(), // set by the web app from a verified wallet sign-in
   wait: z.boolean().optional(), // false: answer at once with the draft task and plan in the background (progress as events)
+  parent_id: z.string().min(1).max(64).optional(), // the conversation's newest task: this message follows it
 });
+
+/**
+ * What the planner gets with a follow-up: the earlier messages (the first and the newest when there are too many) and
+ * the newest report in the conversation, cut to size. `revises`: the plan this message changes, if any.
+ */
+export function conversationFor(chain: Task[], revises: Task | null): Conversation {
+  const prompts = chain.map((x) => x.prompt).reverse();
+  const earlier = prompts.length > CONVERSATION_MESSAGES ? [prompts[0], ...prompts.slice(-(CONVERSATION_MESSAGES - 1))] : prompts;
+  const report = chain.find((x) => x.final_result?.final_markdown.trim())?.final_result!.final_markdown.trim();
+  const CUT = '\n\n[The rest of the report is left out here.]';
+  return {
+    earlier, revising: revises !== null,
+    ...(report ? { report: report.length > CONVERSATION_REPORT_CHARS ? report.slice(0, CONVERSATION_REPORT_CHARS - CUT.length) + CUT : report } : {}),
+  };
+}
 
 /**
  * Asks the planner for a plan, relaying its progress lines as `planning` events. A planner that answers with plain
  * JSON (an older one, or a test double) still works: there is just no progress to relay. `history`: Rook's own
  * verdicts per agent, which the planner ranks candidates with.
  */
-async function planWithProgress(t: Task, history: Record<string, AgentHistory>): Promise<Plan> {
+async function planWithProgress(t: Task, history: Record<string, AgentHistory>, conversation?: Conversation): Promise<Plan> {
   emit(t, 'planning', { stage: 'drafting' });
   const r = await fetch(config.urls.planner + '/plan', {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/x-ndjson, application/json' },
-    body: JSON.stringify({ task_id: t.id, prompt: t.prompt, budget_atomic: t.budget_atomic, reserve_share: t.reserve_share, history }),
+    body: JSON.stringify({ task_id: t.id, prompt: t.prompt, budget_atomic: t.budget_atomic, reserve_share: t.reserve_share, history, conversation }),
     signal: t.abort.signal,
   });
   if (!(r.headers.get('content-type') ?? '').includes('ndjson')) {
@@ -157,14 +175,27 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       if (budget > max) throw new HttpError(400, `budget ${formatUsdc(budget)} USDC is above this Rook's limit of ${formatUsdc(max)} USDC (ROOK_MAX_BUDGET_USDC)`);
       const min = (await contractCfg())?.min_budget ?? 0n;
       if (budget < min) throw new HttpError(400, `budget ${formatUsdc(budget)} USDC is below the contract's minimum of ${formatUsdc(min)} USDC`);
-      const t = newTask(b.prompt, budget, b.reserve_share ?? 0.2, b.owner ?? null);
+      // A message in a conversation follows its newest task. Checked after the last await, so two messages sent at once
+      // cannot both follow the same task.
+      const parent = b.parent_id === undefined ? null : owned(b.parent_id, b.owner);
+      if (parent) {
+        if (parent.owner !== (b.owner ?? null)) throw new HttpError(409, `task ${parent.id} has another owner: a follow-up keeps its owner`);
+        if (parent.status === 'draft') throw new HttpError(409, 'Wait for the plan to be ready before sending more.');
+        if (parent.status !== 'planned' && !isTerminal(parent.status)) throw new HttpError(409, 'Wait for this run to finish, or stop it, before sending more.');
+        if ([...tasks.values()].some((x) => x.parent_id === parent.id)) throw new HttpError(409, 'This conversation has a newer message: reload the page and send from there.');
+      }
+      const chain = parent ? ancestors(parent, tasks) : [];
+      const revises = openPlan(chain);
+      const conversation = parent ? conversationFor(chain, revises) : undefined;
+      const t = newTask(b.prompt, budget, b.reserve_share ?? 0.2, b.owner ?? null, parent?.id ?? null);
+      if (conversation) t.earlier_prompts = conversation.earlier;
       tasks.set(t.id, t);
       saveTask(t);
       const planning = (async () => {
         try {
           // A kill during planning aborts the wait. ponytail: the planner does not watch the disconnect, so its LLM
           // calls for this plan still finish (and are not in this task's cost).
-          const plan = await planWithProgress(t, verdictHistory(tasks.values()));
+          const plan = await planWithProgress(t, verdictHistory(tasks.values()), conversation);
           if (isTerminal(t.status)) return;
           setPlan(t, plan);
           emit(t, 'plan', plan);
@@ -176,6 +207,12 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
             return;
           }
           setStatus(t, 'planned');
+          // The revised plan replaces the one it changes, unless that one was approved or cancelled meanwhile. A
+          // revision that fails leaves it as it was.
+          if (revises?.status === 'planned') {
+            revises.replaced_by = t.id;
+            setStatus(revises, 'cancelled');
+          }
         } catch (e: any) {
           if (isTerminal(t.status)) return; // killed while planning: stays killed
           // A 422 is the planner's sentence for a message that isn't a task: kept as is, for the user. The rest is internal.
@@ -211,7 +248,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     'GET /tasks': ({ query }) => ({
       tasks: [...tasks.values()]
         .filter((t) => !query.has('owner') || t.owner === query.get('owner'))
-        .map(({ id, status, prompt, created_at }) => ({ id, status, prompt, created_at })),
+        .map(({ id, status, prompt, budget_atomic, created_at, parent_id }) => ({ id, status, prompt, budget_atomic, created_at, parent_id })),
     }),
 
     'GET /tasks/:id': ({ params, query }) => snapshot(owned(params.id, query.get('owner')), ledger),
