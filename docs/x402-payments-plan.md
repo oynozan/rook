@@ -189,6 +189,14 @@ Rook runs on NEAR mainnet. Everything below can be checked on nearblocks.io.
 | Its receipt (no verdict: stopped before evaluation) | `FvyDgYUgGfHanoTYjy3HZihaQhK8cQuehsABa5M9WzSs` |
 | Task 6, after Stop: subtask 2's payment, 0.15 USDC | `FWrrH6yWXFq2Cc3UjrNGYdVWwmfoy83kY4SX9TUog3bV` |
 | Its receipt | `FFTV46KLegfr1kLN5J9tjHUw21fErA7JoXcnb5jLt9uc` |
+| Task 7 funded from the web app: 1.00 USDC, one cap of 0.15 (plus a self-done summary) | `ACQNrDJhSf4AoRXuQmbVnA7EEmXPKj1xjQDvqGABBBwu` |
+| Task 7, after the services were killed and restarted mid-hire: the payment, 0.15 USDC | `6a2oC6Sihz4vhvmgK2WTj8wQJNuFJpag1PBxy5nBXuxh` |
+| Its receipt (verdict pass) | `BoFFhA6nbt9jeoKzVXXiRB47axXW3zTjS4K6UkkPzudt` |
+| Task 8 funded from the web app: 1.00 USDC, caps 0.25 and 0.25 | `9MqTLEoEtGv9m3ZJotQTAFr4L3pFRvnhLuob5b8x9aFf` |
+| Task 8, after a second restart mid-hire: subtask 1 paid 0.15 USDC | `J5XmUKDvDrY8XvqauitvWaU6eZXvz3AoGzPHr9arr9J9` |
+| Its receipt (verdict pass) | `Fo9zWrdfTyeTtdam16CL7J3wnap8HnwUkg6dXYYnEPXp` |
+| Task 8: subtask 2 paid 0.15 USDC | `Fw6J9Ns4v3P8yQvNzYtHJ81ZWhyynmP52jdiUEAijAiZ` |
+| Its receipt (verdict pass) | `iUDogHawiipKBi7GgxNNXF63w4hoB7X7mq3HvmKNW23` |
 
 | Contract task | Rook task | Hires | Paid | Refunded | Outcome |
 | --- | --- | --- | --- | --- | --- |
@@ -199,6 +207,8 @@ Rook runs on NEAR mainnet. Everything below can be checked on nearblocks.io.
 | 4 | `t_17e54e06` (wrong transfer) | none | 0 | 1.00 | the page read the transfer, saw caps 0.29 against the plan's 0.30, refused to run it and offered the refund; the funder's `close_task` returned all of it and the contract deleted the task |
 | 5 | `t_17e54e06`, NEAR circulating supply with a source | `cited-web-research-brief` (pass) | 0.15 | 0.85 | the same Rook task, funded again from the page after the refund; report with the CoinGecko figure |
 | 6 | `t_924d21c2`, latest nearcore release and NEAR staking APR, **stopped** 11 s after the hires went out | `cited-web-research-brief` twice (paid on delivery), `taifoon-research` (ended unpaid) | 0.30 | 1.20 | the kill path: no new hires; the unpaid hire released at once and its sub-account returned 0.04 within 13 s; each sub-account waited out its own authorization (the two agents delivered, 40 s and 2 min after Stop), then returned; the close refunded 1.20 2.5 minutes after Stop |
+| 7 | `t_4ad5ea62`, NEAR TVL last week from DefiLlama; **all services killed and restarted** while the hire was out | `cited-web-research-brief` (pass); the self-done summary abandoned | 0.15 | 0.85 | Rook rebuilt the task from contract task 7, followed the hire it had sent, booked the payment and closed. The planned "summarise the finding" subtask ran before the finding existed and failed its checks; the open page stayed on "Running" after the restart |
+| 8 | `t_ac564006`, NEAR staking APR and total staked; services restarted mid-hire again | `cited-web-research-brief` twice (pass, pass) | 0.30 | 0.70 | after both fixes below: the page reconnected by itself and showed the report |
 
 Task 3 ran in the web app (`web/`, branch `feat/web-real-path`) in a headless Chromium. The wallet was an injected near-connect wallet, the way extension wallets plug in, holding `oynozan.near`'s key: it signed the sign-in message and the funding transfer, and nothing else was stubbed.
 
@@ -215,3 +225,5 @@ Task 3 ran in the web app (`web/`, branch `feat/web-real-path`) in a headless Ch
 7. Task 3's page first said "no task at this link" once the plan was approved. The web server's dev reload had kept a store connection opened before the `funding` table existed, and the task route turned that error into a 404. The connection is now keyed by schema version, and the route reports its own errors as errors. The page reopened, funded and ran the same task.
 8. Task 4's page said the transfer was not this plan's and offered only Stop: its 1.00 USDC had no way back from the page. A transfer from the signed-in account on other terms now gets "Refund to my wallet" (the funder's `close_task`), after which the plan can be funded again; a stopped task's held funding offers the same.
 9. Task 6's page said "Stopped. Spent 0.30 of 1.50 USDC" and nothing more: not the 1.20 refund, not the two receipts. A stopped or failed run now shows the same money card as a finished one: spent, refunded (or that the refund is on its way while payments are in flight), and a receipt per paid hire.
+10. Task 7's planner added a "summarise the finding" subtask. Subtasks run in parallel and never see each other's results, so it ran on nothing and failed; task 6 had hired an agent for 0.02 USDC to do the same. The planner prompt now says every subtask must be doable from its brief alone, and none may summarise or combine the others: the aggregator writes the report.
+11. Task 7's open page never caught up after the restart: while the services were down, the event stream's reconnect got a 503, and any reply but 200 closes an EventSource for good. The page now opens a new stream with backoff and reloads the task; task 8 confirmed it.
