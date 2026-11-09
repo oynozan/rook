@@ -9,7 +9,11 @@ export const ORCHESTRATOR = process.env.ORCHESTRATOR_URL ?? 'http://127.0.0.1:71
 export const serviceHeaders = (): Record<string, string> =>
   process.env.ROOK_SERVICE_TOKEN ? { 'x-rook-token': process.env.ROOK_SERVICE_TOKEN } : {};
 
-export type TaskSummary = { id: string; status: string; prompt: string; created_at: string };
+/**
+ * parent_id: the task this one follows in its conversation; null starts a conversation. Older orchestrators send no
+ * parent_id (every task starts its own) and no budget_atomic.
+ */
+export type TaskSummary = { id: string; status: string; prompt: string; created_at: string; parent_id?: string | null; budget_atomic?: string };
 
 /**
  * An agent the planner can hire, in the order Rook hires them: lowest expected cost first (price divided by the chance it
@@ -47,7 +51,8 @@ export type PlanView = {
   budget: { reserve_atomic: string; allocated_atomic: string };
 };
 
-export type TaskView = TaskSummary & { budget_atomic: string; error: string | null; owner: string | null; plan: PlanView | null };
+/** replaced_by: a plan cancelled because a revision replaced it names that revision. */
+export type TaskView = TaskSummary & { budget_atomic: string; error: string | null; owner: string | null; plan: PlanView | null; replaced_by?: string | null };
 
 /** attestation_hash is the evaluator's verdict hash: shown as "evaluation hash" (no TEE attests it yet). */
 export type Receipt = {
@@ -124,7 +129,9 @@ const post = <T>(path: string, body: unknown = {}) =>
 export const listTasks = (owner: string) => request<{ tasks: TaskSummary[] }>(`/tasks?owner=${encodeURIComponent(owner)}`).then((d) => d.tasks);
 export const getMode = () => request<Mode>('/mode');
 // wait: false returns the draft task at once; planning continues and reports progress as `planning` events.
-export const createTask = (prompt: string, budget_usdc: string, owner: string) => post<TaskView>('/tasks', { prompt, budget_usdc, owner, wait: false });
+// parent_id: the conversation's newest task, which this message follows; none starts a conversation.
+export const createTask = (prompt: string, budget_usdc: string, owner: string, parent_id?: string) =>
+  post<TaskView>('/tasks', { prompt, budget_usdc, owner, wait: false, ...(parent_id ? { parent_id } : {}) });
 const taskPath = (id: string) => `/tasks/${encodeURIComponent(id)}`;
 /** With `owner`, the orchestrator answers 404 for anyone else's task (the routes check the owner again). */
 export const getTask = (id: string, owner?: string) => request<TaskSnapshot>(taskPath(id) + (owner ? `?owner=${encodeURIComponent(owner)}` : ''));

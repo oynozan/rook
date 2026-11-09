@@ -2,7 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { forgetFundingOf, forgetUnreadFunding, fundingSent, giveBackDraftSlot, markFundingRefunded, recordFundingSent, takeDraftSlot } from './db';
-import { checkDraft, draftRefusal } from './draft';
+import { checkDraft, draftRefusal, followUpRefusal } from './draft';
 import { untilFinal, type Funding } from './funding';
 import { approveTask, cancelTask, createTask, fundedTask, getMode, getTask, killTask, OrchestratorDown, OrchestratorError } from './orchestrator';
 import { actionRefusal, type TaskAction } from './refusals';
@@ -28,7 +28,8 @@ function signInFirst() {
 }
 
 // Every action acts as the signed-in account from the session cookie. The browser can't name an account.
-export async function draftTask(input: { prompt: string; budget: string }): Promise<DraftResult> {
+// parent_id: the conversation's newest task, which this message follows (the orchestrator checks it is the account's).
+export async function draftTask(input: { prompt: string; budget: string; parent_id?: string }): Promise<DraftResult> {
   const owner = await currentAccount();
   if (!owner) return { kind: 'error', message: signInFirst() };
 
@@ -42,7 +43,8 @@ export async function draftTask(input: { prompt: string; budget: string }): Prom
   }
 
   try {
-    const task = await createTask(check.prompt, check.usdc, owner);
+    const parent = typeof input?.parent_id === 'string' && input.parent_id ? input.parent_id : undefined;
+    const task = await createTask(check.prompt, check.usdc, owner, parent);
     refreshSidebar();
     return { kind: 'planned', id: task.id };
   } catch (e) {
@@ -50,6 +52,8 @@ export async function draftTask(input: { prompt: string; budget: string }): Prom
     if (e instanceof OrchestratorDown) return { kind: 'error', message: DOWN };
     const refused = e instanceof OrchestratorError && e.status === 400 ? draftRefusal(e.message) : null;
     if (refused) return { kind: 'invalid', ...refused };
+    const follow = e instanceof OrchestratorError ? followUpRefusal(e.status, e.message) : null;
+    if (follow) return { kind: 'error', message: follow };
     console.error('[web] draftTask:', e instanceof Error ? e.message : e);
     return { kind: 'error', message: "Rook couldn't draft a plan for this task. Try again in a moment." };
   }

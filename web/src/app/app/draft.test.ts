@@ -2,7 +2,7 @@
 // Run: npx tsx --test src/app/app/*.test.ts
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { budgetLimitError, checkDraft, draftRefusal, formatUsdc, parseBudget, PROMPT_MAX } from './draft';
+import { budgetLimitError, checkDraft, draftRefusal, followUpRefusal, formatUsdc, parseBudget, PROMPT_MAX } from './draft';
 
 test('formatUsdc: at least 2 decimals, up to the 6 USDC has', () => {
   assert.equal(formatUsdc(50_000_000n), '50.00');
@@ -59,4 +59,12 @@ test('draftRefusal: the orchestrator 400s about the budget or the prompt land on
   assert.deepEqual(draftRefusal('budget_usdc must be positive'), { budget: "Rook can't use this budget. Enter an amount like 3.00." });
   assert.deepEqual(draftRefusal('invalid USDC amount: 1,5'), { budget: "Rook can't use this budget. Enter an amount like 3.00." });
   assert.equal(draftRefusal('Required'), null);
+});
+
+test('followUpRefusal: a message the orchestrator refuses because of the task it follows', () => {
+  for (const m of ['Wait for the plan to be ready before sending more.', 'Wait for this run to finish, or stop it, before sending more.',
+    'This conversation has a newer message: reload the page and send from there.']) assert.equal(followUpRefusal(409, m), m);
+  assert.equal(followUpRefusal(404, 'no task t_1234abcd'), "Rook has no task at this link for the wallet you're signed in with.");
+  assert.equal(followUpRefusal(409, 'task t_1 has another owner: a follow-up keeps its owner'), null); // the web always sends the owner
+  assert.equal(followUpRefusal(400, 'Wait for it'), null);
 });
