@@ -173,12 +173,21 @@ Rook runs on NEAR mainnet. Everything below can be checked on nearblocks.io.
 | Task 2 funded by `oynozan.near`: 1.50 USDC, one cap of 0.25, reserve 83.33% (the budget the cap left) | `Dhy5v2jS2XDuBgQRwQUSdeAFwqc1FHG115AoxXvra4n8` |
 | Task 2: `cited-web-research-brief` paid 0.15 USDC | `2uM24irmYEHMJuvzwwkDBGGr3A2pygLRX96Go4jxELP7` |
 | Its receipt (verdict pass) | `F4CyorVtrVzXv2Da95JJKd4pVBJnLTVWn94UXcMvVpBw` |
+| Upgrade with the review fixes (`mark_empty` on a Closed task, at most 8 caps, `NEW_TASK_FLOOR`) | `2qBhsyuPL91DLy1DPVCmzqNPS3LMrJwtNEd92dxsRyM2` |
+| Task 3 funded **from the web app** by `oynozan.near`: 1.50 USDC, caps 0.30 and 0.15, reserve 70% | `EWYsGeFZL9U1yCL7PD1U8XnqfNBoFWXzSRNCWNqC7Mr7` |
+| Task 3 subtask 1: `cited-web-research-brief` paid 0.15 USDC | `26jHoNtsFiktDMwMgC9nakcFndbd7YwLwSN8PMQ9PeYn` |
+| Its receipt (verdict pass) | `8q1YYLAb63o6SdPDVBGh26dbNGdwwxGVgj2mYLomaZp5` |
+| Task 3 subtask 2: `cited-web-research-brief` paid 0.15 USDC | `D1aBPxFVV1hwFRrHf6TeRPBzaMGi7rvccYffpuCdmjP7` |
+| Its receipt (verdict pass) | `jKQ7myQWAdG6FpoXucS4i4Yp858JaaGv4skrs7hs5Wv` |
 
 | Contract task | Rook task | Hires | Paid | Refunded | Outcome |
 | --- | --- | --- | --- | --- | --- |
 | 0 | `t_891b1147`, NEAR wallets | `web-research` (pass); subtask 2 had no payable agent | 0.50 | 1.00 | report from the passing subtask; exposed the sub-account NEAR and payment-window bugs |
 | 1 | `t_d8d77b31`, NEAR releases in October 2026 | `cited-web-research-brief` (fail) | 0.15 | 1.35 | good work failed a `numeric_match` on "Date" (2026-10-26 is not one number); the 0.50 re-hire did not fit the 0.30 reserve while 0.90 sat unallocated |
 | 2 | `t_6b7dbc9e`, top 3 NEAR DeFi apps by TVL | `cited-web-research-brief` (pass) | 0.15 | 1.35 | clean run: paid, passed, 0.10 leftover returned, sub-account deleted, report with DefiLlama sources |
+| 3 | `t_9fffa66f`, the three latest nearcore releases | `cited-web-research-brief` twice (pass, pass) | 0.30 | 1.20 | the first run from the browser: NEP-413 sign-in, plan, funding transfer from the wallet, report about 4 minutes after funding, both sub-accounts deleted |
+
+Task 3 ran in the web app (`web/`, branch `feat/web-real-path`) in a headless Chromium. The wallet was an injected near-connect wallet, the way extension wallets plug in, holding `oynozan.near`'s key: it signed the sign-in message and the funding transfer, and nothing else was stubbed.
 
 `ledger_check` held for every task, and every sub-account was deleted after its return.
 
@@ -190,3 +199,4 @@ Rook runs on NEAR mainnet. Everything below can be checked on nearblocks.io.
 4. The planner searched the market only with topic words, which matched few agents. Its first search term is now the general skill agents advertise (for example "web research").
 5. Task 1's agent did good work but failed a `numeric_match` on its "Date" line. The planner no longer writes `numeric_match` for dates, years, versions or ids: the prompt says so, and a guard removes any that slip through.
 6. Task 1's re-hire was refused for want of reserve while 0.90 USDC of the budget sat unallocated. The budget the caps leave now becomes the reserve, up to the contract's 90% (task 2's reserve was 1.25 of 1.50).
+7. Task 3's page first said "no task at this link" once the plan was approved. The web server's dev reload had kept a store connection opened before the `funding` table existed, and the task route turned that error into a 404. The connection is now keyed by schema version, and the route reports its own errors as errors. The page reopened, funded and ran the same task.
