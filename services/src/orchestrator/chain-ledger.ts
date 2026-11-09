@@ -212,20 +212,32 @@ export function createChainLedger(): ChainLedger {
       })();
     },
 
-    /** Sends the sub-account's USDC back (signer /return), or has the contract mark it empty when it holds exactly 0. */
+    /**
+     * Sends the sub-account's USDC back (signer /return), or has the contract mark it empty when it holds exactly 0. An
+     * empty one may have been returned already by a /return whose answer was lost: the contract's subtask says so.
+     */
     async returnLeftover(task_id, n) {
       if (sub(task_id, n)?.authorized_atomic != null) throw new LedgerError(`subtask ${n} has an outstanding authorization`);
       const c = at(task_id, n);
-      let onChain = 0n;
+      let onChain: bigint | null = 0n; // null: nothing was returned on chain (a Failed subtask never held its cap)
+      let account = c.account_id;
       if ((await balanceOf(c.account_id)) === 0n) {
-        const r = await svc(gateway<{ marked: boolean }>('/mark-empty', { task_id: c.task_id, n: c.n }));
-        if (!r.marked) throw new LedgerError(`mark_empty left subtask ${c.n} Funded: the contract read a balance above 0`);
+        // mark_empty would be refused ("subtask is not funded") for a subtask already Returned, on every try: book it as
+        // restore() does. Failed: its funding was undone on chain, so its cap is back in the task already.
+        const cs = (await retry(() => gateway(`/task/${encodeURIComponent(c.task_id)}`))).subtasks.find((s: any) => s.n === c.n);
+        if (cs?.status === 'Returned' || cs?.status === 'Failed') {
+          onChain = cs.status === 'Returned' ? BigInt(cs.returned) : null;
+          account = cs.account_id;
+        } else {
+          const r = await svc(gateway<{ marked: boolean }>('/mark-empty', { task_id: c.task_id, n: c.n }));
+          if (!r.marked) throw new LedgerError(`mark_empty left subtask ${c.n} Funded: the contract read a balance above 0`);
+        }
       } else {
         onChain = BigInt((await svc(signer<{ amount: string }>('/return', c))).amount);
       }
       const amount = m.returnLeftover(task_id, n);
-      if (onChain !== amount) console.warn(`[orchestrator] ${task_id} subtask ${n}: returned ${onChain} on chain, ${amount} in Rook's books`);
-      await reclaim(task_id, n, c); // the emptied sub-account is deleted, its NEAR back to the contract
+      if (onChain !== null && onChain !== amount) console.warn(`[orchestrator] ${task_id} subtask ${n}: returned ${onChain} on chain, ${amount} in Rook's books`);
+      await reclaim(task_id, n, { ...c, account_id: account }); // the emptied sub-account is deleted, its NEAR back to the contract
       return amount;
     },
 

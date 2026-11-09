@@ -76,6 +76,7 @@ before(async () => {
       const t = contract.get(body.task_id)!.task;
       if (t.status === 'Closed') t.unallocated = String(BigInt(t.unallocated ?? 0) + amount);
       calls.push(`return ${body.account_id} ${amount}`);
+      hiccup('return-answer'); // the transfer landed, but its answer is lost (send_tx "outcome unknown", a dropped call)
       return { tx_hash: 'r', amount: String(amount) };
     },
     'POST /reclaim': ({ body }) => { // like the signer: a Returned account, or a failed attempt's created one, at 0 USDC
@@ -706,6 +707,39 @@ test('a close that keeps failing after the report keeps the report and the task 
     assert.ok(!evs.some((e) => e.type === 'task_status' && e.data.to === 'failed'));
     assert.equal(evs.filter((e) => e.type === 'final').length, 1);
   } finally { await orch.close(); }
+});
+
+test("a return whose answer was lost: the next try finds the subtask Returned on the contract, books it and closes, never mark_empty", async () => {
+  process.env.ROOK_DB = join(dir, 'lost-return.sqlite');
+  const orch = await start(0);
+  try {
+    const id = await fundedAndWorking(orch, 'alpha', 'lr');
+    failing.set('return-answer', 1);
+    await call(`${orch.url}/tasks/${id}/kill`, {});
+    const s = await until(async () => { const x = await snap(orch, id); return x.ledger?.closed ? x : false; });
+    const account = acct('lr', 1);
+    assert.deepEqual([s.task.status, s.subtasks[0].status, s.ledger.spent_atomic, s.ledger.refunded_atomic], ['killed', 'returned', '0', '1000000']);
+    assert.equal(calls.filter((c) => c === `return ${account} 100000`).length, 1); // returned once, booked from the contract
+    assert.ok(!calls.some((c) => c.startsWith('mark-empty lr/')), calls.join('\n'));
+    assert.ok(calls.indexOf(`reclaim ${account}`) < calls.indexOf('close lr'));
+    const errs = (await events(orch, id)).filter((e) => e.type === 'error');
+    assert.deepEqual(errs.map((e) => [e.data.kind, e.data.op]), [['unwind', 'returnLeftover']]);
+  } finally { await orch.close(); failing.clear(); }
+});
+
+test('a return booked from the contract: a subtask Failed on chain counts as returned, with nothing sent back', async () => {
+  const { createChainLedger } = await import('../src/orchestrator/chain-ledger.ts');
+  const l = createChainLedger();
+  openContractTask('fl', ['300000']);
+  l.bind('T-fl', 'fl', new Map([[1, 1]]));
+  l.createTask('T-fl', 'owner.test', 1_000_000n, 0.2);
+  await l.fundSubtask('T-fl', 1, 300_000n);
+  Object.assign(sub('fl', 1), { status: 'Failed', account_exists: true }); // its funding undone on chain: the cap is back in the task
+  bal.set(acct('fl', 1), 0n);
+  assert.equal(await l.returnLeftover('T-fl', 1), 300_000n);
+  assert.ok(!calls.some((c) => c.startsWith('mark-empty fl/')));
+  assert.ok(calls.includes(`reclaim ${acct('fl', 1)}`));
+  assert.equal(String(l.view('T-fl')!.subtasks[0].returned_atomic), '300000');
 });
 
 test('a kill whose close keeps failing for a while: the unwind tries again until the books close, reporting the problem once', async () => {
