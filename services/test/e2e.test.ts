@@ -102,8 +102,8 @@ test('kill during a run: killed, authorizations released, no hire after the kill
   const killed = await call(`${orch}/tasks/${task.id}/kill`, {});
   assert.equal(killed.status, 'killed');
 
-  await sleep(1500);
-  const snap = await call(`${orch}/tasks/${task.id}`);
+  // The unwind closes the books after the kill, so the stopped run shows its refund.
+  const snap = await waitFor(task.id, (s) => s.ledger?.closed === true, 10_000);
   assert.equal(snap.task.status, 'killed');
   assert.ok(snap.ledger.killed);
   assert.ok(snap.ledger.subtasks.every((s: any) => s.authorized_atomic === null));
@@ -115,6 +115,9 @@ test('kill during a run: killed, authorizations released, no hire after the kill
   assert.ok(k > 0);
   assert.ok(evs.slice(k).every((e) => e.type !== 'hire_sent'));
   assert.ok(evs.slice(k).some((e) => e.type === 'ledger' && e.data.op === 'release'));
-  assert.equal(evs.at(-1).data.to, 'killed');
+  const killedAt = evs.findIndex((e) => e.type === 'task_status' && e.data.to === 'killed');
+  assert.ok(killedAt > k && evs.slice(killedAt + 1).every((e) => e.type === 'ledger' || e.type === 'subtask_status'));
+  assert.equal(evs.at(-1).data.op, 'closeTask');
+  assert.equal(BigInt(snap.ledger.refunded_atomic) + BigInt(snap.ledger.spent_atomic), BigInt(snap.ledger.budget_atomic));
   await assert.rejects(call(`${orch}/tasks/${task.id}/approve`, {}), /killed/);
 });

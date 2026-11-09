@@ -30,6 +30,11 @@ const sub = (cid: string, n: number) => contract.get(cid)!.subs.find((s) => s.n 
 const fundedSub = (cid: string, n: number, cap: string): CSub => ({ n, account_id: acct(cid, n), cap, topped_up: '0', returned: '0', status: 'Funded', attempt: 0, pending_top_up: '0', account_exists: true });
 let authTtlMs = 60_000;
 let openTasks = 0; // the funder's open tasks on the contract (its limit is 1 below)
+const failing = new Map<string, number>(); // gateway route -> how many more calls fail, as a NEAR RPC hiccup does
+const hiccup = (route: string) => {
+  const n = failing.get(route) ?? 0;
+  if (n > 0) { failing.set(route, n - 1); throw new HttpError(502, `${route} failed: NEAR RPC send_tx: INVALID_TRANSACTION {}`); }
+};
 
 // ---- the fake market: an agent's A2A task stays WORKING until a test moves it ----
 const PRICE: Record<string, string> = { slowpoke: '300000', stubborn: '100000', hangs: '100000', alpha: '100000', beta: '100000', unsure: '100000' };
@@ -104,12 +109,14 @@ before(async () => {
     },
     'POST /receipt': ({ body }) => (calls.push(`receipt ${body.task_id}/${body.n} ${body.receipt.amount} ${body.receipt.verdict}`), { tx_hash: 'rtx', explorer_url: 'https://testnet.nearblocks.io/txns/rtx' }),
     'POST /mark-empty': ({ body }) => {
+      hiccup('mark-empty');
       const s = sub(body.task_id, body.n), marked = s.status === 'Funded' && !(bal.get(s.account_id) ?? 0n);
       if (marked) s.status = 'Returned';
       calls.push(`mark-empty ${body.task_id}/${body.n} ${marked}`);
       return { tx_hash: 'm', success: true, marked };
     },
     'POST /close': ({ body }) => {
+      hiccup('close');
       const x = contract.get(body.task_id)!;
       if (x.subs.some((s) => s.status === 'Funded')) throw new HttpError(502, 'close_task failed: a subtask has not returned its leftover');
       // like the contract: a Closed task closes again only to refund what reached it after its close
@@ -212,7 +219,7 @@ test('restart mid-hire: rebuilt from the contract, the hire is polled again by i
   } finally { await orch.close(); }
 });
 
-test('kill in chain mode: the authorization is waited out, the sub-account returned and the task closed; kill_task stays the funder\'s', async () => {
+test('kill in chain mode: the authorization is waited out, the sub-account returned and the task closed; kill_task stays the funder\'s, in the CLI\'s /kill answer', async () => {
   authTtlMs = 300; // the agent refuses CancelTask, so only the authorization's expiry frees the money
   const orch = await start(0);
   try {
@@ -228,10 +235,10 @@ test('kill in chain mode: the authorization is waited out, the sub-account retur
     assert.ok(calls.includes('signer-kill b'));
     assert.ok(calls.indexOf(`expire ${acct('b', 1)} landed=false`) < calls.indexOf(`return ${acct('b', 1)} 100000`));
     assert.ok(calls.includes('close b'));
-    // Every step is recorded after the killed status, and the event names the owner's kill_task.
+    // Every step is recorded after the killed status. The event only says the money comes back: no command in the stream.
     const evs = await events(orch, id);
     const at = evs.findIndex((e) => e.type === 'task_status' && e.data.to === 'killed');
-    assert.match(evs.find((e) => e.type === 'ledger' && e.data.op === 'kill').data.human_action, /funder's call: near contract call-function .* kill_task json-args '\{"task_id":"b"\}'/);
+    assert.deepEqual(evs.find((e) => e.type === 'ledger' && e.data.op === 'kill').data, { op: 'kill', returning: true });
     assert.deepEqual(evs.slice(at + 1).filter((e) => e.type === 'ledger').map((e) => e.data.op), ['clearing', 'release', 'returnLeftover', 'closeTask']);
     assert.equal(evs.find((e) => e.data.op === 'clearing').data.how, 'wait');
   } finally { await orch.close(); authTtlMs = 60_000; }
@@ -611,4 +618,50 @@ test('approving again to reprint the funding instructions skips the open-task li
     const next = await call(`${orch.url}/tasks`, { prompt: 'beta', budget_usdc: '1', owner: 'alice.test' });
     await assert.rejects(call(`${orch.url}/tasks/${next.id}/approve`, { owner: 'alice.test' }), /alice\.test already has 1 open tasks/);
   } finally { await orch.close(); openTasks = 0; }
+});
+
+/** The agent of a funded, working task delivers and the marketplace takes its payment from the sub-account. */
+async function deliverAndPay(orch: Running, id: string, cid: string) {
+  const a2aId = (await snap(orch, id)).subtasks[0].hires[0].a2a_task_id, account = acct(cid, 1);
+  auths.get(account)!.landed = true;
+  bal.set(account, 0n);
+  a2a.get(a2aId)!.state = 'COMPLETED';
+}
+
+test('a return or a close that fails for a moment is tried again: the task closes with its report', async () => {
+  process.env.ROOK_DB = join(dir, 'hiccup.sqlite');
+  const orch = await start(0);
+  try {
+    const id = await fundedAndWorking(orch, 'alpha', 'hc');
+    failing.set('mark-empty', 1).set('close', 2);
+    await deliverAndPay(orch, id, 'hc');
+    const s = await until(async () => { const x = await snap(orch, id); return ['closed', 'failed'].includes(x.task.status) ? x : false; });
+    assert.equal(s.task.status, 'closed', s.task.error);
+    assert.equal(s.final_result.final_markdown, 'final');
+    assert.deepEqual([s.subtasks[0].status, s.ledger.closed, s.ledger.refunded_atomic], ['returned', true, '900000']);
+    const errs = (await events(orch, id)).filter((e) => e.type === 'error' && e.data.kind !== 'payment_lookup');
+    assert.deepEqual(errs.map((e) => e.data.kind), ['return', 'close_retry', 'close_retry']);
+  } finally { await orch.close(); failing.clear(); }
+});
+
+test('a close that keeps failing after the report keeps the report; the refund finishes after a restart', async () => {
+  process.env.ROOK_DB = join(dir, 'close-fails.sqlite');
+  let orch = await start(0);
+  const id = await fundedAndWorking(orch, 'alpha', 'cf');
+  try {
+    failing.set('close', 99);
+    await deliverAndPay(orch, id, 'cf');
+    const s = await until(async () => { const x = await snap(orch, id); return x.task.status === 'failed' ? x : false; });
+    assert.equal(s.final_result.final_markdown, 'final'); // paid for and passed: never thrown away
+    assert.match(s.task.error, /INVALID_TRANSACTION/);
+    assert.deepEqual([s.subtasks[0].status, s.ledger.closed], ['returned', false]);
+  } finally { await orch.close(); failing.clear(); }
+  orch = await start(0);
+  try {
+    const s = await until(async () => { const x = await snap(orch, id); return x.ledger?.closed ? x : false; });
+    assert.deepEqual([s.task.status, s.final_result.final_markdown, s.ledger.refunded_atomic], ['failed', 'final', '900000']);
+    const evs = await events(orch, id);
+    assert.ok(evs.some((e) => e.type === 'error' && e.data.kind === 'close'));
+    assert.equal(evs.at(-1).data.op, 'closeTask');
+  } finally { await orch.close(); }
 });

@@ -46,6 +46,7 @@ let orch: Running;
 before(async () => {
   const planner = await serve('fake-planner', {
     'POST /plan': async ({ body }) => { planRequests.push(body); await planGate; return plan; },
+    'POST /self-do': () => ({ text: 'Rook wrote this part.', llm_calls: [] }),
     'POST /aggregate': ({ body }) => {
       if (body.prompt.includes('AGG-DOWN')) throw new HttpError(502, 'planner LLM failed: cost guard', { llm_calls: [{ cost_usd: 0.01, signature_verified: true }] });
       return {
@@ -193,8 +194,7 @@ test('kill releases the authorization, cancels the A2A task and stops hiring', a
 
   const killed = await call(`${orch.url}/tasks/${created.id}/kill`, {});
   assert.equal(killed.status, 'killed');
-  await new Promise((ok) => setTimeout(ok, 200));
-  const s = await snap(created.id);
+  const s = await until(async () => { const x = await snap(created.id); return x.ledger.closed ? x : false; });
   assert.equal(s.task.status, 'killed');
   assert.equal(s.ledger.killed, true);
   assert.equal(s.ledger.subtasks[0].authorized_atomic, null);
@@ -205,7 +205,12 @@ test('kill releases the authorization, cancels the A2A task and stops hiring', a
   const evs = (await fetch(`${orch.url}/tasks/${created.id}/events`).then((r) => r.text())).split('\n\n').filter(Boolean);
   const killAt = evs.findIndex((e) => e.includes('"op":"kill"'));
   assert.ok(killAt > 0 && !evs.slice(killAt).some((e) => e.includes('event: hire_sent')));
-  assert.match(evs.at(-1)!, /"to":"killed"/);
+  // After the killed status only the unwind: the sim books close too, so the refund shows.
+  const killedAt = evs.findIndex((e) => /"to":"killed"/.test(e));
+  assert.deepEqual(evs.slice(killedAt + 1).map((e) => e.match(/"op":"(\w+)"|"to":"(\w+)"/)!.slice(1).join('')), ['returnLeftover', 'returned', 'closeTask']);
+  assert.match(evs.at(-1)!, /"op":"closeTask"/);
+  assert.ok(!evs[killAt].includes('near contract')); // no CLI command in the stream
+  assert.deepEqual([s.ledger.closed, s.ledger.refunded_atomic], [true, '1000000']);
   await assert.rejects(call(`${orch.url}/tasks/${created.id}/kill`, {}), /already killed/);
 });
 
@@ -323,5 +328,30 @@ test("hires in the plan's candidate order, not by price; the next /plan carries 
   assert.ok(PlanRequest.safeParse(body).success);
   assert.ok(body.history['holders-good'].pass >= 1);
   assert.ok(Object.values(body.history).every((h: any) => h.pass + h.fail > 0)); // judged receipts only
-  await call(`${orch.url}/tasks/${next.id}/cancel`, {});
+  await until(async () => (await snap(next.id)).task.status === 'failed'); // its plan is empty
+});
+
+test('a plan with every part dropped ends the task as failed, with the reason in plain words and the plan kept', async () => {
+  const cases: [string[], RegExp][] = [
+    [['no fitting agent', 'no fitting agent'], /^No agent on the market can do any part of this task\.$/],
+    [['over budget'], /^Every part costs more than this budget allows; try a larger budget\.$/],
+    [['no fitting agent', 'over budget'], /^No agent on the market can do some parts of this task, and the others cost more than this budget allows\.$/],
+  ];
+  for (const [reasons, want] of cases) {
+    plan = { subtasks: [], dropped: reasons.map((reason, i) => ({ title: `Part ${i + 1}`, reason })), budget: budget('0'), notes: [], llm_calls: [] };
+    const created = await call(`${orch.url}/tasks`, { prompt: 'p', budget_usdc: '1' });
+    assert.equal(created.status, 'failed');
+    assert.match(created.error, want);
+    assert.deepEqual(created.plan.dropped.map((d: any) => d.reason), reasons);
+    await assert.rejects(call(`${orch.url}/tasks/${created.id}/approve`, {}), /approve needs planned/);
+  }
+});
+
+test("a self_do subtask is 'working' while Rook writes it, and its text is in the snapshot (it has no hire)", async () => {
+  const s = await runToEnd({ subtasks: [{ ...sub('s1', 'Summary', '0', []), self_do: true }], dropped: [], budget: budget('0'), notes: [], llm_calls: [] });
+  assert.equal(s.task.status, 'closed', s.task.error);
+  assert.deepEqual(s.subtasks[0].accepted, { hire_id: null, agent_handle: 'rook:self-do', text: 'Rook wrote this part.' });
+  const evs = (await fetch(`${orch.url}/tasks/${s.task.id}/events`).then((r) => r.text())).split('\n').filter((l) => l.startsWith('data: ')).map((l) => JSON.parse(l.slice(6)));
+  assert.deepEqual(evs.filter((e) => e.type === 'subtask_status').map((e) => e.data.to), ['working', 'evaluating', 'passed', 'returned']);
+  assert.deepEqual([s.ledger.budget_atomic, s.ledger.closed], ['0', true]); // a plan that hires no agent holds nothing
 });

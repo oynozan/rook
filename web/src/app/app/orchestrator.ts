@@ -54,12 +54,26 @@ export type Receipt = {
   payment_explorer_url?: string | null; receipt_explorer_url?: string | null;
 };
 
-export type LedgerSub = { n: number; cap_atomic: string; balance_atomic: string; topped_up_atomic: string; spent_atomic: string; returned_atomic: string | null };
+/** authorized_atomic: a payment authorization still outstanding (it may yet settle). */
+export type LedgerSub = {
+  n: number; cap_atomic: string; balance_atomic: string; topped_up_atomic: string; spent_atomic: string; returned_atomic: string | null;
+  authorized_atomic?: string | null;
+};
+
+/**
+ * A subtask as the run left it. A passed one's deliverable is its accepted hire's deliverable_text, or, for a part Rook
+ * did itself (no hire), accepted.text. Older orchestrators send only id, n and status.
+ */
+export type SubtaskView = {
+  id: string; n: number; status: string; title?: string; self_do?: boolean; final_outcome?: 'passed' | 'abandoned' | null;
+  accepted?: { hire_id: string | null; agent_handle: string; text?: string } | null;
+  hires?: { id: string; agent_handle: string; deliverable_text: string | null }[];
+};
 
 export type TaskSnapshot = {
   task: Omit<TaskView, 'plan'>;
   plan: PlanView | null;
-  subtasks?: { id: string; n: number; status: string }[];
+  subtasks?: SubtaskView[];
   receipts: Receipt[];
   // Chain mode adds contract_id and contract_task_id once the human's funding is bound to the task.
   ledger: {

@@ -155,7 +155,8 @@ export function snapshot(t: Task, ledger: Ledger) {
     subtasks: t.subtasks.map((s) => ({
       id: s.id, n: s.n, title: s.title, status: s.status, final_outcome: s.final_outcome, self_do: s.self_do,
       cap_atomic: s.cap_atomic, deadline_s: s.deadline_s, rehire_count: s.rehire_count, tried: s.tried,
-      accepted: s.accepted && { hire_id: s.accepted.hire_id, agent_handle: s.accepted.agent_handle },
+      // A hired agent's text is in its hire; Rook's own (self_do) text has no hire, so it comes along here.
+      accepted: s.accepted && { hire_id: s.accepted.hire_id, agent_handle: s.accepted.agent_handle, ...(s.accepted.hire_id === null ? { text: s.accepted.text } : {}) },
       hires: s.hires, evaluations: s.evaluations,
     })),
     // a2a_task_id, attestation_hash, payment_tx and receipt_tx with their explorer links (null until known, and in simulation)

@@ -116,16 +116,17 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         : chain
         ? 'It has no contract task on record, so nothing of it is on chain to resume.'
         : 'Its simulated ledger lived in memory only, so the run cannot resume; no real money was involved.'}`;
-      emit(t, 'error', { message: t.error });
+      emit(t, 'error', { kind: 'restart', message: t.error });
       setStatus(t, 'failed');
     }
     for (const go of resume) void go().catch((e) => console.error('[orchestrator] resume after restart', e));
     console.log(`[orchestrator] ${tasks.size} task${tasks.size === 1 ? '' : 's'} loaded from ${config.dbPath}${resume.length ? `, ${resume.length} resumed from the chain` : ''}`);
   }
 
-  // Chain mode: a killed or failed task returns its money after the terminal status; its stream stays open until then.
+  // A killed or failed task returns its money after the terminal status; its stream stays open until then. In chain
+  // mode only a task bound to a contract task holds money (a plan that hires no agent has books of 0, never on chain).
   // ponytail: a closeTask that keeps failing leaves the stream open until the client goes; the errors still stream.
-  const moving = (t: Task) => chain !== null && chain.contractTaskOf(t.id) !== null && ledger.view(t.id)?.closed === false;
+  const moving = (t: Task) => ledger.view(t.id)?.closed === false && (chain === null || chain.contractTaskOf(t.id) !== null);
   /** The contract's settings, read once from the chain-gateway (null until it answers). */
   let chainCfg: ChainCfg | null = null;
   const contractCfg = async (): Promise<ChainCfg | null> => {
@@ -160,11 +161,18 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
           if (isTerminal(t.status)) return;
           setPlan(t, plan);
           emit(t, 'plan', plan);
+          if (!plan.subtasks.length) {
+            // Every part was dropped: nothing can be approved, so the task ends here, keeping the plan for its drop list.
+            t.error = emptyPlanReason(plan.dropped);
+            emit(t, 'error', { kind: 'no_plan', message: t.error });
+            setStatus(t, 'failed');
+            return;
+          }
           setStatus(t, 'planned');
         } catch (e: any) {
           if (isTerminal(t.status)) return; // killed while planning: stays killed
           t.error = `planner: ${e?.message ?? e}`;
-          emit(t, 'error', { message: t.error });
+          emit(t, 'error', { kind: 'planner', message: t.error });
           setStatus(t, 'failed');
         }
       })();
@@ -296,6 +304,15 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       db?.close();
     },
   };
+}
+
+/** Why a plan with no subtasks can't run, in plain words, from its drop reasons (plan.ts buildPlan). */
+export function emptyPlanReason(dropped: Plan['dropped']): string {
+  const over = dropped.some((d) => d.reason === 'over budget');
+  const none = dropped.some((d) => d.reason !== 'over budget');
+  if (over && none) return 'No agent on the market can do some parts of this task, and the others cost more than this budget allows.';
+  if (over) return 'Every part costs more than this budget allows; try a larger budget.';
+  return 'No agent on the market can do any part of this task.';
 }
 
 /** Contract caps in plan order (self_do subtasks have none), Rook n -> contract n, and the reserve the contract will compute. */
