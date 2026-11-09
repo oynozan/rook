@@ -33,6 +33,7 @@ const PROFILES: Record<string, Profile> = {
   late: { price: '100000', state: 'COMPLETED', text: 'Late but complete', polls: 40, noCancel: true },
 };
 let planGate: Promise<void> = Promise.resolve();
+let planDown = false; // the planner's model is out of reach, as when NEAR AI answered 500
 
 let plan: any;
 const sent: { handle: string; payment: string }[] = [];
@@ -49,6 +50,7 @@ before(async () => {
     'POST /plan': async ({ body }) => {
       planRequests.push(body);
       await planGate;
+      if (planDown) throw new HttpError(502, 'planner LLM failed: NEAR AI 500');
       if (body.prompt === 'go ahead') throw new HttpError(422, 'That reads like a go-ahead.');
       return plan;
     },
@@ -381,7 +383,8 @@ test('a follow-up on a finished task gives the planner the earlier messages and 
   assert.equal((await snap(first.task.id)).task.status, 'closed'); // a finished task stays as it was
   const rows = (await call(`${orch.url}/tasks`)).tasks;
   assert.deepEqual(rows.find((x: any) => x.id === follow.id),
-    { id: follow.id, status: 'planned', prompt: 'Now translate it to Turkish', budget_atomic: '2000000', created_at: follow.created_at, parent_id: first.task.id, has_plan: true });
+    { id: follow.id, status: 'planned', prompt: 'Now translate it to Turkish', budget_atomic: '2000000', created_at: follow.created_at, parent_id: first.task.id, has_plan: true,
+      supersedes: null, superseded_by: null });
   assert.equal(rows.find((x: any) => x.id === first.task.id).parent_id, null);
 
   await call(`${orch.url}/tasks/${follow.id}/approve`, {});
@@ -562,4 +565,86 @@ test('the conversation sent to the planner keeps the first and the newest messag
   assert.ok(Conversation.safeParse(c).success);
   // Short ones go as they are; with no report, there is no report field.
   assert.deepEqual(conversationFor(chain.slice(-2), chain.at(-1)!), { earlier: ['m0', 'm1'], revising: true });
+});
+
+// ---- sending again, editing ----
+
+const as = (owner: string) => ({
+  send: (body: any) => call(`${orch.url}/tasks`, { budget_usdc: '1', owner, ...body }),
+  approve: (id: string) => call(`${orch.url}/tasks/${id}/approve`, { owner }),
+});
+const refusedWith = (status: number, message?: string) => (e: any) => e.status === status && (message === undefined || e.message === message);
+const NEWER = 'This conversation has a newer message: send after the newest one.';
+
+test('a message that failed before it got a plan, sent again, takes its place: it follows the same task, and the failed one is superseded', async () => {
+  const { send } = as('fay.near');
+  plan = holdersPlan();
+  const first = await send({ prompt: 'Holders of NEAR' });
+  planDown = true;
+  const failed = await send({ prompt: 'Make it shorter', parent_id: first.id });
+  planDown = false;
+  assert.deepEqual([failed.status, failed.error], ['failed', 'planner: planner LLM failed: NEAR AI 500']);
+
+  const again = await send({ prompt: 'Make it shorter', supersedes: failed.id });
+  assert.deepEqual([again.status, again.parent_id, again.supersedes, again.edited], ['planned', first.id, failed.id, false]);
+  // It revises the plan above, as the failed one was going to; the failed one stays as it was, superseded.
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Holders of NEAR'], revising: true });
+  assert.deepEqual([(await snap(first.id)).task.status, (await snap(first.id)).task.replaced_by], ['cancelled', again.id]);
+  const was = (await snap(failed.id)).task;
+  assert.deepEqual([was.status, was.superseded_by, was.replaced_by], ['failed', again.id, null]);
+  const rows = (await call(`${orch.url}/tasks?owner=fay.near`)).tasks.filter((x: any) => [failed.id, again.id].includes(x.id));
+  assert.deepEqual(rows.map((x: any) => [x.id, x.parent_id, x.supersedes, x.superseded_by]), [[failed.id, first.id, null, again.id], [again.id, first.id, failed.id, null]]);
+
+  // Once only; and a page that still shows the failed one as the newest sends after the newer one.
+  await assert.rejects(send({ prompt: 'Make it shorter', supersedes: failed.id }), refusedWith(409, 'This message was already edited or sent again.'));
+  await assert.rejects(send({ prompt: 'More', parent_id: failed.id }), refusedWith(409, NEWER));
+  await assert.rejects(send({ prompt: 'More', parent_id: first.id }), refusedWith(409, NEWER));
+  // It keeps its place: a parent_id sent with it must be the one it had.
+  await assert.rejects(send({ prompt: 'x', supersedes: again.id, parent_id: failed.id }), refusedWith(400));
+
+  // A conversation's first message, sent again, starts it again: no conversation for the planner.
+  planDown = true;
+  const root = await send({ prompt: 'Due diligence on Aurora' });
+  planDown = false;
+  const root2 = await send({ prompt: 'Due diligence on Aurora', supersedes: root.id });
+  assert.deepEqual([root2.status, root2.parent_id, root2.supersedes], ['planned', null, root.id]);
+  assert.equal(planRequests.at(-1).conversation, undefined);
+  await call(`${orch.url}/tasks/${root2.id}/cancel`, {});
+  await call(`${orch.url}/tasks/${again.id}/cancel`, {});
+});
+
+test('the newest message can be edited until its plan is approved: its draft stops or its plan is cancelled, and the edit takes its place', async () => {
+  const { send, approve } = as('gil.near');
+  plan = holdersPlan();
+  const first = await send({ prompt: 'Holders of NEAR' });
+  const edited = await send({ prompt: 'Holders of Aurora', budget_usdc: '2', supersedes: first.id });
+  assert.deepEqual([edited.status, edited.parent_id, edited.edited, edited.budget_atomic], ['planned', null, true, '2000000']);
+  const old = (await snap(first.id)).task;
+  assert.deepEqual([old.status, old.superseded_by, old.replaced_by], ['cancelled', edited.id, null]); // superseded, not revised
+  await assert.rejects(approve(first.id), /cancelled/);
+
+  // Still drafting: its planning stops, and the planner's late answer changes nothing.
+  let open!: () => void;
+  planGate = new Promise((ok) => (open = ok));
+  const drafting = await send({ prompt: 'Add the holders', parent_id: edited.id, wait: false });
+  const fixed = await send({ prompt: 'Add the top 10 holders', supersedes: drafting.id, wait: false });
+  assert.deepEqual([fixed.status, fixed.parent_id, fixed.edited], ['draft', edited.id, true]);
+  assert.equal((await snap(drafting.id)).task.status, 'killed');
+  open();
+  planGate = Promise.resolve();
+  await until(async () => (await snap(fixed.id)).task.status === 'planned');
+  assert.deepEqual([(await snap(drafting.id)).task.status, (await snap(drafting.id)).task.superseded_by], ['killed', fixed.id]);
+  // The edit revises the plan the stopped draft was revising.
+  assert.deepEqual([(await snap(edited.id)).task.status, (await snap(edited.id)).task.replaced_by], ['cancelled', fixed.id]);
+
+  // Only the newest message: editing an older one would branch the conversation.
+  const next = await send({ prompt: 'Now in Turkish', parent_id: fixed.id });
+  await assert.rejects(send({ prompt: 'x', supersedes: fixed.id }), refusedWith(409, 'Only the newest message can be edited or sent again.'));
+  // Someone else's message is no message at all; the CLI, naming no owner, can't take an account's message's place.
+  await assert.rejects(as('eve.near').send({ prompt: 'x', supersedes: next.id }), refusedWith(404));
+  await assert.rejects(call(`${orch.url}/tasks`, { prompt: 'x', budget_usdc: '1', supersedes: next.id }), refusedWith(409));
+  // Never once approved: its funding may have moved.
+  await approve(next.id);
+  assert.equal((await ended(next.id)).task.status, 'closed');
+  await assert.rejects(send({ prompt: 'x', supersedes: next.id }), refusedWith(409, "This message's plan was approved, so it can't be changed now. Send a new message instead."));
 });

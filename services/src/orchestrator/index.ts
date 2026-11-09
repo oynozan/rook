@@ -13,6 +13,7 @@ import { openStore } from './db.ts';
 import {
   ancestors, emit, fromDoc, headOf, isFree, isTerminal, newTask, openPlan, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task,
 } from './store.ts';
+import { supersedeRefusal } from './store.ts';
 
 const CreateBody = z.object({
   prompt: z.string().trim().min(1),
@@ -21,6 +22,7 @@ const CreateBody = z.object({
   owner: z.string().min(2).max(64).optional(), // set by the web app from a verified wallet sign-in
   wait: z.boolean().optional(), // false: answer at once with the draft task and plan in the background (progress as events)
   parent_id: z.string().min(1).max(64).optional(), // the conversation's newest task: this message follows it
+  supersedes: z.string().min(1).max(64).optional(), // the newest message, sent again or edited: this one takes its place
 });
 
 /**
@@ -190,9 +192,18 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       if (budget > max) throw new HttpError(400, `budget ${formatUsdc(budget)} USDC is above this Rook's limit of ${formatUsdc(max)} USDC (ROOK_MAX_BUDGET_USDC)`);
       const min = (await contractCfg())?.min_budget ?? 0n;
       if (budget < min) throw new HttpError(400, `budget ${formatUsdc(budget)} USDC is below the contract's minimum of ${formatUsdc(min)} USDC`);
+      // A message sent again or edited takes the place of the newest one: it follows the same task (8.9).
+      const old = b.supersedes === undefined ? null : owned(b.supersedes, b.owner);
+      if (old) {
+        if (b.parent_id !== undefined && b.parent_id !== old.parent_id) throw new HttpError(400, `parent_id must be ${old.parent_id ?? 'left out'}: a message sent again keeps its place`);
+        if (old.owner !== (b.owner ?? null)) throw new HttpError(409, `task ${old.id} has another owner: a message sent again keeps its owner`);
+        const why = supersedeRefusal(old, tasks.values());
+        if (why) throw new HttpError(409, why);
+      }
       // A message in a conversation follows its newest task. Checked after the last await, so two messages sent at once
       // cannot both follow the same task.
-      const parent = b.parent_id === undefined ? null : owned(b.parent_id, b.owner);
+      const parentId = old ? old.parent_id : b.parent_id;
+      const parent = parentId == null ? null : owned(parentId, b.owner);
       const above = parent ? ancestors(parent, tasks) : []; // the parent and the tasks above it, nearest first
       if (parent) {
         if (parent.owner !== (b.owner ?? null)) throw new HttpError(409, `task ${parent.id} has another owner: a follow-up keeps its owner`);
@@ -202,14 +213,23 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         // Chain mode, approved and not funded yet: no run has started, the funding step waits for the wallet.
         if (head.status === 'approved' && chain && !isFree(head) && !chain.contractTaskOf(head.id)) throw new HttpError(409, 'Fund or cancel the plan above before sending more.');
         if (head.status !== 'planned' && !isTerminal(head.status)) throw new HttpError(409, 'Wait for this run to finish, or stop it, before sending more.');
-        if ([...tasks.values()].some((x) => x.parent_id === parent.id)) throw new HttpError(409, 'This conversation has a newer message: send after the newest one.');
+        // A superseded message is no longer the newest: the message that took its place is.
+        const newer = parent.superseded_by || [...tasks.values()].some((x) => x.parent_id === parent.id && x !== old && !x.superseded_by);
+        if (newer) throw new HttpError(409, 'This conversation has a newer message: send after the newest one.');
       }
       const revises = openPlan(above);
       const conversation = parent ? conversationFor(above, revises) : undefined;
       const t = newTask(b.prompt, budget, b.reserve_share ?? 0.2, b.owner ?? null, parent?.id ?? null);
       if (conversation) t.earlier_prompts = conversation.earlier;
+      if (old) Object.assign(t, { supersedes: old.id, edited: t.prompt !== old.prompt || t.budget_atomic !== old.budget_atomic });
       tasks.set(t.id, t);
       saveTask(t);
+      if (old) {
+        old.superseded_by = t.id;
+        if (old.status === 'draft') kill(ledger, old); // its planning stops
+        else if (old.status === 'planned') setStatus(old, 'cancelled');
+        saveTask(old);
+      }
       const planning = (async () => {
         try {
           // A kill during planning aborts the wait. ponytail: the planner does not watch the disconnect, so its LLM
@@ -275,11 +295,15 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     },
 
     // An owner sees only their own tasks; a caller naming no owner (the CLI) sees every task. `has_plan`: it got a plan
-    // with something to run, which tells a failed run from a failed reply in a conversation.
+    // with something to run, which tells a failed run from a failed reply in a conversation. `supersedes` and
+    // `superseded_by` link a message sent again or edited.
     'GET /tasks': ({ query }) => ({
       tasks: [...tasks.values()]
         .filter((t) => !query.has('owner') || t.owner === query.get('owner'))
-        .map(({ id, status, prompt, budget_atomic, created_at, parent_id, subtasks }) => ({ id, status, prompt, budget_atomic, created_at, parent_id, has_plan: subtasks.length > 0 })),
+        .map(({ id, status, prompt, budget_atomic, created_at, parent_id, subtasks, supersedes, superseded_by }) => ({
+          id, status, prompt, budget_atomic, created_at, parent_id, has_plan: subtasks.length > 0,
+          supersedes: supersedes ?? null, superseded_by: superseded_by ?? null,
+        })),
     }),
 
     'GET /tasks/:id': ({ params, query }) => snapshot(owned(params.id, query.get('owner')), ledger),
@@ -299,6 +323,8 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         // Rook never creates the task on chain: the human funds it with the caps they approve, then calls /funded.
         const funding = await fundingInstructions(t, await contractCfg(), !!reprint);
         revising(); // sent while the funding was being read
+        // Cancelled or stopped meanwhile (edited, say): no funding instructions for a plan that can't run.
+        if (t.status !== (reprint ? 'approved' : 'planned')) throw new HttpError(409, `task is ${t.status}, approve needs planned`);
         setStatus(t, 'approved');
         return { ...taskView(t), funding };
       }
