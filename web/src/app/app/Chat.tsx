@@ -17,7 +17,7 @@ import {
 import { explorerTx, NETWORK, rpcFor, type Network } from './network';
 import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary } from './orchestrator';
 import { useMode } from './mode';
-import { allSelfDoWhy, selfDoWhy } from './planner';
+import { allSelfDoWhy, plannerReason, selfDoWhy } from './planner';
 import { useEase } from './useEase';
 import { useWallet, WalletAccountMismatch } from './wallet';
 
@@ -907,15 +907,6 @@ function Activity({ lines, live, caughtUp, closing, outcome, timed }: { lines: F
       </Reveal>
     </div>
   );
-}
-
-/** The planner's error in plain words where we recognise it; otherwise the error itself, which comes from Rook, not an agent. */
-function plannerReason(error: string) {
-  if (/no_limit_configured|No spending limit/i.test(error)) return 'NEAR AI has no credits set up for this API key, so the planner model could not run.';
-  if (/NEAR AI 401|invalid api key|unauthorized/i.test(error)) return 'NEAR AI rejected the API key.';
-  if (/cost guard|LLM_MAX_USD/i.test(error)) return 'The planner reached its spending cap for this session.';
-  if (/market search/i.test(error)) return 'The NEAR AI market could not be reached.';
-  return error.replace(/^planner: /, '');
 }
 
 /** Inline Markdown only: `code`, **bold**, _emphasis_. Report text comes from agents, so it stays plain React text. */
