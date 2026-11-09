@@ -35,7 +35,7 @@ Startup rules (`profileProblems` in `services/src/shared/config.ts`, checked by 
 - The simulation profile refuses a setup with nothing simulated: paying real agents needs `pnpm live`.
 - The live profile needs `ROOK_MARKET=live`, `ROOK_LEDGER=chain`, `ROOK_LLM=near` (set explicitly), `NEAR_NETWORK=mainnet`, `NEAR_RPC_URL`, `ROOK_CONTRACT_ID`, `NEARAI_API_KEY`, `ROOK_SERVICE_TOKEN` (32+ characters) and the role keys (`ROOK_SIGNER_*` for the signer, `ROOK_ORCHESTRATOR_*` for the chain gateway). The simulator does not run in it.
 
-A run is simulated when the market or the ledger is `sim` or the LLM is `canned`; `GET /mode` reports it, `pnpm dev` prints a SIMULATION banner, and clients label such runs "simulation, no money moves".
+A run is simulated when the market or the ledger is `sim` or the LLM is `canned`; `GET /mode` reports it. With the `sim` ledger, `pnpm dev` prints a SIMULATION banner and clients label the run "simulation, no money moves". With `ROOK_LEDGER=chain` money still moves (the funding transfer, sub-account funding, gas), so the banner and clients say "test run on NEAR <network>" and name the simulated parts.
 
 ## 3. Services and ports
 
@@ -322,7 +322,7 @@ Agents come in pairs: a cheap one with a fault and a pricier good one, so cheape
 
 - NEAR AI Cloud, OpenAI-compatible: `POST https://cloud-api.near.ai/v1/chat/completions` with `Authorization: Bearer $NEARAI_API_KEY`.
 - Anthropic models on NEAR AI ignore `response_format` and some reject forced `tool_choice`, so structured output is "reply with one JSON object only", parsed (code fences stripped, first `{` to last `}`), validated with zod, and retried once with the validation error.
-- Models: `PLANNER_MODEL` (default `z-ai/glm-5.3`), `EVALUATOR_MODEL` (default `deepseek-ai/DeepSeek-V4.1-Flash-1017`) and `SIM_AGENT_MODEL` (default `anthropic/claude-haiku-5-5`). Planner and evaluator calls are Rook's evidence, so their defaults are models NEAR AI Cloud lists as verifiable (`GET /v1/model/list`, `metadata.verifiable`); `anthropic/*`, `openai/*` and `google/*` models are not verifiable, so their calls never get `signature_verified: true`. A leading `<think>...</think>` block in a reply is stripped before parsing.
+- Models: `PLANNER_MODEL` (default `z-ai/glm-5.3`), `EVALUATOR_MODEL` (default `deepseek-ai/DeepSeek-V4.1-Flash-1017`) and `SIM_AGENT_MODEL` (default `anthropic/claude-haiku-5-5`). Planner and evaluator calls are Rook's evidence, so their defaults are models NEAR AI Cloud lists as verifiable (`GET /v1/model/list`, `metadata.verifiable`). `anthropic/*`, `openai/*` and `google/*` models are not verifiable: they run on the provider's infrastructure, outside any TEE. Their calls are `gateway`-signed, so they still get `signature_verified: true` when the gateway key is attested, which shows only that NEAR AI's gateway relayed those exact bytes, not that a TEE ran the model (`signature_kind` tells the two apart; docs/model-choice.md). A leading `<think>...</think>` block in a reply is stripped before parsing.
 - Every call's cost is computed from the model price list (`GET /v1/models`, per-token `pricing.prompt` and `pricing.completion`) and added to a rolling 24 h total per process; a call that would start above `ROOK_LLM_MAX_USD` (default 1.00 per process in any 24 h) is refused, with one `[llm] LLM cost guard` log line per trip naming when calls can resume (the window lives in memory, so a restart clears it). Calls in flight count at their worst case (`max_tokens`) until they finish, so concurrent calls cannot overshoot together. The guard fails closed: a price list that cannot be read is fetched again on the next call, and a model missing from it is costed at a high fallback price (10 and 50 USD per million tokens). The account holds 10 USD.
 
 ## 12. Acceptance checks
@@ -346,7 +346,7 @@ These are the "do X, see Y" checks for real-time testing. Commands assume `pnpm 
 
 1. The plan is written by the LLM: 3 to 5 subtasks, every criterion valid, `numeric_match` bounds are sanity ranges, at least one script-checkable criterion per subtask, candidates only from the simulator catalogue, caps fit within 80% of the budget.
 2. The faulty agents are caught as in A (the exact criterion that fails a wrong-numbers deliverable may differ, but it fails).
-3. Every evaluation lists its `llm_calls` with `signature_verified: true`.
+3. Every evaluation lists its `llm_calls` with `signature_verified: true` (with the default models; a non-verifiable `EVALUATOR_MODEL` passes this too, on the gateway's signature alone).
 4. The final report is coherent and attributes each section.
 5. The run costs under 0.25 USD of NEAR AI credit (printed by the CLI: the task's planner and evaluator calls, plus the simulated agents' calls read from the simulator's `/llm-cost`).
 

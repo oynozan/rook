@@ -135,6 +135,28 @@ test('attest: GPU evidence NRAS rejects means not attested; an unreachable check
   assert.equal((await attestorWith(stubFetch({ report: () => jsonRes(noGpu) }).f).attest('provider_tee', MODEL, TEE_ADDR)).attested, false);
 });
 
+test('attest: a failed refresh keeps the evidence held so far, so a signer found unattested never turns unknown', async (t) => {
+  let down = false;
+  const { f } = stubFetch({ report: () => { if (down) throw new Error('ECONNRESET'); return jsonRes({ gateway_attestation: REPORT.gateway_attestation }); } });
+  const start = Date.now();
+  t.mock.timers.enable({ apis: ['Date'], now: start });
+  const a = attestorWith(f);
+  assert.equal((await a.attest('gateway', MODEL, GW_ADDR)).attested, true);
+  t.mock.timers.setTime(start + 61_000); // the evidence is over a minute old: a signer missing from it triggers a refresh
+  down = true;
+  assert.equal((await a.attest('gateway', MODEL, TEE_ADDR)).attested, false); // that refresh fails
+  assert.equal((await a.attest('gateway', MODEL, TEE_ADDR)).attested, false, 'still not attested, not null');
+  const gw = await a.attest('gateway', MODEL, GW_ADDR);
+  assert.equal(gw.attested, true, 'the gateway key keeps its evidence');
+  assert.equal(gw.attestation_checked_at, new Date(start).toISOString());
+});
+
+test('attest: several verified reports naming one key (instances of a model share it) are one attested signer', async () => {
+  const two = clone(REPORT);
+  two.model_attestations.push(clone(REPORT.model_attestations[0]));
+  assert.equal((await attestorWith(stubFetch({ report: () => jsonRes(two) }).f).attest('provider_tee', MODEL, TEE_ADDR)).attested, true);
+});
+
 const callFor = (k: keyof typeof VEC): any => ({
   purpose: 't', model: VEC[k].model, chat_id: 'chat-1', request_sha256: VEC[k].req, response_sha256: VEC[k].res, input_tokens: 0, output_tokens: 0, cost_usd: 0,
   signature: null, signing_address: null, signing_algo: null, signature_kind: null, signature_verified: false, signer_recovered: false, attested: null, attestation_checked_at: null,

@@ -46,7 +46,7 @@ pnpm web                        # http://localhost:7110 (landing page), http://l
 
 ## Modes
 
-`pnpm dev` is the simulation profile; `pnpm live` is the real one. Every client can ask the orchestrator `GET /mode` (`{market, llm, ledger, network, contract_id, usdc, paying, simulated}`) and shows "simulation, no money moves" whenever `simulated` is true.
+`pnpm dev` is the simulation profile; `pnpm live` is the real one. Every client can ask the orchestrator `GET /mode` (`{market, llm, ledger, network, contract_id, usdc, paying, simulated}`) and shows "simulation, no money moves" whenever `simulated` is true and the ledger is `sim`; with `ROOK_LEDGER=chain` a simulated part makes it a test run on that NEAR network, where funding still moves tokens.
 
 | | `pnpm dev` (simulation profile) | `pnpm live` (real) |
 | --- | --- | --- |
@@ -54,7 +54,7 @@ pnpm web                        # http://localhost:7110 (landing page), http://l
 | LLM `ROOK_LLM` | `canned` (default without `NEARAI_API_KEY`): fixed answers, no calls; `near`: NEAR AI Cloud | `near`, set explicitly |
 | Ledger `ROOK_LEDGER` | `sim` (default): in memory; `chain`: budget contract on testnet, with the simulated market | `chain` on `NEAR_NETWORK=mainnet` |
 | Refuses to start | `ROOK_LLM=canned` unless market and ledger are both `sim`; `ROOK_MARKET=live` with `ROOK_LEDGER=chain` off mainnet; any setup that pays real agents (use `pnpm live`) | any variable or key in the list below missing |
-| Banner | `SIMULATION: no real money moves` | `LIVE: real Agent Market agents paid in USDC on NEAR mainnet` |
+| Banner | `SIMULATION: no real money moves` (`TEST RUN on NEAR <network>` with `ROOK_LEDGER=chain`) | `LIVE: real Agent Market agents paid in USDC on NEAR mainnet` |
 
 Other useful setups: `ROOK_LLM=near pnpm dev` (real planner and evaluator against the simulator, about 0.10 USD of NEAR AI credit per run; put `NEARAI_API_KEY=...` in `.env` at the repo root) and `ROOK_MARKET=live ROOK_LLM=near pnpm dev` (real agents and prices for planning; approving is refused because the ledger is simulated). Each process stops calling the LLM after `ROOK_LLM_MAX_USD` (default 1) in any 24 h, and logs when it trips.
 

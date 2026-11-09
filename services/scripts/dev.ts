@@ -46,11 +46,16 @@ console.log(`rook ${config.profile === 'live' ? 'live' : 'dev'}: market=${config
     config.ledger === 'sim' && 'ledger: in memory, no NEAR transactions, no USDC',
     config.llm === 'canned' && 'LLM: canned answers, no NEAR AI calls',
   ].filter(Boolean) as string[];
-  const lines = sim.length
-    ? ['SIMULATION: no real money moves.', ...sim.map((s) => `  simulated ${s}`), 'Real mode: pnpm live (README, "Running for real").']
-    : [`LIVE: real Agent Market agents paid in USDC on NEAR ${config.nearNetwork}, contract ${config.contractId}.`, 'Every approved plan spends real money.'];
+  // With the chain ledger something real still moves (the funding transfer, sub-accounts, gas), simulated parts or not.
+  const money = config.nearNetwork === 'mainnet' ? 'real USDC and NEAR' : 'testnet USDC and NEAR';
+  const lines = !sim.length
+    ? [`LIVE: real Agent Market agents paid in USDC on NEAR ${config.nearNetwork}, contract ${config.contractId}.`, 'Every approved plan spends real money.']
+    : config.ledger === 'chain'
+      ? [`TEST RUN on NEAR ${config.nearNetwork}: funding a plan moves ${money}, contract ${config.contractId}.`, ...sim.map((s) => `  simulated ${s}`)]
+      : ['SIMULATION: no real money moves.', ...sim.map((s) => `  simulated ${s}`), 'Real mode: pnpm live (README, "Running for real").'];
   const w = Math.max(...lines.map((l) => l.length)) + 4, bar = '#'.repeat(w);
-  const paint = (s: string) => (color ? `\x1b[1;${sim.length ? '30;43' : '97;41'}m${s}\x1b[0m` : s);
+  const real = !sim.length || (config.ledger === 'chain' && config.nearNetwork === 'mainnet');
+  const paint = (s: string) => (color ? `\x1b[1;${real ? '97;41' : '30;43'}m${s}\x1b[0m` : s);
   for (const l of [bar, ...lines.map((l) => `# ${l.padEnd(w - 4)} #`), bar]) console.log(paint(l));
 }
 if (config.ledger === 'chain') {

@@ -29,7 +29,7 @@ const sub = (cid: string, n: number) => contract.get(cid)!.subs.find((s) => s.n 
 let authTtlMs = 60_000;
 
 // ---- the fake market: an agent's A2A task stays WORKING until a test moves it ----
-const PRICE: Record<string, string> = { slowpoke: '300000', stubborn: '100000' };
+const PRICE: Record<string, string> = { slowpoke: '300000', stubborn: '100000', hangs: '100000', alpha: '100000', beta: '100000' };
 const X402 = { network: 'near:testnet', asset: 'usdc.test', payTo: 'treasury.test' };
 const row = (amount: string) => ({ scheme: 'exact', ...X402, amount, maxTimeoutSeconds: 60 });
 const a2a = new Map<string, { handle: string; state: string }>();
@@ -51,7 +51,7 @@ before(async () => {
       if (!out) return { cleared: false, outstanding: false };
       if (!out.landed && !body.terminal_unpaid && Date.now() <= out.until) throw new HttpError(409, 'still valid');
       auths.delete(a);
-      calls.push(`expire ${a} landed=${out.landed}`);
+      calls.push(`expire ${a} landed=${out.landed}${body.terminal_unpaid ? ' terminal' : ''}`);
       return { cleared: true, landed: out.landed };
     },
     'POST /return': ({ body }) => {
@@ -100,10 +100,11 @@ before(async () => {
   servers.push(await serve('fake-market-gateway', {
     'GET /x402': () => ({ x402Version: 2, recipients: [X402] }),
     'POST /quote': ({ body }) => ({ ok: true, row: row(PRICE[body.handle]) }),
-    'POST /send': ({ body }) => {
+    'POST /send': async ({ body }) => {
       const id = `a2a-${a2a.size + 1}`;
       a2a.set(id, { handle: body.handle, state: 'WORKING' });
       calls.push(`send ${body.handle} ${id}`);
+      if (body.handle === 'hangs') await new Promise(() => {}); // holds the connection, as a short window does; never answers
       return { ok: true, task: { id, context_id: 'ctx', state: 'WORKING', artifacts: [] } };
     },
     'GET /task': ({ query }) => {
@@ -251,5 +252,99 @@ test('a killed task with money still on chain is unwound when the services start
     assert.equal(s.task.status, 'killed');
     assert.ok(calls.includes(`return ${acct('c', 1)} 250000`) && calls.includes('close c'));
     assert.deepEqual([s.ledger.spent_atomic, s.ledger.refunded_atomic, s.subtasks[0].status], ['50000', '950000', 'returned']);
+  } finally { await orch.close(); }
+});
+
+const cand = (handle: string) => ({ handle, name: handle, description: handle, sla_seconds: 60, success_rate: null, delivered_jobs: 0, price_atomic: PRICE[handle], quote: row(PRICE[handle]) });
+/** A task as the orchestrator stores it, for the next start to load: one subtask, bound to contract task `cid`. */
+function storeTask(id: string, status: string, cid: string, sub: object, auths: object, balance: string) {
+  const ts = new Date().toISOString();
+  const store = openStore(process.env.ROOK_DB!);
+  store.save({
+    id, prompt: 'p', budget_atomic: '1000000', reserve_share: 0.2, funder: 'owner.test', owner: null, status: status as any, error: null,
+    created_at: ts, updated_at: ts, plan: null, receipts: [], events: [], final_result: null, llm_calls: [],
+    subtasks: [{
+      id: 's1', title: 'Holders', brief: 'Holders\nPlease report.', search_terms: [], deadline_s: 60, self_do: false, cap_atomic: '0', candidates: [],
+      criteria: [{ id: 'c1', kind: 'contains', description: 'x', spec: { pattern: '.' } }],
+      n: 1, status: 'working', final_outcome: null, rehire_count: 0, tried: [], hires: [], evaluations: [], accepted: null, ...sub,
+    } as any],
+    chain: { contract_task_id: cid, nmap: { 1: 1 }, accounts: { 1: acct(cid, 1) }, auths: auths as any },
+    ledger_saved: { closed: false, subtasks: [{ n: 1, balance_atomic: balance }] },
+  });
+  store.close();
+}
+
+test('restart while /send is out: the hire was saved before it, so its landed payment gets a receipt and the task closes', async () => {
+  process.env.ROOK_DB = join(dir, 'sending.sqlite');
+  let orch = await start(0);
+  const t = await call(`${orch.url}/tasks`, { prompt: 'hangs', budget_usdc: '1' });
+  await call(`${orch.url}/tasks/${t.id}/approve`, {});
+  openContractTask('d', [PRICE.hangs]);
+  await call(`${orch.url}/tasks/${t.id}/funded`, { contract_task_id: 'd' });
+  await until(async () => calls.some((c) => c.startsWith('send hangs')));
+  await orch.close(); // the services stop while /send, and with it the payment header, is out
+
+  // While Rook is down the agent delivers and its payment settles; Rook never learned its A2A task id.
+  const account = acct('d', 1);
+  auths.get(account)!.landed = true;
+  bal.set(account, 0n);
+
+  orch = await start(0);
+  try {
+    const s = await until(async () => { const x = await snap(orch, t.id); return ['closed', 'failed'].includes(x.task.status) ? x : false; });
+    assert.equal(s.task.status, 'closed', s.task.error);
+    assert.equal(calls.filter((c) => c.startsWith(`sign ${account}`)).length, 1);
+    assert.deepEqual(s.subtasks[0].hires.map((h: any) => [h.agent_handle, h.paid, h.state]), [['hangs', true, 'OUTCOME_UNKNOWN']]);
+    assert.deepEqual(s.receipts.map((r: any) => [r.agent_handle, r.amount_atomic, r.verdict]), [['hangs', '100000', null]]);
+    assert.deepEqual([s.ledger.spent_atomic, s.ledger.refunded_atomic], ['100000', '900000']);
+  } finally { await orch.close(); }
+});
+
+test('after a restart an older unpaid hire never stands in for an outstanding authorization it was not signed for', async () => {
+  process.env.ROOK_DB = join(dir, 'orphan.sqlite');
+  const account = acct('e', 1);
+  openContractTask('e', ['200000']);
+  contract.get('e')!.subs.push({ n: 1, account_id: account, cap: '200000', topped_up: '0', returned: '0', status: 'Funded', attempt: 0, pending_top_up: '0' });
+  bal.set(account, 200_000n);
+  // alpha FAILED unpaid earlier; beta was then authorized, and the services stopped before beta's hire was stored.
+  a2a.set('a2a-alpha', { handle: 'alpha', state: 'FAILED' });
+  auths.set(account, { amount: 100_000n, landed: false, until: Date.now() + 400 });
+  const ts = new Date().toISOString();
+  const alpha = {
+    id: 'h_alpha', subtask_id: 's1', agent_handle: 'alpha', amount_atomic: '100000', payment_hash: 'ph-alpha', a2a_task_id: 'a2a-alpha', context_id: 'ctx',
+    state: 'FAILED', paid: false, deliverable_text: null, parts: [], verdict: null, started_at: ts, ended_at: ts, pay_to: X402.payTo, expires_at: ts,
+  };
+  storeTask('t_orphan', 'running', 'e', { cap_atomic: '200000', candidates: [cand('alpha'), cand('beta')], tried: ['alpha', 'beta'], hires: [alpha] },
+    { 1: { payment_hash: `ph-${account}`, amount: '100000', expires_at_block: 1, nonce: '1' } }, '200000');
+  const orch = await start(0);
+  try {
+    // beta's authorization is waited out, never cleared as if it were alpha's; only then is beta signed for again.
+    const [id] = await until(async () => [...a2a].find(([, v]) => v.handle === 'beta'));
+    auths.get(account)!.landed = true;
+    bal.set(account, 100_000n);
+    a2a.get(id)!.state = 'COMPLETED';
+    const s = await until(async () => { const x = await snap(orch, 't_orphan'); return ['closed', 'failed'].includes(x.task.status) ? x : false; });
+    assert.equal(s.task.status, 'closed', s.task.error);
+    assert.ok(!calls.some((c) => c.startsWith(`expire ${account}`) && c.endsWith('terminal')), calls.join('\n'));
+    assert.equal(calls.filter((c) => c.startsWith(`sign ${account}`)).length, 1);
+    assert.ok(calls.indexOf(`expire ${account} landed=false`) < calls.indexOf(`sign ${account} 100000`));
+    assert.deepEqual(s.receipts.map((r: any) => [r.agent_handle, r.amount_atomic, r.verdict]), [['beta', '100000', 'pass']]);
+    assert.deepEqual([s.ledger.spent_atomic, s.ledger.refunded_atomic], ['100000', '900000']);
+  } finally { await orch.close(); }
+});
+
+test('a killed task the owner closed on chain with a sub-account still Funded: Rook returns it and closes the task again', async () => {
+  process.env.ROOK_DB = join(dir, 'owner-closed.sqlite');
+  const account = acct('g', 1);
+  openContractTask('g', ['300000']);
+  Object.assign(contract.get('g')!.task, { status: 'Closed', killed: true }); // the owner's kill_task, then close_task
+  contract.get('g')!.subs.push({ n: 1, account_id: account, cap: '300000', topped_up: '0', returned: '0', status: 'Funded', attempt: 0, pending_top_up: '0' });
+  bal.set(account, 200_000n); // 100 000 was paid before the kill
+  storeTask('t_owner_closed', 'killed', 'g', { cap_atomic: '300000' }, {}, '200000');
+  const orch = await start(0);
+  try {
+    const s = await until(async () => { const x = await snap(orch, 't_owner_closed'); return x.ledger?.closed ? x : false; });
+    assert.ok(calls.includes(`return ${account} 200000`) && calls.includes('close g'));
+    assert.deepEqual([s.task.status, s.ledger.spent_atomic, sub('g', 1).status, contract.get('g')!.task.status], ['killed', '100000', 'Returned', 'Closed']);
   } finally { await orch.close(); }
 });

@@ -88,8 +88,10 @@ export type Report = {
 /**
  * Throws unless one NEAR-operated report is genuine (verifyQuote), not a debug TD, and binds its ECDSA signing address
  * and our nonce in the quote's report data, with the measured config (MRCONFIGID) and runtime log (RTMR3) consistent.
- * ponytail: the measurements are checked for consistency, not against an allowlist of NEAR's images and compose hashes,
- * so any software NEAR runs in a TDX VM with that key counts. Upgrade: pin `compose_hash` / `os_image_hash` per release.
+ * ponytail: only MRCONFIGID (against app_compose) and RTMR3 (against the event log) are read; MRTD, RTMR0-2,
+ * tcb_info.mrtd and os_image_hash are not, and nothing is pinned to known values. So any non-debug TDX VM on genuine
+ * Intel hardware (a rented cloud TDX VM included, with any firmware or kernel) whose report the endpoint serves counts.
+ * Upgrade: pin MRTD, RTMR0-2 / `os_image_hash` and `compose_hash` per NEAR release.
  */
 export function checkReport(r: Report, nonce: string, now = new Date()): void {
   const td = verifyQuote(r.intel_quote, now);
@@ -183,16 +185,23 @@ export function createAttestor(deps: AttestDeps) {
     if (hit && !(refresh && Date.now() - hit.at > RETRY_MS)) return hit.p;
     const p = load(source || null);
     const entry = { at: Date.now(), p };
+    if (hit) {
+      // A refresh: the evidence held so far stays until the new evidence is in (a failed refresh changes nothing), and
+      // the next refresh waits RETRY_MS either way.
+      hit.at = entry.at;
+      p.then(() => { const cur = cache.get(source); if (!cur || cur === hit) cache.set(source, entry); }, () => {});
+      return p;
+    }
     cache.set(source, entry);
     p.catch(() => { setTimeout(() => { if (cache.get(source) === entry) cache.delete(source); }, RETRY_MS).unref?.(); });
     return p;
   }
 
-  // NEAR: the signer must match exactly one retained verified report; none or several is unverified.
+  // NEAR: the signer must match a retained verified report. Instances of a model share one key, so several verified
+  // reports naming it are still that one signer; none verified is unverified.
   const decide = (ev: Evidence, address: string): boolean | null => {
     const same = ev.reports.filter((r) => r.address === address.toLowerCase() && r.algo === 'ecdsa');
-    const ok = same.filter((r) => r.ok === true).length;
-    return ok === 1 ? true : ok === 0 && same.some((r) => r.ok === null) ? null : false;
+    return same.some((r) => r.ok === true) ? true : same.some((r) => r.ok === null) ? null : false;
   };
 
   return {

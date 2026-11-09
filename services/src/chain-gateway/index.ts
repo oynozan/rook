@@ -47,11 +47,23 @@ function indexerGet(path: string): Promise<any> {
   return p;
 }
 
-/** `account`'s transfer of exactly `amount` of `token` to `to`, at or after `afterNs`, as NearBlocks indexed it. */
-async function findTransfer(account: string, to: string, amount: string, token: string, afterNs: bigint) {
-  const j = await indexerGet(`/v3/accounts/${encodeURIComponent(account)}/ft-txns?limit=25`);
-  const hit = (Array.isArray(j?.data) ? j.data : []).find((x: any) => x.affected_account_id === account && x.involved_account_id === to
-    && x.delta_amount === `-${amount}` && x.contract_account_id === token && BigInt(x.block_timestamp ?? 0) >= afterNs);
+const LIMIT = 25;
+/**
+ * `account`'s transfer of exactly `amount` of `token` to `to`, as NearBlocks indexed it. With `index`: the account's
+ * index-th transfer of `token` to `to` (any amount, oldest first), which must be of `amount`; one sub-account pays one
+ * treasury once per paid hire, so a re-hire at the same price is never matched with another hire's transfer. Without
+ * it: the newest such transfer at or after `afterNs`.
+ */
+async function findTransfer(account: string, to: string, amount: string, token: string, afterNs: bigint, index: number | null) {
+  const j = await indexerGet(`/v3/accounts/${encodeURIComponent(account)}/ft-txns?limit=${LIMIT}`);
+  const rows: any[] = Array.isArray(j?.data) ? j.data : [];
+  const sent = rows.filter((x) => x.affected_account_id === account && x.involved_account_id === to && x.contract_account_id === token && String(x.delta_amount).startsWith('-'));
+  let hit: any;
+  if (index === null) hit = sent.find((x) => x.delta_amount === `-${amount}` && BigInt(x.block_timestamp ?? 0) >= afterNs);
+  else if (rows.length < LIMIT) { // ponytail: a full page may have cut older transfers, so it is not counted
+    const nth = sent.sort((a, b) => (BigInt(a.block_timestamp ?? 0) < BigInt(b.block_timestamp ?? 0) ? -1 : 1))[index];
+    hit = nth?.delta_amount === `-${amount}` ? nth : undefined;
+  }
   return hit ? { tx_hash: String(hit.transaction_hash), receipt_id: hit.receipt_id ?? null, block_timestamp: String(hit.block_timestamp) } : null;
 }
 
@@ -99,12 +111,17 @@ export async function start(port = config.ports.chainGateway): Promise<Running> 
       return { account: acct, token, balance: (await ftBalance(token, acct)).toString() };
     },
     /**
-     * A hire's settled x402 payment: `account`'s USDC transfer of `amount` to `to` (payTo) at or after `after` (ISO
-     * time or epoch ms). Indexers lag, so it looks ROOK_PAYMENT_LOOKUP_TRIES times (6), ROOK_PAYMENT_LOOKUP_MS (10 s) apart.
+     * A hire's settled x402 payment: `account`'s USDC transfer of `amount` to `to` (payTo), the `index`-th such transfer
+     * from the account (the orchestrator counts its earlier paid hires), or without `index` the newest at or after
+     * `after` (ISO time or epoch ms). Indexers lag, so it looks ROOK_PAYMENT_LOOKUP_TRIES times (6),
+     * ROOK_PAYMENT_LOOKUP_MS (10 s) apart.
      */
     'GET /payment': async ({ query }) => {
       const acct = str(query.get('account'), 'account'), to = str(query.get('to'), 'to'), amount = str(query.get('amount'), 'amount');
       if (!/^\d+$/.test(amount)) throw new HttpError(400, 'amount must be an integer string');
+      const ix = query.get('index');
+      if (ix !== null && !/^\d+$/.test(ix)) throw new HttpError(400, 'index must be a non-negative integer');
+      const index = ix === null ? null : Number(ix);
       const a = query.get('after') ?? '0', ms = /^\d+$/.test(a) ? Number(a) : Date.parse(a);
       if (!Number.isFinite(ms)) throw new HttpError(400, 'after must be an ISO time or epoch milliseconds');
       const afterNs = BigInt(Math.max(0, ms - 120_000)) * 1_000_000n; // allows 2 minutes of clock skew between Rook and the chain
@@ -113,7 +130,7 @@ export async function start(port = config.ports.chainGateway): Promise<Running> 
       let error: string | null = null;
       for (let i = 1; ; i++) {
         try {
-          const hit = await findTransfer(acct, to, amount, token, afterNs);
+          const hit = await findTransfer(acct, to, amount, token, afterNs, index);
           if (hit) return { found: true, ...hit, explorer_url: explorerTx(hit.tx_hash), source: 'nearblocks-v3' };
           error = null;
         } catch (e: any) { error = e?.message ?? String(e); }

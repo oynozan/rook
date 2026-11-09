@@ -1,6 +1,7 @@
 // Real-mode profile (pnpm live), service token, /mode and request limits. Offline: fake planner, no network.
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
+import { request } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import { after, before, test } from 'node:test';
@@ -122,6 +123,26 @@ test('ROOK_SERVICE_TOKEN: every orchestrator route needs x-rook-token; /mode has
   assert.deepEqual(m.body, { market: 'sim', llm: 'canned', ledger: 'sim', network: 'sim', contract_id: null, usdc: null, paying: false, simulated: true });
 });
 
+test('every service refuses browsers: an Origin or Sec-Fetch-Site header, a Host that is not loopback, a body that is not JSON', async () => {
+  let kills = 0;
+  const svc = await serve('probe', { 'POST /kill': () => (kills++, { killed: true }), 'GET /ok': () => ({ ok: true }) }, 0);
+  servers.push(svc);
+  const send = (path: string, headers: Record<string, string>, body?: string) => new Promise<number>((ok, fail) => {
+    const r = request(svc.url + path, { method: body === undefined ? 'GET' : 'POST', headers }, (res) => { res.resume(); ok(res.statusCode!); });
+    r.on('error', fail);
+    r.end(body);
+  });
+  const json = { 'content-type': 'application/json' };
+  assert.equal(await send('/kill', { ...json, origin: 'https://evil.example' }, '{}'), 403);
+  assert.equal(await send('/kill', { 'sec-fetch-site': 'cross-site' }, ''), 403); // a no-cors POST with no body
+  assert.equal(await send('/kill', { 'content-type': 'text/plain' }, '{}'), 415); // a CORS "simple" request
+  assert.equal(await send('/ok', { host: `evil.example:${svc.port}` }), 403); // DNS rebinding: the page's own host name
+  assert.equal(kills, 0);
+  assert.equal(await send('/kill', json, '{}'), 200);
+  assert.equal(await send('/ok', { host: `localhost:${svc.port}` }), 200);
+  assert.equal(kills, 1);
+});
+
 test('request limits: prompt at most 4000 characters, budget at most ROOK_MAX_BUDGET_USDC (default 50)', async () => {
   const long = await req('/tasks', { prompt: 'x'.repeat(4001), budget_usdc: '1' });
   assert.equal(long.status, 400);
@@ -137,7 +158,7 @@ test('request limits: prompt at most 4000 characters, budget at most ROOK_MAX_BU
   // The planner checks the same limits before any LLM call.
   const p = await planner.start(0);
   servers.push(p);
-  const plan = (body: object) => fetch(`${p.url}/plan`, { method: 'POST', body: JSON.stringify({ task_id: 't', reserve_share: 0.2, ...body }) });
+  const plan = (body: object) => fetch(`${p.url}/plan`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ task_id: 't', reserve_share: 0.2, ...body }) });
   const r1 = await plan({ prompt: 'x'.repeat(4001), budget_atomic: '1000000' });
   assert.equal(r1.status, 400);
   assert.match((await r1.json()).error, /limit is 4000/);

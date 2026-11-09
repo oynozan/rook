@@ -19,6 +19,21 @@ export type Routes = Record<string, Handler>; // key: "GET /tasks/:id"
 
 export type Running = { url: string; port: number; close: () => Promise<void> };
 
+const LOCAL_HOSTS = new Set(['127.0.0.1', 'localhost', '[::1]']);
+
+/**
+ * Rook's services answer other Rook processes (the web app's server and the CLI among them), never a browser: a page
+ * open in the operator's browser could otherwise reach these localhost services, some holding keys, with a cross-site
+ * "simple" request or by DNS rebinding. Browsers send Origin or Sec-Fetch-Site and the page's own Host; Node's fetch
+ * sends neither and names the loopback host. A body must be JSON, which no simple request can send.
+ */
+function refuseBrowser(req: IncomingMessage) {
+  const host = String(req.headers.host ?? '').replace(/:\d+$/, '').toLowerCase();
+  if (req.headers.origin !== undefined || req.headers['sec-fetch-site'] !== undefined || !LOCAL_HOSTS.has(host)) {
+    throw new HttpError(403, 'Rook services accept requests from local Rook processes only, not from a browser');
+  }
+}
+
 export function serve(name: string, routes: Routes, port: number): Promise<Running> {
   const table = Object.entries(routes).map(([key, handler]) => {
     const [method, path] = key.split(' ');
@@ -30,6 +45,7 @@ export function serve(name: string, routes: Routes, port: number): Promise<Runni
   const server = createServer(async (req, res) => {
     const u = new URL(req.url ?? '/', 'http://x');
     try {
+      refuseBrowser(req);
       const route = table.find((r) => r.method === req.method && r.re.test(u.pathname));
       if (!route) throw new HttpError(404, `no route ${req.method} ${u.pathname}`);
       const m = u.pathname.match(route.re)!;
@@ -37,6 +53,7 @@ export function serve(name: string, routes: Routes, port: number): Promise<Runni
       let body: any = undefined;
       if (req.method !== 'GET') {
         const raw = await readBody(req);
+        if (raw && !/^application\/json\b/i.test(String(req.headers['content-type'] ?? ''))) throw new HttpError(415, 'the body must be application/json');
         try { body = raw ? JSON.parse(raw) : {}; } catch { throw new HttpError(400, 'invalid JSON body'); }
       }
       const out = await route.handler({ params, query: u.searchParams, body, req, res });

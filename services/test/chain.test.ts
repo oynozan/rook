@@ -363,6 +363,14 @@ test('chain ledger: a fund_subtask that errors but is Funded on chain counts; a 
   balance = '500';
   assert.equal(await l.settle('T', 1), 100n);
   assert.deepEqual([l.view('T')!.spent_atomic, l.view('T')!.subtasks[0].balance_atomic], [500n, 500n]);
+  // The delegate ran (the signer saw its nonce), but its ft_transfer lands a block later: the balance is read again.
+  await pay('100');
+  setTimeout(() => { balance = '400'; }, 150);
+  assert.equal(await l.settle('T', 1), 100n);
+  await pay('100');
+  setTimeout(() => { balance = '300'; }, 150);
+  assert.deepEqual(await l.release('T', 1, 'terminal'), { amount: 100n, settled: true });
+  assert.deepEqual([l.view('T')!.spent_atomic, l.view('T')!.subtasks[0].balance_atomic], [700n, 300n]);
 });
 
 test('orchestrator, ROOK_LEDGER=chain: approve gives funding instructions, /funded checks the contract task, run, close', async () => {
