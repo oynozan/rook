@@ -314,15 +314,41 @@ test('an agent whose price fits is hired even when the full cap does not fit; fa
   assert.equal(alone.budget.reserve_atomic, '200000');
 
   // With 'b' too, both are hired at their price first. 'dear' ranks first in 'b' but 0.90 is more than the 0.30 left,
-  // so it is dropped and 'fits' is hired. 'a' keeps no fallback: 0.90 > its 0.50 cap + the 0.25 reserve.
+  // so 'fits' is hired and 'dear' follows it, until the prune finds 0.90 > its 0.25 cap + the 0.25 reserve. 'a' keeps
+  // no fallback either: 0.90 > its 0.50 cap + the 0.25 reserve.
   const both = buildPlan(input({ budget_atomic: 1_000_000n, draft: [a, b], selected: [selected.a, selected.b], quotes }));
   assert.deepEqual(shape(both), [['a', false, '500000', ['half']], ['b', false, '250000', ['fits']]]);
   assert.deepEqual([both.budget.allocated_atomic, both.budget.reserve_atomic], ['750000', '250000']);
-  assert.ok(both.notes.includes('"b": candidate dear dropped, price 900000 exceeds the 300000 left to allocate'), both.notes.join('\n'));
+  assert.ok(both.notes.includes('"b": candidate dear moved after fits, price 900000 exceeds the 300000 left to allocate'), both.notes.join('\n'));
+  assert.ok(both.notes.includes('"b": candidate dear dropped, price 900000 exceeds cap + reserve'), both.notes.join('\n'));
 
   // No agent's price fits: self_do, and the reason says it is the budget, not the market.
   const over = buildPlan(input({ budget_atomic: 1_000_000n, draft: [a, b], selected: [[agent('x')], [agent('y')]], quotes: { x: row('600000'), y: row('300000') } }));
   assert.deepEqual(over.subtasks.map((s) => [s.title, s.self_do, s.self_do_reason ?? null]), [['a', false, null], ['b', true, 'over_budget']]);
+});
+
+test('a better agent the budget cannot take as the first hire stays as a fallback the reserve can pay', () => {
+  // Seen in review: 'good' was dropped for costing more than the 0.80 left, so 0.90 sat idle in the reserve while the
+  // subtask hung on 'poor' (5% pass rate) alone, and was abandoned when 'poor' failed.
+  const plan = (goodPrice: string) => buildPlan(input({
+    budget_atomic: 1_000_000n,
+    draft: [sub('a')],
+    selected: [[agent('good', { success_rate: 100, delivered_jobs: 200 }), agent('poor', { success_rate: 5, delivered_jobs: 200 })]],
+    quotes: { good: row(goodPrice), poor: row('50000') },
+  }));
+  const p = plan('850000');
+  const [first, next] = p.subtasks[0].candidates;
+  assert.deepEqual([first.handle, next.handle], ['poor', 'good']); // poor is hired first: it fits the 0.80
+  assert.ok(BigInt(next.expected_cost_atomic) < BigInt(first.expected_cost_atomic)); // though good ranks better
+  assert.deepEqual([p.subtasks[0].cap_atomic, p.budget.reserve_atomic], ['100000', '900000']); // 0.05 + 0.80 top-up pays good
+  assert.ok(p.notes.includes('"a": candidate good moved after poor, price 850000 exceeds the 800000 left to allocate'), p.notes.join('\n'));
+  assert.ok(!p.notes.some((n) => n.includes('good dropped')));
+
+  // One that cap + the whole reserve can never pay is still dropped, and the cap sized for it shrinks back.
+  const never = plan('1500000');
+  assert.deepEqual(never.subtasks[0].candidates.map((c) => c.handle), ['poor']);
+  assert.deepEqual([never.subtasks[0].cap_atomic, never.budget.reserve_atomic], ['50000', '900000']);
+  assert.ok(never.notes.includes('"a": candidate good dropped, price 1500000 exceeds cap + reserve'), never.notes.join('\n'));
 });
 
 test('a cap is never sized for a fallback that is then dropped: the freed money hires the next subtask', () => {
@@ -404,7 +430,7 @@ test('caps never fall below the first-ranked price, and the drop rule follows ra
 
   // Sweep: whatever the prices and records, the lead is the first-ranked agent whose price fits the allocatable budget
   // (16.00 of 20.00) and is never dropped, lead price <= cap <= 2 x lead price, the cap covers nothing more than the
-  // kept candidates need, and the kept ones are the ranking from the lead on minus those above cap + reserve.
+  // kept candidates need, and the kept ones are the lead, then the rest in rank order, minus those above cap + reserve.
   let seed = 7;
   const rnd = (n: number) => (seed = (seed * 48271) % 2147483647) % n;
   const fallbackCap = (ps: bigint[]) => { const [f, s = f] = ps, both = s > f ? s : f; return both < 2n * f ? both : 2n * f; };
@@ -422,7 +448,8 @@ test('caps never fall below the first-ranked price, and the drop rule follows ra
     assert.ok(cap <= fallbackCap(s.candidates.map((c) => BigInt(c.price_atomic))), `case ${i}: cap sized for a dropped candidate`);
     assert.equal(reserve, (20_000_000n * BigInt(Math.min(9000, Math.floor(Number(((20_000_000n - cap) * 10_000n) / 20_000_000n) / 100) * 100))) / 10_000n, `case ${i}`);
     assert.equal(s.candidates[0].handle, all[lead].handle, `case ${i}`);
-    assert.deepEqual(s.candidates.map((c) => c.handle), all.slice(lead).filter((c) => BigInt(c.price_atomic) <= cap + reserve).map((c) => c.handle), `case ${i}`);
+    const listed = [all[lead], ...all.slice(0, lead), ...all.slice(lead + 1)];
+    assert.deepEqual(s.candidates.map((c) => c.handle), listed.filter((c) => BigInt(c.price_atomic) <= cap + reserve).map((c) => c.handle), `case ${i}`);
   }
 });
 

@@ -81,17 +81,19 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
   const kept: Kept[] = [];
   let allocated = 0n;
   // First pass: a subtask is hired when one of its agents fits what is left to allocate, at that agent's price. The
-  // first hire must fit the cap, so agents ranked above the first one that fits are dropped. Fallback cover comes in
-  // the second pass, so it never costs a later subtask its agent.
+  // first hire must fit the cap, so the first-ranked agent that fits leads, and the agents ranked above it follow it
+  // in rank order: the reserve may still pay one as a fallback (the prune pass drops those it never can). Fallback
+  // cover comes in the second pass, so it never costs a later subtask its agent.
   input.draft.forEach((d, draftIdx) => {
     const quoted = quotedCandidates(input.selected[draftIdx] ?? [], input.quotes, input.recipients, input.history ?? {}, d.title, notes);
     const left = allocatable - allocated;
     const fits = quoted.findIndex((c) => price(c) <= left);
     if (fits >= 0) {
-      for (const c of quoted.slice(0, fits)) notes.push(`"${d.title}": candidate ${c.handle} dropped, price ${c.price_atomic} exceeds the ${left} left to allocate`);
-      const candidates = quoted.slice(fits);
-      allocated += price(candidates[0]);
-      kept.push({ draftIdx, d, candidates, cap: price(candidates[0]), self_do: false });
+      const lead = quoted[fits];
+      for (const c of quoted.slice(0, fits)) notes.push(`"${d.title}": candidate ${c.handle} moved after ${lead.handle}, price ${c.price_atomic} exceeds the ${left} left to allocate`);
+      const candidates = [lead, ...quoted.slice(0, fits), ...quoted.slice(fits + 1)];
+      allocated += price(lead);
+      kept.push({ draftIdx, d, candidates, cap: price(lead), self_do: false });
       return;
     }
     const self_do_reason: SelfDoReason = quoted.length ? 'over_budget' : 'no_agent';
@@ -124,8 +126,8 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
     }
     ({ reserve_bps, reserve } = reserveOf(input.budget_atomic, allocated));
   }
-  // Listing an unpayable fallback would only stretch the deadline. Any rank can be dropped (the order is not by
-  // price) except the first, whose price the cap always covers.
+  // Listing an unpayable fallback would only stretch the deadline. Any fallback can be dropped (the order is not by
+  // price), never the lead, whose price the cap always covers.
   for (const k of kept) {
     if (k.self_do) continue;
     const ok = payable(k, reserve);
@@ -170,9 +172,9 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
 const price = (c: Candidate) => BigInt(c.price_atomic);
 
 /**
- * The cap that covers a subtask's fallback, over its first two ranked prices: min(max(first, second), 2 x first).
+ * The cap that covers a subtask's fallback, over its first two listed prices: min(max(first, second), 2 x first).
  * Ranked by expected cost, so the first hire is not always the cheapest: never below the first hire's price, it also
- * covers the second-ranked fallback (when the first fails without charge) unless that one costs more than twice the
+ * covers the next-listed fallback (when the first fails without charge) unless that one costs more than twice the
  * first, so one expensive candidate cannot inflate what the user locks per subtask; a pricier fallback is paid by a
  * reserve top-up. With candidates cheapest first it is min(second, 2 x first).
  */
