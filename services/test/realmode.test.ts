@@ -134,7 +134,7 @@ test('ROOK_SERVICE_TOKEN: every orchestrator route needs x-rook-token; /mode has
   const m = await req('/mode');
   assert.equal(m.status, 200);
   assert.deepEqual(m.body, { market: 'sim', llm: 'canned', ledger: 'sim', network: 'sim', contract_id: null, usdc: null, paying: false, simulated: true,
-    min_budget_atomic: null, max_open_tasks: null, contract_owner: null });
+    min_budget_atomic: null, max_open_tasks: null, max_budget_atomic: '50000000', contract_owner: null });
 });
 
 test('every service refuses browsers: an Origin or Sec-Fetch-Site header, a Host that is not loopback, a body that is not JSON', async () => {
@@ -167,7 +167,10 @@ test('request limits: prompt at most 4000 characters, budget at most ROOK_MAX_BU
   assert.match(big.body.error, /above this Rook's limit of 50\.00 USDC/);
   assert.equal((await req('/tasks', { prompt: 'p', budget_usdc: '50' })).body.status, 'planned');
   process.env.ROOK_MAX_BUDGET_USDC = '2';
-  try { assert.equal((await req('/tasks', { prompt: 'p', budget_usdc: '3' })).status, 400); } finally { delete process.env.ROOK_MAX_BUDGET_USDC; }
+  try {
+    assert.equal((await req('/tasks', { prompt: 'p', budget_usdc: '3' })).status, 400);
+    assert.equal((await req('/mode')).body.max_budget_atomic, '2000000'); // the web app checks the same limit before sending
+  } finally { delete process.env.ROOK_MAX_BUDGET_USDC; }
 
   // The planner checks the same limits before any LLM call.
   const p = await planner.start(0);

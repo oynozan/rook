@@ -8,7 +8,7 @@ import { DatabaseSync } from 'node:sqlite';
 import { after, test } from 'node:test';
 import {
   createSession, forgetFundingOf, forgetUnreadFunding, fundingSent, markFundingRefunded, recordFundingSent, revokeSession, sessionAccount,
-  spendNonce, takeDraftSlot,
+  giveBackDraftSlot, spendNonce, takeDraftSlot,
 } from './db';
 
 const dir = mkdtempSync(join(tmpdir(), 'rook-web-db-'));
@@ -40,12 +40,25 @@ test('sessions: live until revoked or expired', () => {
 });
 
 test('drafts: at most the limit per window, per account', () => {
-  for (let i = 0; i < 3; i++) assert.deepEqual(takeDraftSlot('carol.near', 3, 3_600_000), { ok: true });
+  for (let i = 0; i < 3; i++) assert.equal(takeDraftSlot('carol.near', 3, 3_600_000).ok, true);
   const refused = takeDraftSlot('carol.near', 3, 3_600_000);
   assert.equal(refused.ok, false);
   assert.ok(!refused.ok && refused.retryInS > 3500 && refused.retryInS <= 3600);
-  assert.deepEqual(takeDraftSlot('dave.near', 3, 3_600_000), { ok: true });
-  assert.deepEqual(takeDraftSlot('carol.near', 3, 0), { ok: true }); // a window that has passed frees the slots
+  assert.equal(takeDraftSlot('dave.near', 3, 3_600_000).ok, true);
+  assert.equal(takeDraftSlot('carol.near', 3, 0).ok, true); // a window that has passed frees the slots
+});
+
+test('drafts: a slot given back (Rook created no task) does not count', () => {
+  const taken = [1, 2].map(() => takeDraftSlot('erin.near', 2, 3_600_000));
+  assert.equal(takeDraftSlot('erin.near', 2, 3_600_000).ok, false);
+  const last = taken[1];
+  assert.ok(last.ok);
+  giveBackDraftSlot('frank.near', last.slot); // only the account's own slot
+  assert.equal(takeDraftSlot('erin.near', 2, 3_600_000).ok, false);
+  giveBackDraftSlot('erin.near', last.slot);
+  const again = takeDraftSlot('erin.near', 2, 3_600_000);
+  assert.equal(again.ok, true);
+  assert.equal(takeDraftSlot('erin.near', 2, 3_600_000).ok, false);
 });
 
 const known = (contract_task_id: string | null, tx_hash: string | null) => ({ contract_task_id, tx_hash, refunded: false, refund_tx: null });

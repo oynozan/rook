@@ -36,7 +36,8 @@ const FOLLOW_HOLD_MS = 150; // after the reader scrolls up, how long scroll even
 
 type Loaded = { snap: TaskSnapshot | null; events: RookEvent[]; problem: 'missing' | 'signin' | 'down' | null; refetch: () => void };
 
-function useTask(id: string | null): Loaded {
+/** `account`: the signed-in account. Another one (or none) loads the task afresh, as that account may see it. */
+function useTask(id: string | null, account: string | null): Loaded {
   const [snap, setSnap] = useState<TaskSnapshot | null>(null);
   const [events, setEvents] = useState<RookEvent[]>([]);
   const [problem, setProblem] = useState<Loaded['problem']>(null);
@@ -123,7 +124,7 @@ function useTask(id: string | null): Loaded {
     };
     open();
     return () => { gone = true; clearTimeout(retry); clearTimeout(soon); source?.close(); };
-  }, [id, refetch, load]);
+  }, [id, account, refetch, load]);
 
   // Chain mode: the indexer shows a payment's transaction up to a minute after its receipt, often after the stream
   // ended, so a finished task with a paid receipt still missing payment_tx is looked at again a few times.
@@ -136,8 +137,8 @@ function useTask(id: string | null): Loaded {
     return () => clearInterval(timer);
   }, [awaitingTx, refetch]);
 
-  // Just after switching tasks the state still holds the old task for one render: never show it as the new one.
-  return { snap: snap?.task.id === id ? snap : null, events, problem, refetch };
+  // Just after switching tasks or accounts the state still holds the old task for one render: never show it as the new one.
+  return { snap: snap?.task.id === id && snap.task.owner === account ? snap : null, events, problem, refetch };
 }
 
 // ---- pieces of the thread ----
@@ -1026,6 +1027,9 @@ function Report({ markdown }: { markdown: string }) {
 
 // ---- one conversation ----
 
+/** A server action call that never got an answer: the network dropped, or the web server was restarting. */
+const UNREACHABLE = "This page couldn't reach Rook. Check your connection and try again.";
+
 function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; loaded: Loaded; tasks: TaskSummary[] | null; onGrow: () => void; fresh: boolean; onRevealed: (id: string) => void }) {
   const { snap, events, problem, refetch } = loaded;
   const router = useRouter();
@@ -1088,15 +1092,16 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   const settled = !!status && TERMINAL.has(status) && caughtUp;
   useEffect(() => { onGrow(); }, [shown, status, settled, onGrow]);
 
-  // Keep the sidebar's status honest when the run moves on without an action from this page.
-  useEffect(() => {
-    if (status && known && status !== known && (status === 'planned' || status === 'running' || TERMINAL.has(status))) router.refresh();
-  }, [status, known, router]);
+  // Keep the sidebar's status honest when the run moves on without an action from this page: every step, so it never
+  // says "Needs funding" while the funded run is starting.
+  useEffect(() => { if (status && known && status !== known) router.refresh(); }, [status, known, router]);
+  // The server has no session for this page (another tab signed out, or it lapsed): render signed out, with Connect.
+  useEffect(() => { if (problem === 'signin' && wallet.account) router.refresh(); }, [problem, wallet.account, router]);
 
   async function act(kind: 'approve' | 'cancel' | 'stop') {
     setBusy(kind);
     setActError(null);
-    const out = kind === 'approve' ? await approve(id) : kind === 'cancel' ? await cancel(id) : await stop(id);
+    const out = await (kind === 'approve' ? approve(id) : kind === 'cancel' ? cancel(id) : stop(id)).catch(() => ({ ok: false as const, message: UNREACHABLE }));
     setBusy(null);
     if (!out.ok) setActError(out.message);
     else if (out.funding) { setFunding(out.funding); if (kind === 'approve') setAutoFund(true); }
@@ -1105,7 +1110,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
 
   if (problem === 'missing') return <RookMessage><p>Rook has no task at this link for the wallet you&apos;re signed in with. If another wallet drafted it, sign in with that one.</p></RookMessage>;
   if (problem === 'signin') return <RookMessage><p>Connect your wallet to see this task.</p></RookMessage>;
-  if (problem === 'down' && !snap) return <RookMessage><p>Rook&apos;s services aren&apos;t running. Start them with pnpm dev, then refresh.</p></RookMessage>;
+  if (problem === 'down' && !snap) return <RookMessage><p>Rook&apos;s services are unreachable right now. This page reconnects on its own once they&apos;re back.</p></RookMessage>;
   if (!snap) return <RookMessage><Working label="Loading" /></RookMessage>;
 
   const { task, plan, receipts, ledger, final_result } = snap;
@@ -1258,7 +1263,7 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
   const wallet = useWallet();
   const parts = pathname.split('/').filter(Boolean); // ['app', id?]
   const id = parts[1] ? decodeURIComponent(parts[1]) : null;
-  const loaded = useTask(id);
+  const loaded = useTask(id, wallet.account);
   const [sending, setSending] = useState<{ prompt: string; budget: string; id?: string } | null>(null);
   const [errors, setErrors] = useState<ComposerErrors | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
@@ -1272,8 +1277,9 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
   async function send(prompt: string, budget: string) {
     setErrors(null);
     setSending({ prompt: prompt.trim(), budget });
-    // Returns as soon as the task exists; the plan then streams in on the task's page.
-    const out = await draftTask({ prompt, budget });
+    // Returns as soon as the task exists; the plan then streams in on the task's page. The call itself can fail (the
+    // network, or the web server restarting): then the composer gets its text back and says so.
+    const out = await draftTask({ prompt, budget }).catch(() => ({ kind: 'error' as const, message: UNREACHABLE }));
     if (out.kind === 'planned') {
       // Keep showing this message until the task has loaded, so the thread takes over with no gap.
       justDrafted.current.add(out.id);
@@ -1289,6 +1295,7 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
   useEffect(() => {
     if (sending?.id && sending.id === id && (loaded.snap?.task.id === id || loaded.problem)) setSending(null);
   }, [sending, id, loaded.snap, loaded.problem]);
+  useEffect(() => { setErrors(null); }, [id]); // a failed send's errors are about that send, not the next page
 
   // Follow the conversation as it grows, until the reader scrolls up. Only their input can stop it: a smooth scroll on
   // its way down is also far from the bottom for a moment, and must not count. Moving down to the bottom resumes following;
@@ -1345,7 +1352,7 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
                   <UserMessage animate prompt={sending.prompt} budget={typedUsdc(sending.budget)} />
                   <RookMessage><AgentSearch plan={null} animate={false} onGrow={follow} /></RookMessage>
                 </>
-              ) : id && <Thread key={id} id={id} loaded={loaded} tasks={tasks} onGrow={follow} fresh={justDrafted.current.has(id)} onRevealed={onRevealed} />}
+              ) : id && <Thread key={`${id}:${wallet.account}`} id={id} loaded={loaded} tasks={tasks} onGrow={follow} fresh={justDrafted.current.has(id)} onRevealed={onRevealed} />}
             </div>
           </div>
         )}

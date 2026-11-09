@@ -31,6 +31,8 @@ export type Mode = {
   network?: Network | 'sim'; contract_id?: string | null; usdc?: string | null; simulated?: boolean;
   /** Chain mode: the contract's smallest budget (atomic USDC) and tasks one funder may have open at once. */
   min_budget_atomic?: string | null; max_open_tasks?: number | null; contract_owner?: string | null;
+  /** The largest budget this Rook takes (atomic USDC). Older orchestrators leave it out. */
+  max_budget_atomic?: string | null;
 };
 
 export type PlanView = {
@@ -96,6 +98,12 @@ export type RookEvent = { seq: number; type: string; subtask_id?: string; data: 
 
 export class OrchestratorDown extends Error {}
 
+/** The orchestrator answered with an error: its HTTP status and its own message. */
+export class OrchestratorError extends Error {
+  status: number;
+  constructor(status: number, message: string) { super(message); this.status = status; }
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   let r: Response;
   try {
@@ -104,8 +112,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
     throw new OrchestratorDown(`cannot reach the orchestrator at ${ORCHESTRATOR}`);
   }
   const data = await r.json().catch(() => null);
-  if (r.status === 401) throw new Error('The orchestrator refused this web server: ROOK_SERVICE_TOKEN differs between them.');
-  if (!r.ok) throw new Error(data?.error ?? `orchestrator answered HTTP ${r.status}`);
+  if (r.status === 401) throw new OrchestratorError(401, 'The orchestrator refused this web server: ROOK_SERVICE_TOKEN differs between them.');
+  if (!r.ok) throw new OrchestratorError(r.status, data?.error ?? `orchestrator answered HTTP ${r.status}`);
   return data as T;
 }
 

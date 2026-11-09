@@ -1,9 +1,11 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
-import { forgetFundingOf, forgetUnreadFunding, fundingSent, markFundingRefunded, recordFundingSent, takeDraftSlot } from './db';
+import { forgetFundingOf, forgetUnreadFunding, fundingSent, giveBackDraftSlot, markFundingRefunded, recordFundingSent, takeDraftSlot } from './db';
+import { checkDraft, draftRefusal } from './draft';
 import { untilFinal, type Funding } from './funding';
-import { approveTask, cancelTask, createTask, fundedTask, getMode, getTask, killTask, OrchestratorDown } from './orchestrator';
+import { approveTask, cancelTask, createTask, fundedTask, getMode, getTask, killTask, OrchestratorDown, OrchestratorError } from './orchestrator';
+import { actionRefusal, type TaskAction } from './refusals';
 import { currentAccount } from './session';
 
 export type DraftResult =
@@ -13,39 +15,26 @@ export type DraftResult =
 
 export type ActResult = { ok: true; funding?: Funding } | { ok: false; message: string };
 
-const BUDGET = /^\d+(\.\d{1,6})?$/;
-const PROMPT_MAX = 4000;
 // Each draft spends NEAR AI credit on the planner, so one account can't drain it. ponytail: per account only; many
 // throwaway accounts still add up, so the planner's own ROOK_LLM_MAX_USD cap is the backstop.
 const DRAFTS_PER_HOUR = Math.max(1, Math.floor(Number(process.env.ROOK_DRAFTS_PER_HOUR)) || 20);
-const DOWN = "Rook's services aren't running. Start them with pnpm dev, then try again.";
+const DOWN = "Rook's services are unreachable right now. Try again in a minute.";
 const refreshSidebar = () => revalidatePath('/app', 'layout');
 
-const SIGN_IN = 'Sign in with your NEAR wallet first.';
-
-/** "1.5" -> 1500000n (USDC has 6 decimals); the input already matched BUDGET. */
-const toAtomic = (s: string) => {
-  const [whole, frac = ''] = s.split('.');
-  return BigInt(whole) * 1_000_000n + BigInt(frac.padEnd(6, '0'));
-};
+/** No session (it lapsed, or another tab signed out): the layout renders signed out again, so the page offers Connect. */
+function signInFirst() {
+  refreshSidebar();
+  return 'Sign in with your NEAR wallet first.';
+}
 
 // Every action acts as the signed-in account from the session cookie. The browser can't name an account.
 export async function draftTask(input: { prompt: string; budget: string }): Promise<DraftResult> {
-  const prompt = String(input.prompt ?? '').trim();
-  const budget = String(input.budget ?? '').trim();
   const owner = await currentAccount();
-  if (!owner) return { kind: 'error', message: SIGN_IN };
+  if (!owner) return { kind: 'error', message: signInFirst() };
 
-  const invalid: Extract<DraftResult, { kind: 'invalid' }> = { kind: 'invalid' };
-  if (!prompt) invalid.prompt = 'Describe the task first.';
-  else if (prompt.length > PROMPT_MAX) invalid.prompt = `Keep the task under ${PROMPT_MAX} characters. This one has ${prompt.length}.`;
-  if (!BUDGET.test(budget) || Number(budget) <= 0) invalid.budget = 'Enter an amount above 0, like 3.00.';
-  else {
-    // The budget contract refunds a transfer below its minimum, so say so before any planning is paid for.
-    const min = (await getMode().catch(() => null))?.min_budget_atomic;
-    if (min && /^\d+$/.test(min) && toAtomic(budget) < BigInt(min)) invalid.budget = `The smallest budget is ${(Number(min) / 1e6).toFixed(2)} USDC.`;
-  }
-  if (invalid.prompt || invalid.budget) return invalid;
+  // The composer's own checks again, with the orchestrator's budget limits, all before a draft slot is taken.
+  const check = checkDraft({ prompt: String(input?.prompt ?? ''), budget: String(input?.budget ?? '') }, await getMode().catch(() => null));
+  if (!check.ok) return { kind: 'invalid', prompt: check.prompt, budget: check.budget };
 
   const slot = takeDraftSlot(owner, DRAFTS_PER_HOUR, 3_600_000);
   if (!slot.ok) {
@@ -53,34 +42,48 @@ export async function draftTask(input: { prompt: string; budget: string }): Prom
   }
 
   try {
-    const task = await createTask(prompt, budget, owner);
+    const task = await createTask(check.prompt, check.usdc, owner);
     refreshSidebar();
     return { kind: 'planned', id: task.id };
   } catch (e) {
-    return { kind: 'error', message: e instanceof OrchestratorDown ? DOWN : "Rook couldn't draft a plan for this task. Try again in a moment." };
+    giveBackDraftSlot(owner, slot.slot); // no task, so no planning was paid for
+    if (e instanceof OrchestratorDown) return { kind: 'error', message: DOWN };
+    const refused = e instanceof OrchestratorError && e.status === 400 ? draftRefusal(e.message) : null;
+    if (refused) return { kind: 'invalid', ...refused };
+    console.error('[web] draftTask:', e instanceof Error ? e.message : e);
+    return { kind: 'error', message: "Rook couldn't draft a plan for this task. Try again in a moment." };
   }
 }
 
-async function act(run: () => Promise<object & { funding?: Funding }>): Promise<ActResult> {
+/**
+ * `action`: a task page button, whose refusals go back in plain words (the orchestrator's own go to the server log).
+ * Without one they go back as the orchestrator wrote them: the funding step reads them (funding.ts confirmFailure).
+ */
+async function act(run: () => Promise<object & { funding?: Funding }>, action?: TaskAction): Promise<ActResult> {
   try {
     const out = await run();
     refreshSidebar();
     return out.funding ? { ok: true, funding: out.funding } : { ok: true };
   } catch (e) {
-    return { ok: false, message: e instanceof OrchestratorDown ? DOWN : e instanceof Error ? e.message : 'That did not work. Try again.' };
+    if (e instanceof OrchestratorDown) return { ok: false, message: DOWN };
+    const message = e instanceof Error ? e.message : '';
+    if (!action) return { ok: false, message: message || 'That did not work. Try again.' };
+    const plain = actionRefusal(action, e instanceof OrchestratorError ? e.status : null, message);
+    if (!plain.known) console.error(`[web] ${action}:`, message || e);
+    return { ok: false, message: plain.message };
   }
 }
 
-async function asOwner(run: (owner: string) => Promise<object & { funding?: Funding }>): Promise<ActResult> {
+async function asOwner(action: TaskAction, run: (owner: string) => Promise<object & { funding?: Funding }>): Promise<ActResult> {
   const owner = await currentAccount();
-  if (!owner) return { ok: false, message: SIGN_IN };
-  return act(() => run(owner));
+  if (!owner) return { ok: false, message: signInFirst() };
+  return act(() => run(owner), action);
 }
 
 /** Simulation: starts the run. Chain mode: returns the funding transfer for the wallet (again, if asked again). */
-export async function approve(id: string) { return asOwner((owner) => approveTask(id, owner)); }
-export async function cancel(id: string) { return asOwner((owner) => cancelTask(id, owner)); }
-export async function stop(id: string) { return asOwner((owner) => killTask(id, owner)); }
+export async function approve(id: string) { return asOwner('approve', (owner) => approveTask(id, owner)); }
+export async function cancel(id: string) { return asOwner('cancel', (owner) => cancelTask(id, owner)); }
+export async function stop(id: string) { return asOwner('stop', (owner) => killTask(id, owner)); }
 
 const TX_HASH = /^[1-9A-HJ-NP-Za-km-z]{43,44}$/;
 const CONTRACT_TASK = /^[0-9a-z]{1,20}$/;
@@ -116,7 +119,7 @@ export async function forgetTransfer(id: string, tx_hash: string) {
  */
 export async function confirmFunding(id: string, input: { contract_task_id: string; tx_hash: string | null }): Promise<ActResult> {
   const owner = await currentAccount();
-  if (!owner) return { ok: false, message: SIGN_IN };
+  if (!owner) return { ok: false, message: signInFirst() };
   const cid = String(input?.contract_task_id ?? '');
   if (!CONTRACT_TASK.test(cid)) return { ok: false, message: 'That contract task id is not valid.' };
   if (!recordFundingSent(id, owner, { contract_task_id: cid, tx_hash: txOf(input?.tx_hash) })) {
@@ -137,7 +140,7 @@ export async function confirmFunding(id: string, input: { contract_task_id: stri
  */
 export async function fundingRefunded(id: string, input: { contract_task_id: string; refund_tx: string | null }): Promise<ActResult> {
   const owner = await currentAccount();
-  if (!owner) return { ok: false, message: SIGN_IN };
+  if (!owner) return { ok: false, message: signInFirst() };
   const cid = String(input?.contract_task_id ?? '');
   if (!CONTRACT_TASK.test(cid)) return { ok: false, message: 'That contract task id is not valid.' };
   if (!markFundingRefunded(id, owner, cid, txOf(input?.refund_tx))) return { ok: true };
