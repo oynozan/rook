@@ -97,9 +97,9 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
 
   // Whatever the caps leave of the budget becomes the reserve for re-hires and top-ups, up to the contract's 90%: the
   // user's budget is what Rook may spend, so it must not sit idle while a subtask is abandoned for want of a top-up
-  // (seen on mainnet: 0.90 USDC unallocated, a 0.50 re-hire refused). Whole basis points, as the contract computes it.
+  // (seen on mainnet: 0.90 USDC unallocated, a 0.50 re-hire refused). Whole percents, so the numbers read cleanly.
   const idle = input.budget_atomic - allocated;
-  const reserve_bps = input.budget_atomic > 0n ? Math.min(MAX_RESERVE_BPS, Number((idle * 10_000n) / input.budget_atomic)) : 0;
+  const reserve_bps = input.budget_atomic > 0n ? Math.min(MAX_RESERVE_BPS, Math.floor(Number((idle * 10_000n) / input.budget_atomic) / 100) * 100) : 0;
   const reserve = (input.budget_atomic * BigInt(reserve_bps)) / 10_000n;
   // A fallback priced above cap + the whole reserve can never be paid; listing it would only stretch the deadline.
   // Any rank can be dropped (the order is not by price) except the first, whose price the cap always covers.
