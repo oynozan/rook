@@ -55,7 +55,7 @@ Every service is reached through `<NAME>_URL` (default `http://127.0.0.1:<port>`
 
 - All amounts are atomic USDC as decimal integer strings (6 decimals): `"2500000"` = 2.50 USDC. Fields end in `_atomic`. Code uses `bigint`; never floats.
 - The user's budget is entered in USDC (`"2.5"`) and converted once.
-- `reserve_share` defaults to `0.2`. `reserve_atomic = floor(budget × reserve_share)`; `allocatable_atomic = budget − reserve`.
+- `reserve_share` defaults to `0.2`: it sets how much the caps may take, `budget − floor(budget × reserve_share)`. Once the caps are set, every budget unit they leave becomes the reserve, up to the contract's 90%: `reserve_bps = min(9000, floor((budget − allocated) × 10000 / budget))`, `reserve_atomic = floor(budget × reserve_bps / 10000)`, `allocatable_atomic = budget − reserve_atomic`. The user's budget is what Rook may spend, so none of it sits idle while a subtask is abandoned for want of a top-up (seen on mainnet on 2026-11-09: 0.90 USDC unallocated, a 0.50 re-hire refused). The orchestrator adopts `reserve_bps / 10000` as the task's `reserve_share`, so the funding transfer, the contract and the ledger agree.
 
 ## 5. Planner
 
@@ -74,7 +74,7 @@ Response (`Plan`):
     "candidates": [Candidate]
   }],
   "dropped": [{ "title": "...", "reason": "no fitting agent | over budget | ..." }],
-  "budget": { "budget_atomic": "...", "reserve_atomic": "...", "allocatable_atomic": "...", "allocated_atomic": "..." },
+  "budget": { "budget_atomic": "...", "reserve_atomic": "...", "reserve_bps": 7000, "allocatable_atomic": "...", "allocated_atomic": "..." },
   "notes": ["criterion s2.c3 removed: invalid regex", "..."],
   "llm_calls": [LlmCall]
 }
@@ -339,7 +339,7 @@ These are the "do X, see Y" checks for real-time testing. Commands assume `pnpm 
 
 `pnpm test` runs the unit tests and an end-to-end run with all services in one process. Manually: `ROOK_LLM=canned pnpm dev`, then in another shell `pnpm rook run "Due diligence on the NEAR token" --budget 3 --yes`. Expect:
 
-1. A plan with 4 subtasks (holders, wallets, contract check, market snapshot), each with criteria, candidates ranked by expected cost with a reason line each (the cheap agent of each pair first), caps 0.30, 0.20, 0.24 and 0.16 (min of the larger of the first two ranked prices and twice the first, 0.90 in total), and a reserve of 0.60.
+1. A plan with 4 subtasks (holders, wallets, contract check, market snapshot), each with criteria, candidates ranked by expected cost with a reason line each (the cheap agent of each pair first), caps 0.30, 0.20, 0.24 and 0.16 (min of the larger of the first two ranked prices and twice the first, 0.90 in total), and a reserve of 2.10 (all the caps leave of 3.00).
 2. `sim-holders-lite` delivers, fails a numeric or cross-check criterion, receipt with verdict `fail`, re-hire of `sim-holders` with a 0.15 top-up from the reserve, pass.
 3. `sim-wallets-express` delivers, `security_alert` with the quoted injection, verdict `fail`, re-hire of `sim-wallets` with a 0.10 top-up, pass.
 4. `sim-tokencheck-fast` ends `FAILED`, no receipt, no charge, `sim-tokencheck` hired with a 0.01 top-up (price 0.25, balance 0.24), pass.

@@ -71,7 +71,8 @@ export type PlanSubtask = {
 export type Plan = {
   subtasks: PlanSubtask[];
   dropped: { title: string; reason: string }[];
-  budget: { budget_atomic: string; reserve_atomic: string; allocatable_atomic: string; allocated_atomic: string };
+  /** reserve_bps: the reserve the funding transfer asks the contract for; every budget unit no cap takes, at most 90%. */
+  budget: { budget_atomic: string; reserve_atomic: string; reserve_bps?: number; allocatable_atomic: string; allocated_atomic: string };
   notes: string[];
   llm_calls: LlmCall[];
 };

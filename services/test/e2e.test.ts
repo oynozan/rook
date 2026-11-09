@@ -49,7 +49,7 @@ test('acceptance A: plan, faults caught, re-hires from the reserve, closed with 
   assert.equal(task.status, 'planned', task.error);
   const plan = task.plan;
   assert.deepEqual(plan.subtasks.map((s: any) => s.cap_atomic), ['300000', '200000', '240000', '160000']);
-  assert.equal(plan.budget.reserve_atomic, '600000');
+  assert.equal(plan.budget.reserve_atomic, '2100000'); // what the 0.90 of caps leave of 3.00
   assert.equal(plan.budget.allocated_atomic, '900000');
   assert.deepEqual(plan.subtasks.map((s: any) => s.candidates.map((c: any) => c.handle)), [
     ['sim-holders-lite', 'sim-holders'], ['sim-wallets-express', 'sim-wallets'],
