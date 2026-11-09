@@ -34,7 +34,8 @@ const FOLLOW_HOLD_MS = 150; // after the reader scrolls up, how long scroll even
 
 type Loaded = { snap: TaskSnapshot | null; events: RookEvent[]; problem: 'missing' | 'signin' | 'down' | null; refetch: () => void };
 
-function useTask(id: string | null): Loaded {
+/** `account`: the signed-in account. Another one (or none) loads the task afresh, as that account may see it. */
+function useTask(id: string | null, account: string | null): Loaded {
   const [snap, setSnap] = useState<TaskSnapshot | null>(null);
   const [events, setEvents] = useState<RookEvent[]>([]);
   const [problem, setProblem] = useState<Loaded['problem']>(null);
@@ -97,7 +98,7 @@ function useTask(id: string | null): Loaded {
     };
     open();
     return () => { gone = true; clearTimeout(retry); source?.close(); };
-  }, [id, refetch]);
+  }, [id, account, refetch]);
 
   // Chain mode: the indexer shows a payment's transaction up to a minute after its receipt, often after the stream
   // ended, so a finished task with a paid receipt still missing payment_tx is looked at again a few times.
@@ -110,8 +111,8 @@ function useTask(id: string | null): Loaded {
     return () => clearInterval(timer);
   }, [awaitingTx, refetch]);
 
-  // Just after switching tasks the state still holds the old task for one render: never show it as the new one.
-  return { snap: snap?.task.id === id ? snap : null, events, problem, refetch };
+  // Just after switching tasks or accounts the state still holds the old task for one render: never show it as the new one.
+  return { snap: snap?.task.id === id && snap.task.owner === account ? snap : null, events, problem, refetch };
 }
 
 // ---- pieces of the thread ----
@@ -993,6 +994,8 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   useEffect(() => {
     if (status && known && status !== known && (status === 'planned' || status === 'running' || TERMINAL.has(status))) router.refresh();
   }, [status, known, router]);
+  // The server has no session for this page (another tab signed out, or it lapsed): render signed out, with Connect.
+  useEffect(() => { if (problem === 'signin' && wallet.account) router.refresh(); }, [problem, wallet.account, router]);
 
   async function act(kind: 'approve' | 'cancel' | 'stop') {
     setBusy(kind);
@@ -1137,7 +1140,7 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
   const wallet = useWallet();
   const parts = pathname.split('/').filter(Boolean); // ['app', id?]
   const id = parts[1] ? decodeURIComponent(parts[1]) : null;
-  const loaded = useTask(id);
+  const loaded = useTask(id, wallet.account);
   const [sending, setSending] = useState<{ prompt: string; budget: string; id?: string } | null>(null);
   const [errors, setErrors] = useState<ComposerErrors | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
@@ -1224,7 +1227,7 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
                   <UserMessage animate prompt={sending.prompt} budget={Number(sending.budget).toFixed(2)} />
                   <RookMessage><AgentSearch plan={null} animate={false} onGrow={follow} /></RookMessage>
                 </>
-              ) : id && <Thread key={id} id={id} loaded={loaded} tasks={tasks} onGrow={follow} fresh={justDrafted.current.has(id)} onRevealed={onRevealed} />}
+              ) : id && <Thread key={`${id}:${wallet.account}`} id={id} loaded={loaded} tasks={tasks} onGrow={follow} fresh={justDrafted.current.has(id)} onRevealed={onRevealed} />}
             </div>
           </div>
         )}

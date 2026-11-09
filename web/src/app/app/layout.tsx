@@ -17,7 +17,7 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   const tasks = owner ? await listTasks(owner).catch(unreachable) : mode ? [] : null;
   return (
     <ModeProvider mode={mode}>
-      <WalletProvider>
+      <WalletProvider account={owner}>
         <AppShell tasks={tasks}>
           <Chat tasks={tasks} />
           {children}

@@ -21,12 +21,16 @@ const DRAFTS_PER_HOUR = Math.max(1, Math.floor(Number(process.env.ROOK_DRAFTS_PE
 const DOWN = "Rook's services are unreachable right now. Try again in a minute.";
 const refreshSidebar = () => revalidatePath('/app', 'layout');
 
-const SIGN_IN = 'Sign in with your NEAR wallet first.';
+/** No session (it lapsed, or another tab signed out): the layout renders signed out again, so the page offers Connect. */
+function signInFirst() {
+  refreshSidebar();
+  return 'Sign in with your NEAR wallet first.';
+}
 
 // Every action acts as the signed-in account from the session cookie. The browser can't name an account.
 export async function draftTask(input: { prompt: string; budget: string }): Promise<DraftResult> {
   const owner = await currentAccount();
-  if (!owner) return { kind: 'error', message: SIGN_IN };
+  if (!owner) return { kind: 'error', message: signInFirst() };
 
   // The composer's own checks again, with the orchestrator's budget limits, all before a draft slot is taken.
   const check = checkDraft({ prompt: String(input?.prompt ?? ''), budget: String(input?.budget ?? '') }, await getMode().catch(() => null));
@@ -72,7 +76,7 @@ async function act(run: () => Promise<object & { funding?: Funding }>, action?: 
 
 async function asOwner(action: TaskAction, run: (owner: string) => Promise<object & { funding?: Funding }>): Promise<ActResult> {
   const owner = await currentAccount();
-  if (!owner) return { ok: false, message: SIGN_IN };
+  if (!owner) return { ok: false, message: signInFirst() };
   return act(() => run(owner), action);
 }
 
@@ -115,7 +119,7 @@ export async function forgetTransfer(id: string, tx_hash: string) {
  */
 export async function confirmFunding(id: string, input: { contract_task_id: string; tx_hash: string | null }): Promise<ActResult> {
   const owner = await currentAccount();
-  if (!owner) return { ok: false, message: SIGN_IN };
+  if (!owner) return { ok: false, message: signInFirst() };
   const cid = String(input?.contract_task_id ?? '');
   if (!CONTRACT_TASK.test(cid)) return { ok: false, message: 'That contract task id is not valid.' };
   if (!recordFundingSent(id, owner, { contract_task_id: cid, tx_hash: txOf(input?.tx_hash) })) {
@@ -136,7 +140,7 @@ export async function confirmFunding(id: string, input: { contract_task_id: stri
  */
 export async function fundingRefunded(id: string, input: { contract_task_id: string; refund_tx: string | null }): Promise<ActResult> {
   const owner = await currentAccount();
-  if (!owner) return { ok: false, message: SIGN_IN };
+  if (!owner) return { ok: false, message: signInFirst() };
   const cid = String(input?.contract_task_id ?? '');
   if (!CONTRACT_TASK.test(cid)) return { ok: false, message: 'That contract task id is not valid.' };
   if (!markFundingRefunded(id, owner, cid, txOf(input?.refund_tx))) return { ok: true };

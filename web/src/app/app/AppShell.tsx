@@ -237,7 +237,7 @@ export function AppShell({ tasks, children }: { tasks: TaskSummary[] | null; chi
 
   // The theme can only be changed with a wallet connected, so without one the app goes back to light.
   const { setTheme } = useTheme();
-  const signedOut = !wallet.checking && !wallet.account;
+  const signedOut = !wallet.account;
   useEffect(() => { if (signedOut) setTheme('light'); }, [signedOut, setTheme]);
 
   useEffect(() => {
@@ -339,7 +339,7 @@ export function AppShell({ tasks, children }: { tasks: TaskSummary[] | null; chi
                   <ComposeIcon className="size-5" />
                 </a>
               )}
-              {!wallet.account && !wallet.checking && <WalletButton />}
+              {!wallet.account && <WalletButton />}
             </div>
           </header>
         </div>
