@@ -85,7 +85,8 @@ const GAS_ON_ACCOUNT_CREATED: Gas =
 const MAX_RESERVE_BPS: u16 = 9_000;
 /// Bounds per task: `close_task` walks the subtasks (at most one per approved cap), and receipts are
 /// stored at this contract's cost (about 0.006 NEAR each at the string limits).
-const MAX_SUBTASKS: usize = 32;
+/// Rook's planner makes at most 5 subtasks; 8 keeps a stranger's task record small (open funding).
+const MAX_SUBTASKS: usize = 8;
 const MAX_RECEIPTS: u32 = 64;
 const MAX_STR: usize = 128;
 const MAX_PAGE: u32 = 50;
@@ -95,6 +96,9 @@ const MAX_ATTEMPTS: u32 = 3;
 pub const DEFAULT_MIN_BUDGET: u128 = 1_000_000;
 /// Tasks one funder can have open (not yet Closed) at once, until the owner changes it.
 pub const DEFAULT_MAX_OPEN_TASKS: u32 = 5;
+/// Free NEAR a new task must leave the contract (it pays the task's storage): enough to keep funding about three
+/// subtasks of the tasks already open, so strangers locking refundable USDC in many tasks cannot starve them.
+pub const NEW_TASK_FLOOR: NearToken = NearToken::from_millinear(200);
 
 #[near(serializers = [json])]
 #[serde(rename_all = "snake_case")]
@@ -522,8 +526,9 @@ impl Contract {
     /// 0-amount transfer, so an emptied sub-account can never send its `return`, and close_task needs one.
     /// Reads USDC `ft_balance_of`; `on_mark_empty` marks only if it is 0 and the subtask is unchanged
     /// (still Funded, same attempt, no top-up since), else changes nothing and returns false. Works on
-    /// killed tasks, not on a Closing or Closed one. The orchestrator, the owner or the task's funder.
-    /// Attach 50 Tgas.
+    /// killed and on Closed tasks (a funder or owner may close a killed task while a hire is still being paid; its
+    /// emptied sub-account is then marked here, so it can be reclaimed), not while Closing. The orchestrator, the
+    /// owner or the task's funder. Attach 50 Tgas.
     pub fn mark_empty(&mut self, task_id: String, n: u32) -> Promise {
         let caller = env::predecessor_account_id();
         let task = self.tasks.get(&task_id).unwrap_or_else(|| env::panic_str("unknown task"));
@@ -531,7 +536,7 @@ impl Contract {
             caller == self.owner || caller == self.orchestrator || caller == task.funder,
             "only the funder, the owner or the orchestrator"
         );
-        require!(task.status == TaskStatus::Open, "task is not open");
+        require!(task.status != TaskStatus::Closing, "task is closing");
         let sub = self.subtasks.get(&(task_id.clone(), n)).unwrap_or_else(|| env::panic_str("unknown subtask"));
         require!(sub.status == SubtaskStatus::Funded, "subtask is not funded");
         let args = json!({ "account_id": sub.account_id }).to_string();
@@ -684,9 +689,10 @@ impl Contract {
             .then(|| env::promise_result_checked(0, 64).ok())
             .flatten()
             .and_then(|b| serde_json::from_slice::<U128>(&b).ok());
-        let open = self.tasks.get(&task_id).is_some_and(|t| t.status == TaskStatus::Open);
+        // A 0 balance credits nothing, so marking is safe on a Closed task too; only a refund in flight is waited out.
+        let settled = self.tasks.get(&task_id).is_some_and(|t| t.status != TaskStatus::Closing);
         let sub = sub_mut(&mut self.subtasks, &task_id, n);
-        if balance != Some(U128(0)) || !open || sub.status != SubtaskStatus::Funded || sub.since != since {
+        if balance != Some(U128(0)) || !settled || sub.status != SubtaskStatus::Funded || sub.since != since {
             let b = balance.map_or("unknown".to_string(), |b| b.0.to_string());
             env::log_str(&format!("subtask {n} not marked empty: balance {b}, status {:?}", sub.status));
             return false;
@@ -807,6 +813,9 @@ impl Contract {
         }
         if amount < self.min_budget {
             return Err(format!("budget below the minimum of {}", self.min_budget));
+        }
+        if free_near() < NEW_TASK_FLOOR.as_yoctonear() {
+            return Err("the contract is short of NEAR for new tasks; try again later".into());
         }
         if reserve_bps > MAX_RESERVE_BPS {
             return Err(format!("need reserve_bps <= {MAX_RESERVE_BPS}"));

@@ -203,14 +203,14 @@ fn create_task_refunds_bad_caps() {
         (vec![300, 0], "zero cap"),
         (vec![500, 301], "sum over budget - reserve (800)"),
         (vec![u128::MAX, 2], "sum overflows"),
-        (vec![1; 33], "more than 32"),
+        (vec![1; 9], "more than 8"),
     ] {
         assert_eq!(deposit(&mut c, OWNER, 1000, &caps(v)), 1000, "{why}");
     }
     assert_eq!(c.get_config().tasks, 0);
     assert_eq!(deposit(&mut c, OWNER, 1000, &caps(vec![500, 300])), 0, "sum exactly budget - reserve");
-    assert_eq!(deposit(&mut c, OWNER, 1000, &caps(vec![1; 32])), 0, "32 caps");
-    assert_eq!(task(&c, "1").caps.len(), 32);
+    assert_eq!(deposit(&mut c, OWNER, 1000, &caps(vec![1; 8])), 0, "8 caps");
+    assert_eq!(task(&c, "1").caps.len(), 8);
 }
 
 #[test]
@@ -1052,12 +1052,12 @@ fn mark_empty_caller_and_task_status() {
     assert_eq!(mark_empty_err(&mut c, ORCH, "0", 1), None, "killed task");
     call(OWNER);
     let _ = c.close_task("0".into());
-    assert_refused(&mut c, ORCH, "0", 1, "task is not open"); // Closing
-    assert!(!on_balance(&mut c, "0", 1, Some(r#""0""#)), "a read sent before the close does not mark");
+    assert_refused(&mut c, ORCH, "0", 1, "task is closing"); // Closing
+    assert!(!on_balance(&mut c, "0", 1, Some(r#""0""#)), "a read that lands while the refund is in flight does not mark");
     assert_eq!(sub(&c, "0", 1).status, SubtaskStatus::Funded);
     callback(true);
     assert!(c.on_task_closed("0".into()));
-    assert_refused(&mut c, OWNER, "0", 1, "task is not open"); // Closed
+    assert_eq!(mark_empty_err(&mut c, OWNER, "0", 1), None, "a Closed task may still mark an emptied sub-account");
     check(&c, "0");
 }
 
@@ -1305,4 +1305,41 @@ fn set_limits_by_owner_only() {
         let err = r.err().map(|e| e.downcast::<String>().map(|s| *s).unwrap_or_default()).unwrap_or_default();
         assert!(err.contains(why), "{pred} {args:?}: expected {why:?}, got {err:?}");
     }
+}
+
+// ---------- review fixes (2026-11-09) ----------
+
+#[test]
+fn funder_closes_killed_task_then_spent_subtask_is_marked_empty() {
+    let mut c = new_contract();
+    assert_eq!(deposit(&mut c, ALICE, 1000, CREATE), 0);
+    fund(&mut c, "0", 1);
+    call(ALICE);
+    c.kill_task("0".into());
+    close_ok(&mut c, ALICE, "0"); // subtask 1 still Funded: its hire is being paid
+    assert_eq!(task(&c, "0").status, TaskStatus::Closed);
+    // The payment settles and empties the sub-account: the orchestrator marks it on the Closed task.
+    assert_eq!(mark_empty_err(&mut c, ORCH, "0", 1), None);
+    assert!(on_balance(&mut c, "0", 1, Some(r#""0""#)));
+    assert_eq!(sub(&c, "0", 1).status, SubtaskStatus::Returned);
+    check(&c, "0");
+    // Nothing more to refund, so a further close is refused rather than sending 0.
+    call(ORCH);
+    let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(c.close_task("0".into()))));
+    assert!(r.is_err());
+}
+
+#[test]
+fn create_task_refunded_when_contract_is_short_of_near() {
+    let mut c = new_contract();
+    call_ctx(USDC, vec![], |b| {
+        b.account_balance(NearToken::from_yoctonear(STAKED + NEW_TASK_FLOOR.as_yoctonear() - 1));
+    });
+    assert_eq!(value(c.ft_on_transfer(acc(ALICE), U128(1000), CREATE.into())).0, 1000);
+    assert!(get_logs().iter().any(|l| l.contains("short of NEAR")));
+    assert_eq!(c.get_config().tasks, 0);
+    call_ctx(USDC, vec![], |b| {
+        b.account_balance(NearToken::from_yoctonear(STAKED + NEW_TASK_FLOOR.as_yoctonear()));
+    });
+    assert_eq!(value(c.ft_on_transfer(acc(ALICE), U128(1000), CREATE.into())).0, 0);
 }
