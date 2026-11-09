@@ -23,9 +23,10 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
   // Same limits as the orchestrator, checked again before any paid LLM call.
   if (req.prompt.length > MAX_PROMPT_CHARS) throw new HttpError(400, `prompt is ${req.prompt.length} characters; the limit is ${MAX_PROMPT_CHARS}`);
   if (budget > config.maxBudgetAtomic) throw new HttpError(400, `budget is above ROOK_MAX_BUDGET_USDC (${formatUsdc(config.maxBudgetAtomic)} USDC)`);
+  if (req.conversation?.earlier.some((m) => m.length > MAX_PROMPT_CHARS)) throw new HttpError(400, `an earlier message is over ${MAX_PROMPT_CHARS} characters`);
   const calls: LlmCall[] = [];
 
-  const { draft: d, notATask } = await llmStep(calls, () => draft(req.prompt, budget, budget - share(budget, req.reserve_share)));
+  const { draft: d, notATask } = await llmStep(calls, () => draft(req.prompt, budget, budget - share(budget, req.reserve_share), req.conversation));
   if (!d.length) throw new HttpError(422, notATask || 'This does not read as a task Rook can plan: say what you want done.', { llm_calls: calls });
   progress({ stage: 'searching', subtasks: d.map((s, index) => ({ index, title: s.title })) });
 
