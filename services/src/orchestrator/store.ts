@@ -1,8 +1,9 @@
 // Task store, events and SSE listeners (docs/agentic-system.md sections 8.2, 8.3, 8.8). Tasks live in memory while the
 // orchestrator runs; with ROOK_DB set, every change is also written to SQLite (db.ts) and reloaded on start.
 import { randomUUID } from 'node:crypto';
-import type {
-  EventType, Evaluation, LlmCall, Part, Plan, PlanSubtask, Receipt, RookEvent, SubtaskStatus, TaskStatus,
+import {
+  MAX_HISTORY_HANDLES, type AgentHistory, type EventType, type Evaluation, type LlmCall, type Part, type Plan, type PlanSubtask,
+  type Receipt, type RookEvent, type SubtaskStatus, type TaskStatus,
 } from '../shared/types.ts';
 import type { ChainBinding } from './chain-ledger.ts';
 import type { Ledger, Recipient } from './ledger.ts';
@@ -116,6 +117,25 @@ export function setSub(t: Task, s: Sub, to: SubtaskStatus) {
   s.status = to;
   t.updated_at = now();
   saveTask(t);
+}
+
+/**
+ * Rook's own record per agent: the evaluator's verdicts on its paid hires, from every task's receipts (all stored tasks
+ * are loaded at start, so with ROOK_DB this spans restarts). Unjudged receipts (verdict null) do not count. The planner
+ * ranks with it (docs/agentic-system.md 5.2 step 4); it takes at most MAX_HISTORY_HANDLES, the most-judged first.
+ */
+export function verdictHistory(tasks: Iterable<Task>): Record<string, AgentHistory> {
+  const by = new Map<string, AgentHistory>();
+  for (const t of tasks) {
+    for (const r of t.receipts) {
+      if (r.verdict !== 'pass' && r.verdict !== 'fail') continue;
+      const h = by.get(r.agent_handle) ?? { pass: 0, fail: 0 };
+      h[r.verdict]++;
+      by.set(r.agent_handle, h);
+    }
+  }
+  const jobs = (h: AgentHistory) => h.pass + h.fail;
+  return Object.fromEntries([...by].sort((a, b) => jobs(b[1]) - jobs(a[1])).slice(0, MAX_HISTORY_HANDLES));
 }
 
 export function taskView(t: Task) {

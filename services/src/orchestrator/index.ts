@@ -4,13 +4,13 @@ import { z } from 'zod';
 import { config, MAX_PROMPT_CHARS } from '../shared/config.ts';
 import { bigintReplacer, call, HttpError, serve, type Ctx, type Routes, type Running } from '../shared/http.ts';
 import { formatUsdc, parseUsdc } from '../shared/money.ts';
-import type { Plan, RookEvent, X402Config } from '../shared/types.ts';
+import type { AgentHistory, Plan, RookEvent, X402Config } from '../shared/types.ts';
 import { attack } from './attack.ts';
 import { createChainLedger } from './chain-ledger.ts';
 import { createLedger, type Ledger } from './ledger.ts';
 import { kill, restoreTask, runTask, SHUTDOWN } from './runner.ts';
 import { openStore } from './db.ts';
-import { emit, fromDoc, isTerminal, newTask, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, type Task } from './store.ts';
+import { emit, fromDoc, isTerminal, newTask, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task } from './store.ts';
 
 const CreateBody = z.object({
   prompt: z.string().trim().min(1),
@@ -22,14 +22,15 @@ const CreateBody = z.object({
 
 /**
  * Asks the planner for a plan, relaying its progress lines as `planning` events. A planner that answers with plain
- * JSON (an older one, or a test double) still works: there is just no progress to relay.
+ * JSON (an older one, or a test double) still works: there is just no progress to relay. `history`: Rook's own
+ * verdicts per agent, which the planner ranks candidates with.
  */
-async function planWithProgress(t: Task): Promise<Plan> {
+async function planWithProgress(t: Task, history: Record<string, AgentHistory>): Promise<Plan> {
   emit(t, 'planning', { stage: 'drafting' });
   const r = await fetch(config.urls.planner + '/plan', {
     method: 'POST',
     headers: { 'content-type': 'application/json', accept: 'application/x-ndjson, application/json' },
-    body: JSON.stringify({ task_id: t.id, prompt: t.prompt, budget_atomic: t.budget_atomic, reserve_share: t.reserve_share }),
+    body: JSON.stringify({ task_id: t.id, prompt: t.prompt, budget_atomic: t.budget_atomic, reserve_share: t.reserve_share, history }),
     signal: t.abort.signal,
   });
   if (!(r.headers.get('content-type') ?? '').includes('ndjson')) {
@@ -153,7 +154,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         try {
           // A kill during planning aborts the wait. ponytail: the planner does not watch the disconnect, so its LLM
           // calls for this plan still finish (and are not in this task's cost).
-          const plan = await planWithProgress(t);
+          const plan = await planWithProgress(t, verdictHistory(tasks.values()));
           if (isTerminal(t.status)) return;
           setPlan(t, plan);
           emit(t, 'plan', plan);

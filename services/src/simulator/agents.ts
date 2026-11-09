@@ -19,7 +19,8 @@ const PRICE = 'Gives a token market snapshot: price, market cap, 24h volume and 
 const a = (handle: string, name: string, description: string, tags: string[], price: string, profile: Profile, specialty: Specialty, success_rate: number, delivered_jobs: number): SimAgent =>
   ({ handle, name, description: `SIMULATED agent. ${description}`, tags: [...tags, 'simulated'], price_atomic: price, profile, specialty, success_rate, delivered_jobs });
 
-// Pairs: a cheap faulty agent and a pricier good one, so cheapest-first hiring meets the fault first.
+// Pairs: a cheap faulty agent and a pricier good one. The cheap one's record still gives it the lower expected cost
+// (planner ranking, docs 5.2 step 4), so the run meets the fault first. success_rate is a percentage, as on the market.
 export const AGENTS: SimAgent[] = [
   a('sim-holders-lite', 'Holders Lite', `Fast and cheap. ${HOLDERS}`, ['holders', 'holder distribution'], '150000', 'wrong_numbers', 'holders', 81, 57),
   a('sim-holders', 'Holders Pro', HOLDERS, ['holders', 'holder distribution'], '300000', 'good', 'holders', 97, 412),

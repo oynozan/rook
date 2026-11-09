@@ -56,9 +56,12 @@ export type LlmCall = {
 };
 
 // ---- Planner (section 5) ----
+// Ranked by expected cost (5.2 step 4): p_pass is the Laplace pass chance (0 to 1, 3 decimals) from the market's record
+// and Rook's own verdicts, expected_cost_atomic = ceil(price / p_pass), rank_reason says how in one sentence.
 export type Candidate = {
   handle: string; name: string; description: string; sla_seconds: number;
   success_rate: number | null; delivered_jobs: number; price_atomic: string; quote: AcceptsRow;
+  p_pass: number; expected_cost_atomic: string; rank_reason: string;
 };
 export type PlanSubtask = {
   id: string; title: string; brief: string; search_terms: string[];
@@ -72,8 +75,15 @@ export type Plan = {
   notes: string[];
   llm_calls: LlmCall[];
 };
+/** Rook's own evaluator verdicts on its earlier hires of one agent (from its receipts). */
+export const AgentHistory = z.object({ pass: z.number().int().min(0), fail: z.number().int().min(0) });
+export type AgentHistory = z.infer<typeof AgentHistory>;
+export const MAX_HISTORY_HANDLES = 500;
 export const PlanRequest = z.object({
   task_id: z.string(), prompt: z.string().min(1), budget_atomic: atomic, reserve_share: z.number().min(0).max(0.9),
+  // By agent handle; optional, so the planner also ranks without it (market record only).
+  history: z.record(z.string().min(1), AgentHistory)
+    .refine((h) => Object.keys(h).length <= MAX_HISTORY_HANDLES, `history lists more than ${MAX_HISTORY_HANDLES} handles`).optional(),
 });
 export const SelfDoRequest = z.object({
   task_id: z.string(), subtask_id: z.string(), brief: z.string(), criteria: z.array(Criterion),

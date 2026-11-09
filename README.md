@@ -29,7 +29,7 @@ pnpm rook attack <task_id>
 What you see:
 
 1. `pnpm dev` prints a yellow `SIMULATION: no real money moves` banner naming each simulated part (market, ledger, LLM). `pnpm rook run` prints the same line before planning.
-2. A plan of 4 subtasks with criteria, candidates (cheapest first) and caps (0.30, 0.20, 0.24, 0.16 USDC; reserve 0.60).
+2. A plan of 4 subtasks with criteria, candidates ranked by expected cost (price over pass chance, with the reason printed under each) and caps (0.30, 0.20, 0.24, 0.16 USDC; reserve 0.60).
 3. The run: a cheap agent with wrong numbers fails a numeric check and is re-hired; an agent whose deliverable carries a prompt injection raises a `SECURITY ALERT` and is re-hired; a failing agent is skipped without charge; a slow agent times out and its authorization is released.
 4. The final report with an agent named for each section, 6 receipts, and the ledger: spent 1.20 USDC, reserve used 0.30, refunded 1.80, invariant holds.
 5. `rook attack`: the injected deliverable's flags and its `FAIL` verdict, then four demands, each `REFUSED` by the ledger: (a) pay the agent again while its payment is outstanding, (b) send 0.50 USDC to `evil-collector.near`, (c) pay above the subtask's cap, (d) fund a re-hire after the kill switch. It ends with `Nothing was paid`.
@@ -173,7 +173,7 @@ What needs the human's approval, always: deploying, creating accounts and keys, 
 
 ## Tracks
 
-- **Agents.** Rook is an agent that hires agents per subtask over A2A + x402, pays each from a capped sub-account within the budget, and keeps a receipt per hire (on the contract in chain mode). Counteroffer substitute: x402 charges an agent's fixed price, so Rook negotiates by choice: it takes 402 quotes from up to 3 candidates per subtask, hires cheapest first, caps each subtask at min(second-cheapest, 2 x cheapest), skips any agent whose price rose after approval, and walks away from quotes the cap and reserve cannot pay.
+- **Agents.** Rook is an agent that hires agents per subtask over A2A + x402, pays each from a capped sub-account within the budget, and keeps a receipt per hire (on the contract in chain mode). Counteroffer substitute: x402 charges an agent's fixed price, so Rook negotiates by choice: it takes 402 quotes from up to 3 candidates per subtask, ranks them by expected cost (price over a pass chance from the market's record and Rook's own verdicts on earlier hires) and hires in that order, caps each subtask at min(larger of the first two ranked prices, 2 x the first), skips any agent whose price rose after approval, and walks away from quotes the cap and reserve cannot pay.
 - **Swarms.** One sub-account per hired agent under the contract, so every on-chain action traces to one agent and one subtask; subtasks run in parallel; cross-checks compare numbers between agents' deliverables. Simulation mode runs scripted agents with no LLM calls (`ROOK_LLM=canned`).
 - **Security.** Caps fixed by the owner's own transfer and enforced by the contract; one sub-account per subtask; function-call keys split by role; deliverables are data, never instructions (an injection scanner fails any deliverable that tries to steer payment); `rook attack <task_id>` replays an injected deliverable's demands against the ledger, and in chain mode against the signer and the contract, and shows each refusal; kill switch; service token and per-account task scoping; budget and prompt limits.
 
