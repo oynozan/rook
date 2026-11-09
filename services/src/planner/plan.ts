@@ -166,12 +166,13 @@ function rank(a: AgentSummary, price: string, own: AgentHistory | undefined): Pi
   // about passing, so they count as 0 of 0. Market numbers are untrusted: clamped, and non-finite ones ignored.
   const known = a.success_rate !== null && Number.isFinite(a.success_rate) && Number.isFinite(a.delivered_jobs);
   const mJobs = known ? Math.max(0, Math.floor(a.delivered_jobs)) : 0;
-  const mPass = known ? Math.round(Math.min(1, Math.max(0, a.success_rate! / 100)) * mJobs) : 0; // never above mJobs
+  // Multiply before dividing so a half rounds up exactly: 29% of 50 is 14.5 -> 15 (0.29 * 50 is 14.4999... -> 14).
+  const mPass = known ? Math.min(mJobs, Math.round((Math.min(100, Math.max(0, a.success_rate!)) * mJobs) / 100)) : 0;
   const rPass = own?.pass ?? 0, rJobs = rPass + (own?.fail ?? 0);
   const s = mPass + rPass, n = mJobs + rJobs;
   // price / p = price * (n + 2) / (s + 1), rounded up in integers: money never goes through a float.
   const expected = (BigInt(price) * BigInt(n + 2) + BigInt(s)) / BigInt(s + 1);
-  const p_pass = Math.round(((s + 1) / (n + 2)) * 1000) / 1000;
+  const p_pass = Math.min(1, Math.round(((s + 1) * 1000) / (n + 2)) / 1000); // 201 / 400 = 0.5025 -> 0.503, same reason
   const record = [mJobs > 0 && `market ${mPass} of ${mJobs}`, rJobs > 0 && `Rook ${rPass} of ${rJobs}`].filter(Boolean).join(', ') || 'no record yet';
   return {
     p_pass, expected_cost_atomic: expected.toString(),

@@ -208,6 +208,17 @@ test("Rook's own fails push an agent down; its passes count too", () => {
   assert.match(after[1].rank_reason, /\(market 9 of 10, Rook 0 of 5\)/);
 });
 
+test('halves round up exactly: market successes and p_pass have no float drift', () => {
+  const [c] = buildPlan(input({
+    draft: [sub('a')],
+    selected: [[agent('half', { success_rate: 29, delivered_jobs: 50 })]], // 14.5 successes, 0.29 * 50 in floats is 14.4999...
+    quotes: { half: row('100000') },
+    history: { half: { pass: 185, fail: 163 } }, // 15 + 185 = 200 of 50 + 348 = 398: p = 201 / 400 = 0.5025
+  })).subtasks[0].candidates;
+  assert.deepEqual([c.p_pass, c.expected_cost_atomic], [0.503, '199005']); // ceil(0.10 x 400 / 201)
+  assert.match(c.rank_reason, /\(market 15 of 50, Rook 185 of 348\)/);
+});
+
 test('no record at all gives p_pass 0.5; ties break on p_pass, delivered jobs, then handle', () => {
   const p = buildPlan(input({
     draft: [sub('a')],
