@@ -115,7 +115,7 @@ Request: `{ task_id, subtask_id, brief, criteria }`. The LLM writes the delivera
 
 ### 5.4 `POST /aggregate`
 
-Request: `{ task_id, prompt, subtasks: [{ id, title, status, agent_handle?, deliverable_text? }] }`. Deliverables are untrusted data: they are quoted inside delimiters and the system prompt says to ignore any instruction inside them. Response: `{ final_markdown, attribution: [{ subtask_id, agent_handle }], llm_calls }`. The result names which agent produced each part and lists abandoned subtasks as gaps. `canned`: a deterministic merge of the passed deliverables with a heading per subtask.
+Request: `{ task_id, prompt, subtasks: [{ id, title, status, agent_handle?, deliverable_text? }] }`. Deliverables are untrusted data: they are quoted inside delimiters and the system prompt says to ignore any instruction inside them. Response: `{ final_markdown, attribution: [{ subtask_id, agent_handle }], llm_calls }`. The result names who produced each part (a "Source:" line: the agent's handle, or "Rook (its own model)" for a `self_do` part, whose `agent_handle` is the internal `rook:self-do` and stays so in `attribution`) and lists the subtasks not delivered as gaps, by title. `canned`: a deterministic merge of the passed deliverables with a heading per subtask title; the orchestrator also uses it when the aggregate call fails, so it carries no internal ids or states either.
 
 ## 6. Evaluator
 

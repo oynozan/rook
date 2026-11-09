@@ -84,13 +84,17 @@ type AggIn = z.infer<typeof AggregateRequest>;
 /** A subtask is merged only when it passed and has text; everything else is a gap. */
 export const isMerged = (s: AggIn['subtasks'][number]) => s.status === 'passed' && !!s.deliverable_text;
 export const agentOf = (s: AggIn['subtasks'][number]) => s.agent_handle ?? 'rook (self-do)';
+/** Who wrote a part, in the report's words: the agent's handle, or Rook for its own work ('rook:self-do' is internal). */
+const SELF_DO_SOURCE = 'Rook (its own model)';
+export const sourceOf = (s: AggIn['subtasks'][number]) => (!s.agent_handle || s.agent_handle === 'rook:self-do' ? SELF_DO_SOURCE : s.agent_handle);
 
 export function cannedAggregate(req: AggIn): string {
   const out = [`# ${req.prompt.split('\n')[0].trim()}`, ''];
   for (const s of req.subtasks.filter(isMerged)) {
-    out.push(`## ${s.id}. ${s.title}`, '', `_Delivered by \`${agentOf(s)}\`._`, '', s.deliverable_text!.trim(), '');
+    const source = sourceOf(s);
+    out.push(`## ${s.title}`, '', `_Source: ${source === SELF_DO_SOURCE ? source : `\`${source}\``}._`, '', s.deliverable_text!.trim(), '');
   }
   const gaps = req.subtasks.filter((s) => !isMerged(s));
-  if (gaps.length) out.push('## Gaps', '', ...gaps.map((s) => `- ${s.id}. ${s.title} (${s.status}): not delivered`), '');
+  if (gaps.length) out.push('## Gaps', '', ...gaps.map((s) => `- ${s.title}: not delivered`), '');
   return out.join('\n');
 }
