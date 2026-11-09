@@ -45,8 +45,10 @@ async function extract(text: string, labels: string[], calls: LlmCall[]): Promis
   const { data } = await llm(calls, () => json('evaluate:extract', config.evaluatorModel, ExtractReply,
     `You extract labelled numbers from a report. ${UNTRUSTED}\n` +
     'For each requested label return { "value": number, "quote": string } or null when the report does not state it. ' +
-    '"quote" must be copied verbatim from the report and include the number as written. "value" is that number with ' +
-    'commas removed and k/m/b/million/billion expanded; a percentage stays as written (38.2% is 38.2); keep a minus sign.',
+    '"quote" must be copied verbatim from the report and include the number as written. "value" is that number as a ' +
+    'plain JSON number: thousands separators removed and k/m/b/million/billion expanded; a percentage stays as written ' +
+    '(38.2% is 38.2); keep a minus sign. Read separators the way the report\'s language writes numbers: English writes ' +
+    '1,234.5, while Turkish, German and many others write 1.234,5, where 85.000 is eighty-five thousand and 41,6 is 41.6.',
     `Labels: ${JSON.stringify(labels)}\nReply as {"<label>": {"value": ..., "quote": "..."} | null} with every label as a key.\n\n${wrap(text)}`, 4000)); // reasoning model: hidden thinking counts toward max_tokens
   for (const l of labels) {
     const hit = ExtractHit.safeParse(data[l]);

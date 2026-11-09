@@ -69,13 +69,33 @@ export function scanInjection(text: string): string[] {
 // ---- Numbers, extraction, verification (6.3) ----
 
 const SUFFIX = String.raw`(?:\s?(k|m|b|bn|mn|thousand|million|billion)\b)?`;
-// A leading minus counts only when it is not a hyphen inside a range or word ("10-20", "24h-volume").
-const NUMBER = String.raw`((?:(?<![\w.,])[-−])?(?:\d[\d,]*(?:\.\d+)?|\.\d+))` + SUFFIX + String.raw`(\s?%)?`;
+// A leading minus counts only when it is not a hyphen inside a range or word ("10-20", "24h-volume"). The first form
+// is '.' grouping thousands, as Turkish, German and many others write ("1.234.567", "1.234,5"); the second, English.
+const NUMBER = String.raw`((?:(?<![\w.,])[-−])?(?:\d{1,3}(?:\.\d{3})+(?!\d)(?:,\d+)?|\d[\d,]*(?:\.\d+)?|\.\d+))` + SUFFIX + String.raw`(\s?%)?`;
 const MULT: Record<string, number> = { k: 1e3, thousand: 1e3, m: 1e6, mn: 1e6, million: 1e6, b: 1e9, bn: 1e9, billion: 1e9 };
 
-/** "3,680,000,000" -> 3.68e9, "2.1" + "b" -> 2.1e9, "41.6" + "%" -> 41.6. */
+/**
+ * What a number as written can mean, the English reading first. With both separators the last one is the decimal
+ * point ("1,234.5", "1.234,5"); several of one separator group thousands ("1,234,567", "1.234.567"); a single one
+ * before exactly 3 digits is ambiguous ("85.000" is 85 in English and 85000 in Turkish or German; "3,125" is 3125 or
+ * 3.125), so both readings are returned; a single ',' before any other count of digits is a decimal comma ("41,6").
+ */
+export function readings(num: string): number[] {
+  const neg = /^[-−]/.test(num), s = num.replace(/^[-−]/, '').replace(/,+$/, '');
+  const en = () => Number(s.replace(/,/g, '')), eu = () => Number(s.replace(/\./g, '').replace(',', '.'));
+  const dots = s.split('.').length - 1, commas = s.split(',').length - 1;
+  let out: number[];
+  if (dots && commas) out = [s.lastIndexOf('.') > s.lastIndexOf(',') ? en() : eu()];
+  else if (dots > 1) out = [eu()];
+  else if (/^[1-9]\d{0,2}[.,]\d{3}$/.test(s)) out = [en(), eu()];
+  else if (commas === 1) out = [eu()];
+  else out = [en()];
+  return out.map((n) => (neg ? -n : n));
+}
+
+/** "3,680,000,000" -> 3.68e9, "1.234,5" -> 1234.5, "2.1" + "b" -> 2.1e9, "41.6" + "%" -> 41.6; the English reading. */
 export function parseNumber(num: string, suffix?: string): number {
-  const n = Number(num.replace(/,/g, '').replace('−', '-'));
+  const n = readings(num)[0];
   return suffix ? n * MULT[suffix.toLowerCase()] : n;
 }
 
@@ -94,16 +114,19 @@ export function extractCanned(text: string, label: string): { value: number; quo
 /**
  * Accept an extraction only if the quote appears verbatim in the text (whitespace and emphasis normalised) and
  * one of the numbers in the quote equals the value (as written or with its k/m/b suffix expanded; the sign may be
- * dropped by the extractor). The stored value is the one parsed from the quote, sign included, so an extractor
- * cannot invent or rescale a number. Digits inside the label itself ("Top 10 holders share") do not count.
+ * dropped by the extractor). A number with an ambiguous separator ("85.000") may be read either way (readings): the
+ * extractor sees the report's language. The stored value is the one parsed from the quote, sign included, so an
+ * extractor cannot invent or rescale a number beyond that. Digits inside the label ("Top 10 holders share") do not count.
  */
 export function verifyQuote(text: string, quote: string, value: number, label = ''): { value: number; quote: string } | null {
   if (!quote || !Number.isFinite(value) || !norm(text).includes(norm(quote))) return null;
   const close = (a: number, b: number) => Math.abs(a - b) <= 1e-9 * Math.max(1, Math.abs(a), Math.abs(b));
   const numbersPart = label ? quote.replace(new RegExp(escapeRe(label), 'gi'), ' ') : quote;
   for (const m of numbersPart.matchAll(new RegExp(NUMBER, 'gi'))) {
-    const raw = parseNumber(m[1]), full = parseNumber(m[1], m[2]);
-    if ([raw, full].some((n) => close(n, value) || close(Math.abs(n), Math.abs(value)))) return { value: full, quote };
+    for (const raw of readings(m[1])) {
+      const full = m[2] ? raw * MULT[m[2].toLowerCase()] : raw;
+      if ([raw, full].some((n) => close(n, value) || close(Math.abs(n), Math.abs(value)))) return { value: full, quote };
+    }
   }
   return null;
 }

@@ -153,6 +153,39 @@ test('quotes survive Markdown emphasis; negative figures keep their sign', async
   assert.equal(ev.verdict, 'pass', JSON.stringify(ev.results));
 });
 
+test('numbers in Turkish, German and similar formats parse; English ones read as before', async () => {
+  const { readings, parseNumber } = await import('../src/evaluator/checks.ts');
+  // English, unchanged: comma groups, dot decimals, suffixes, signs.
+  for (const [s, n] of [['3,680,000,000', 3.68e9], ['1,234.5', 1234.5], ['41.6', 41.6], ['0.125', 0.125], ['3.12', 3.12], ['412,530', 412530], ['-3.2', -3.2], ['.5', 0.5]] as const) {
+    assert.equal(parseNumber(s), n, s);
+  }
+  assert.equal(parseNumber('2.1', 'b'), 2.1e9);
+  // Dot groups, comma decimals: unambiguous ones parse one way.
+  for (const [s, n] of [['1.234,5', 1234.5], ['1.234.567', 1234567], ['3.680.000.000', 3.68e9], ['41,6', 41.6], ['0,5', 0.5], ['1.234.567,89', 1234567.89]] as const) {
+    assert.deepEqual(readings(s), [n], s);
+  }
+  // One separator before exactly 3 digits: both readings, English first.
+  assert.deepEqual(readings('85.000'), [85, 85000]);
+  assert.deepEqual(readings('3.125'), [3.125, 3125]);
+  assert.deepEqual(readings('85,000'), [85000, 85]);
+
+  // Real case: a Turkish agent wrote rents and population with dot thousands, and honest work failed its checks.
+  const TR = 'Ortalama aylık kira (TL): 85.000\nKadıköy nüfusu: 1.234.567\nOrtalama m2 kira: 450,5\nDoluluk oranı: %92,4';
+  assert.equal(verifyQuote(TR, 'Ortalama aylık kira (TL): 85.000', 85000, 'Ortalama aylık kira (TL)')?.value, 85000); // the extractor's reading
+  assert.equal(verifyQuote(TR, 'Ortalama aylık kira (TL): 85.000', 85, 'Ortalama aylık kira (TL)')?.value, 85); // still the digits as written
+  assert.equal(verifyQuote(TR, 'Ortalama aylık kira (TL): 85.000', 850, 'Ortalama aylık kira (TL)'), null); // never another scale
+  assert.equal(extractCanned(TR, 'Kadıköy nüfusu')?.value, 1234567);
+  assert.equal(extractCanned(TR, 'Ortalama m2 kira')?.value, 450.5);
+  assert.equal(verifyQuote(TR, 'Doluluk oranı: %92,4', 92.4, 'Doluluk oranı')?.value, 92.4);
+  // English deliverables keep their readings next to the new forms.
+  assert.equal(extractCanned('Price (USD): 3.125\nVolume: 4,200,000', 'Price (USD)')?.value, 3.125);
+  assert.equal(extractCanned('Price (USD): 3.125\nVolume: 4,200,000', 'Volume')?.value, 4_200_000);
+
+  const crit = [c('c1', 'numeric_match', { label: 'Kadıköy nüfusu', min: 100000 }), c('c2', 'numeric_match', { label: 'Ortalama m2 kira', min: 50, max: 5000 })];
+  const ev = await evaluate(req('s1', TR, crit));
+  assert.equal(ev.verdict, 'pass', JSON.stringify(ev.results));
+});
+
 test('a contains pattern with regex characters also matches its literal text', async () => {
   const ev = await evaluate(req('s4', MARKET, [c('c1', 'contains', { pattern: 'Price (USD)' }), c('c2', 'contains', { pattern: 'gini' })]));
   assert.deepEqual(ev.failed_criteria, ['c2']);
