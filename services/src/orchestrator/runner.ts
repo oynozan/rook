@@ -16,7 +16,7 @@ import {
   TERMINAL, type A2AState, type A2ATask, type AcceptsRow, type AggregateResult, type Candidate, type Evaluation,
   type GatewayResult, type LlmCall, type Part, type TaskStatus, type X402Config,
 } from '../shared/types.ts';
-import { OtherContract, type ChainLedger } from './chain-ledger.ts';
+import { OtherContract, Unrebuildable, type ChainLedger } from './chain-ledger.ts';
 import { LedgerError, type Ledger, type Recipient } from './ledger.ts';
 import { emit, isFree, isTerminal, now, saveTask, setStatus, setSub, type Hire, type ReceiptView, type Sub, type Task } from './store.ts';
 
@@ -345,8 +345,8 @@ type Step2 = (() => Promise<void>) | null;
 
 /**
  * Restart, chain mode, step 1 (before the API listens): rebuild Rook's books for `t` from the contract. Returns step 2,
- * which finishes it: resume the run, or unwind what a killed or failed task still holds. Null: nothing left to do, or
- * the task is another contract's. A rebuild that fails (the chain gateway or NEAR not answering, a transfer still in
+ * which finishes it: resume the run, or unwind what a killed or failed task still holds. Null: nothing left to do, the
+ * task is another contract's, or its contract task's numbers don't fit Rook's books. A rebuild that fails (the chain gateway or NEAR not answering, a transfer still in
  * flight) is tried again in step 2, once the API listens, waiting longer each time as the unwind does, until it works;
  * only a shutdown stops it, and the next start tries again. Each problem is reported once. Meanwhile the task is
  * `restoring`: a Stop says its money comes back, and its event stream stays open until it has.
@@ -377,13 +377,16 @@ async function rebuild(ledger: ChainLedger, t: Task, said: { last: string }): Pr
   try {
     r = await ledger.restore(t.id, t.chain!, { funder: t.funder ?? '', budget: BigInt(t.budget_atomic), reserve_share: t.reserve_share, saved: t.ledger_saved });
   } catch (e) {
-    const other = e instanceof OtherContract;
-    if (other) t.restoring = false; // never bound here, so nothing of it moves: before the event, which ends its stream
-    const next = other ? 'It is left as it is, for a Rook that runs that contract.' : 'Rook tries again, waiting longer each time.';
+    const other = e instanceof OtherContract, misfit = e instanceof Unrebuildable;
+    // Never bound here, so nothing of it moves: cleared before the event, which then ends its stream.
+    if (other || misfit) t.restoring = false;
+    const next = other ? 'It is left as it is, for a Rook that runs that contract.'
+      : misfit ? "Every try would fail the same way, so it is left as it is for Rook's operator."
+      : 'Rook tries again, waiting longer each time.';
     const message = `after a restart Rook could not rebuild contract task ${cid}: ${msg(e)}. ${next}`;
     if (message !== said.last) emit(t, 'error', { kind: 'restore', message }, undefined, true);
     said.last = message;
-    return other ? null : 'again';
+    return other || misfit ? null : 'again';
   }
   // Rebuilt and bound: from here its books say whether money moves. A rebuild tried again ran while the API listened,
   // so a page may be following the task (stopped meanwhile, say): it hears the books are back.

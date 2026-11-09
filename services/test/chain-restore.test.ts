@@ -32,6 +32,7 @@ let authTtlMs = 60_000;
 let openTasks = 0; // the funder's open tasks on the contract (its limit is 1 below)
 let openTasksGate: Promise<void> = Promise.resolve(); // holds the open-task read, as a slow NEAR RPC does
 const failing = new Map<string, number>(); // gateway route -> how many more calls fail, as a NEAR RPC hiccup does
+const reads = new Map<string, number>(); // contract task -> how often the gateway read it
 const hiccup = (route: string) => {
   const n = failing.get(route) ?? 0;
   if (n > 0) { failing.set(route, n - 1); throw new HttpError(502, `${route} failed: NEAR RPC send_tx: INVALID_TRANSACTION {}`); }
@@ -94,6 +95,7 @@ before(async () => {
     'GET /config': () => ({ network: 'testnet', contract_id: 'rook.test', owner: 'owner.test', usdc: 'usdc.test', max_open_tasks: 1 }),
     'GET /open-tasks': async ({ query }) => { calls.push(`open-tasks ${query.get('account')}`); await openTasksGate; return { open: openTasks }; },
     'GET /task/:id': ({ params }) => {
+      reads.set(params.id, (reads.get(params.id) ?? 0) + 1);
       hiccup('task');
       const x = contract.get(params.id);
       if (!x) throw new HttpError(404, `no contract task ${params.id}`);
@@ -502,6 +504,44 @@ test('a task stopped while its restore is being tried again: the signer hears it
     assert.ok(evs.some((e) => e.type === 'ledger' && e.data.op === 'restored' && e.data.contract_task_id === 'rk'));
     assert.equal(evs.at(-1).data.op, 'closeTask');
   } finally { await orch.close(); failing.clear(); }
+});
+
+test("a rebuild the books refuse half-way (the contract's numbers don't fit them) leaves nothing half-built and is not tried again", async () => {
+  const { createChainLedger, Unrebuildable } = await import('../src/orchestrator/chain-ledger.ts');
+  // Topped up by more than the 200 000 reserve Rook's books keep: the books refuse the top-up after they were opened.
+  const misfit = (cid: string) => {
+    openContractTask(cid, ['300000']);
+    contract.get(cid)!.subs.push({ ...fundedSub(cid, 1, '300000'), topped_up: '300000' });
+    bal.set(acct(cid, 1), 600_000n);
+  };
+  misfit('hb');
+  const l = createChainLedger();
+  const bd = { contract_task_id: 'hb', contract_id: 'rook.test', network: 'testnet', nmap: { 1: 1 }, accounts: { 1: acct('hb', 1) }, auths: {} };
+  const t = { funder: 'owner.test', budget: 1_000_000n, reserve_share: 0.2, saved: null };
+  const refused = (e: any) => e instanceof Unrebuildable && /don't fit Rook's books: .*exceeds remaining reserve/.test(e.message);
+  await assert.rejects(l.restore('T-hb', bd, t), refused);
+  assert.deepEqual([l.view('T-hb'), l.contractTaskOf('T-hb')], [null, null]); // no books left half-built, nothing bound
+  await assert.rejects(l.restore('T-hb', bd, t), refused); // the same answer again, never "task already exists"
+
+  // The orchestrator reports it once and leaves the task as it is, showing the books it stored.
+  process.env.ROOK_DB = join(dir, 'misfit.sqlite');
+  misfit('hb2');
+  storeTask('t_misfit', 'running', 'hb2', { cap_atomic: '300000' }, {}, '600000', { contract_id: 'rook.test', network: 'testnet' });
+  const orch = await start(0);
+  try {
+    const s = await snap(orch, 't_misfit');
+    assert.deepEqual([s.task.status, s.ledger], ['running', { closed: false, subtasks: [{ n: 1, balance_atomic: '600000' }] }]);
+    const seen = reads.get('hb2');
+    await new Promise((ok) => setTimeout(ok, 300)); // longer than the first waits before a try again
+    assert.equal(reads.get('hb2'), seen);
+  } finally { await orch.close(); }
+  const store = openStore(process.env.ROOK_DB!);
+  const doc = store.load().find((d) => d.id === 't_misfit')!;
+  store.close();
+  assert.equal(doc.status, 'running');
+  const errs = restoreErrors(doc);
+  assert.equal(errs.length, 1);
+  assert.match(errs[0].data.message, /^after a restart Rook could not rebuild contract task hb2: the contract's numbers don't fit Rook's books: .*Every try would fail the same way, so it is left as it is for Rook's operator\.$/);
 });
 
 test('a task bound on another contract is left as it is, and its contract task id does not block /funded here', async () => {

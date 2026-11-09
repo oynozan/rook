@@ -40,6 +40,8 @@ type Bound = { cid: string; contract_id: string; network: string; nmap: Map<numb
 const toMap = <V>(o: Record<string, V> | undefined) => new Map(Object.entries(o ?? {}).map(([k, v]) => [Number(k), v] as [number, V]));
 /** A stored binding made on another contract or network: restore leaves its task alone and binds nothing. */
 export class OtherContract extends Error { override name = 'OtherContract'; }
+/** The contract task's numbers don't fit Rook's books (a reserve rounded another way, say): every try would fail the same. */
+export class Unrebuildable extends Error { override name = 'Unrebuildable'; }
 /** What a contract task still holds for its funder (a late return after a close lands in unallocated). */
 const owed = (ct: any) => BigInt(ct.unallocated ?? 0) + BigInt(ct.reserve_remaining ?? 0);
 /** Balance reads after a landed delegate before its payment is booked unpaid (about a second apart live). */
@@ -51,7 +53,8 @@ export type ChainLedger = Ledger & {
   binding(task_id: string): ChainBinding | null;
   /**
    * Rebuilds the books from the contract; `saved` is the ledger view stored with the task (to tell landed payments).
-   * Throws OtherContract for a binding made on another contract; binds only once the contract task was read.
+   * Throws OtherContract for a binding made on another contract, and Unrebuildable when the contract task's numbers
+   * don't fit the books (both are left as they are, never tried again); binds only once the contract task was read.
    * `deleted`: the contract deleted the task (refunded before any subtask was funded), so the books are closed.
    */
   restore(task_id: string, b: ChainBinding, t: { funder: string; budget: bigint; reserve_share: number; saved: any }): Promise<{ status: string; killed: boolean; deleted?: boolean; notes: string[] }>;
@@ -353,27 +356,34 @@ export function createChainLedger(): ChainLedger {
       const R = 'restored', allow = [{ network: R, asset: R, payTo: R }];
       const book = (n: number, amount: bigint, payment_hash: string) =>
         m.authorize(task_id, n, { scheme: 'exact', network: R, asset: R, payTo: R, amount: amount.toString(), maxTimeoutSeconds: 1 }, allow, { header: '', payment_hash });
-      for (const [n, k] of x.nmap) {
-        if (!holds.has(n)) continue;
-        const cs = subs.find((s) => s.n === k)!;
-        x.accounts.set(n, cs.account_id);
-        const cap = BigInt(cs.cap), funded = cap + BigInt(cs.topped_up);
-        m.fundSubtask(task_id, n, cap);
-        if (funded > cap) m.topUp(task_id, n, funded - cap);
-        const left = holds.get(n)!;
-        const auth = cs.status === 'Funded' ? x.auths.get(n) : undefined;
-        if (!auth) x.auths.delete(n);
-        // An outstanding authorization already paid shows as a balance below the one stored before the restart.
-        const was = (t.saved?.subtasks ?? []).find((s: any) => s.n === n);
-        const held = auth ? BigInt(auth.amount) : 0n;
-        const landed = auth !== undefined && was !== undefined && left <= BigInt(was.balance_atomic) - held;
-        let spent = funded - left - (landed ? held : 0n);
-        if (spent < 0n) { notes.push(`subtask ${n}: ${cs.account_id} holds ${-spent} more than it was funded with, not counted`); spent = 0n; }
-        if (spent > 0n) { book(n, spent, R); m.settle(task_id, n); }
-        if (auth) {
-          try { book(n, held, auth.payment_hash); } catch (e: any) { notes.push(`subtask ${n}: authorization ${auth.payment_hash} not restored: ${e.message}`); x.auths.delete(n); }
+      // A refusal from here on (the contract's numbers don't fit the books) would come back on every try: the half-built
+      // books are dropped, and the restore is not tried again.
+      try {
+        for (const [n, k] of x.nmap) {
+          if (!holds.has(n)) continue;
+          const cs = subs.find((s) => s.n === k)!;
+          x.accounts.set(n, cs.account_id);
+          const cap = BigInt(cs.cap), funded = cap + BigInt(cs.topped_up);
+          m.fundSubtask(task_id, n, cap);
+          if (funded > cap) m.topUp(task_id, n, funded - cap);
+          const left = holds.get(n)!;
+          const auth = cs.status === 'Funded' ? x.auths.get(n) : undefined;
+          if (!auth) x.auths.delete(n);
+          // An outstanding authorization already paid shows as a balance below the one stored before the restart.
+          const was = (t.saved?.subtasks ?? []).find((s: any) => s.n === n);
+          const held = auth ? BigInt(auth.amount) : 0n;
+          const landed = auth !== undefined && was !== undefined && left <= BigInt(was.balance_atomic) - held;
+          let spent = funded - left - (landed ? held : 0n);
+          if (spent < 0n) { notes.push(`subtask ${n}: ${cs.account_id} holds ${-spent} more than it was funded with, not counted`); spent = 0n; }
+          if (spent > 0n) { book(n, spent, R); m.settle(task_id, n); }
+          if (auth) {
+            try { book(n, held, auth.payment_hash); } catch (e: any) { notes.push(`subtask ${n}: authorization ${auth.payment_hash} not restored: ${e.message}`); x.auths.delete(n); }
+          }
+          if (cs.status === 'Returned') m.returnLeftover(task_id, n);
         }
-        if (cs.status === 'Returned') m.returnLeftover(task_id, n);
+      } catch (e: any) {
+        m.drop(task_id);
+        throw new Unrebuildable(`the contract's numbers don't fit Rook's books: ${e?.message ?? e}`);
       }
       // A return that reached the task after its close sits in it until another close_task: Rook's books stay open for it.
       if (ct.status === 'Closed' && owed(ct) > 0n) notes.push(`closed on chain, but ${owed(ct)} returned after the close is still in the contract task; Rook's close_task refunds it`);

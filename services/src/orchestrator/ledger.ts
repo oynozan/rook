@@ -181,6 +181,9 @@ export function createLedger() {
 
     kill(task_id: string) { killed.add(task_id); },
 
+    /** Forgets a task's books. Only the chain mirror uses it: a rebuild from the contract that fails half-way. */
+    drop(task_id: string) { accts.delete(task_id); },
+
     holds,
 
     /** Read-only view; bigints (serialised as strings by the HTTP layer). Null before createTask. */
