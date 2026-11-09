@@ -307,8 +307,13 @@ test('the raw texts a failed transfer or refund carries read in plain words', ()
     ['need 1 to 8 caps, each > 0', "the plan's spending limits don't fit the contract's rules; draft the task again"],
     ['contract is killed', 'the Rook contract is paused and takes no new tasks'],
     ['{"ActionError":{"index":0,"kind":{"LackBalanceForState":{"account_id":"rook.near","amount":"1"}}}}', 'the Rook contract is short of NEAR for new tasks; try again later'],
+    // The same error about the sender: the wallet, not the contract, is short of NEAR.
+    ['{"InvalidTxError":{"LackBalanceForState":{"signer_id":"alice.near","amount":"1820000000000000000000"}}}', "your wallet doesn't hold enough NEAR to pay for the transaction"],
     ['Smart contract panicked: unknown task', 'the contract has no such task any more; its USDC was most likely refunded already'],
     ['Smart contract panicked: subtask 2 has not returned its leftover', "part of this task still holds USDC, so the contract can't close it yet; try again in a few minutes"],
+    ['Smart contract panicked: subtask 1 has a transfer in flight', "part of this task still holds USDC, so the contract can't close it yet; try again in a few minutes"],
+    // A close already under way: the refund is coming, nothing is stuck.
+    ['Smart contract panicked: task is closing', 'the contract is already closing this task, and its USDC is on its way back to the wallet that funded it'],
   ];
   for (const [raw, want] of plain) assert.equal(plainReason(raw), want, raw);
   // Anything else as NEAR gave it, without the panic prefix.

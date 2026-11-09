@@ -302,12 +302,17 @@ export function plainReason(reason: string): string {
   if ((m = r.match(/^budget below the minimum of (\d+)/))) return `the budget is below the contract's minimum of ${usdc(m[1])} USDC`;
   if ((m = r.match(/^\S+ already has (\d+) open tasks/))) return `your account already has ${m[1]} tasks open on the Rook contract, the most it allows; wait for one to close`;
   if (/^contract is killed/.test(r)) return 'the Rook contract is paused and takes no new tasks';
-  if (/LackBalanceForState/.test(r)) return 'the Rook contract is short of NEAR for new tasks; try again later';
+  // NEAR names the signer (signer_id) when the sender can't cover its own storage, and the account (account_id) when a
+  // receipt would leave that account, here the Rook contract, short.
+  if (/LackBalanceForState/.test(r)) {
+    return /signer_id/.test(r) ? "your wallet doesn't hold enough NEAR to pay for the transaction" : 'the Rook contract is short of NEAR for new tasks; try again later';
+  }
   if (/^need 1 to \d+ caps|^caps add up to more than budget|^need reserve_bps/.test(r)) return "the plan's spending limits don't fit the contract's rules; draft the task again";
   // The funder's close_task.
   if (/^unknown task/.test(r)) return 'the contract has no such task any more; its USDC was most likely refunded already';
   if (/^task is already closed/.test(r)) return 'the contract already closed this task';
-  if (/has not returned its leftover|has a transfer in flight|^task is closing/.test(r)) return "part of this task still holds USDC, so the contract can't close it yet; try again in a few minutes";
+  if (/^task is closing/.test(r)) return 'the contract is already closing this task, and its USDC is on its way back to the wallet that funded it';
+  if (/has not returned its leftover|has a transfer in flight/.test(r)) return "part of this task still holds USDC, so the contract can't close it yet; try again in a few minutes";
   return r;
 }
 
