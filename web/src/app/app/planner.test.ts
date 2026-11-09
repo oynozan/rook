@@ -54,6 +54,12 @@ test('a part Rook does itself says the true reason: no fitting agent, or a budge
     'The cheapest agent found for this part asks 0.85 USDC, more than this budget has left for it after the reserve, so Rook does it with its own model. A budget of about 1.07 USDC would hire one.');
   assert.match(selfDoWhy({ self_do_reason: 'over_budget', self_do_need_atomic: '300000' }, 1_130_000n, true), /more than this budget has left for it after the reserve and the parts before it, so/);
   assert.match(selfDoWhy({ self_do_reason: 'over_budget', self_do_need_atomic: '850000' }, null), /asks 0\.85 USDC.*A larger budget would hire one\.$/);
+  // Never a budget above the largest Rook takes (the composer would refuse it): say no budget can hire one.
+  const big = { self_do_reason: 'over_budget' as const, self_do_need_atomic: '50000000' };
+  assert.match(selfDoWhy(big, 62_500_000n, false, '50000000'), /asks 50\.00 USDC.*Even the largest budget Rook takes, 50\.00 USDC, is too small to hire one\.$/);
+  assert.doesNotMatch(selfDoWhy(big, 62_500_000n, false, '50000000'), /62\.50/);
+  assert.match(selfDoWhy(big, 50_000_000n, false, '50000000'), /A budget of about 50\.00 USDC would hire one\.$/); // the largest itself is fine
+  assert.match(selfDoWhy(big, 62_500_000n, false, null), /A budget of about 62\.50 USDC would hire one\.$/); // older services name no limit
   // Older plans don't say: no reason is claimed.
   assert.equal(selfDoWhy({}), 'No agent is hired: Rook does this part with its own model.');
 });
@@ -94,6 +100,10 @@ test('a plan Rook does all by itself blames the market or the budget only when t
   // With what the agents ask, the budget that would hire them is named.
   assert.match(allSelfDoWhy(['over_budget'], 1_070_000n), /Draft it again with a budget of about 1\.07 USDC to hire them\.$/);
   assert.match(allSelfDoWhy(['no_agent', 'over_budget'], 2_500_000n), /Draft it again with a budget of about 2\.50 USDC to hire agents for those\.$/);
+  // Above the largest budget Rook takes, no draft can hire them: said so, never "draft it again".
+  assert.match(allSelfDoWhy(['over_budget'], 62_500_000n, '50000000'), /them all itself with its own model\. Even the largest budget Rook takes, 50\.00 USDC, is too small to hire them\.$/);
+  assert.match(allSelfDoWhy(['no_agent', 'over_budget'], 62_500_000n, '50000000'), /Even the largest budget Rook takes, 50\.00 USDC, is too small to hire agents for those\.$/);
+  assert.match(allSelfDoWhy(['over_budget'], 1_070_000n, '50000000'), /Draft it again with a budget of about 1\.07 USDC to hire them\.$/);
   // Mixed: both, briefly.
   const mixed = allSelfDoWhy(['no_agent', 'over_budget']);
   assert.match(mixed, /fits some of these parts/);

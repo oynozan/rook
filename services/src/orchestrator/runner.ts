@@ -234,8 +234,10 @@ async function unpaidHow(hire: Hire | null): Promise<'terminal' | 'wait' | 'void
   return (await cancelTask(hire.agent_handle, hire.a2a_task_id)) ? 'terminal' : 'void';
 }
 
-/** The longest the unwind waits before it tries a failed step again. */
+/** The longest the unwind (or a restore) waits before it tries a failed step again. */
 const UNWIND_MAX_WAIT_MS = 5 * 60_000;
+/** The wait before try `round + 1` of a step that failed: doubling from the poll interval, at most UNWIND_MAX_WAIT_MS. */
+const backoff = (round: number) => Math.min(Math.min(config.pollMs, 2000) * 2 ** (round - 1), UNWIND_MAX_WAIT_MS);
 
 /**
  * Returns what a stopped task (killed, failed, or found stopped after a restart) or a closing one whose close failed
@@ -294,7 +296,7 @@ export async function unwind(ledger: Ledger, t: Task, why: string, afterRun = fa
       const v = ledger.view(t.id)!;
       if (!v.closed && v.subtasks.every((x) => x.returned_atomic !== null)) await step('closeTask', null, () => ledger.closeTask(t.id));
       if (ledger.view(t.id)!.closed || stop.aborted) return;
-      await sleep(Math.min(Math.min(config.pollMs, 2000) * 2 ** (round - 1), UNWIND_MAX_WAIT_MS), undefined, { signal: stop }).catch(() => {});
+      await sleep(backoff(round), undefined, { signal: stop }).catch(() => {});
       if (stop.aborted) return;
     }
   })();
@@ -331,21 +333,44 @@ export function kill(ledger: Ledger, t: Task) {
   void unwind(ledger, t, 'after kill', true).catch((e) => console.error('[orchestrator] unwind after kill', e));
 }
 
+type Step2 = (() => Promise<void>) | null;
+
 /**
  * Restart, chain mode, step 1 (before the API listens): rebuild Rook's books for `t` from the contract. Returns step 2,
- * which finishes it: resume the run, or unwind what a killed or failed task still holds. Null: nothing left to do.
+ * which finishes it: resume the run, or unwind what a killed or failed task still holds. Null: nothing left to do, or
+ * the task is another contract's. A rebuild that fails (the chain gateway or NEAR not answering, a transfer still in
+ * flight) is tried again in step 2, once the API listens, waiting longer each time as the unwind does, until it works;
+ * only a shutdown stops it, and the next start tries again. Each problem is reported once.
  */
-export async function restoreTask(ledger: ChainLedger, t: Task): Promise<(() => Promise<void>) | null> {
+export async function restoreTask(ledger: ChainLedger, t: Task): Promise<Step2> {
+  const said = { last: '' };
+  const first = await rebuild(ledger, t, said);
+  if (first !== 'again') return first;
+  return async () => {
+    const stop = t.shutdown.signal;
+    for (let round = 1; ; round++) {
+      await sleep(backoff(round), undefined, { signal: stop }).catch(() => {});
+      if (stop.aborted) return;
+      const next = await rebuild(ledger, t, said);
+      if (stop.aborted) return; // rebuilt as the services stop: the next start resumes it
+      if (next !== 'again') return next?.();
+    }
+  };
+}
+
+/** One try at step 1: step 2, or 'again' when the rebuild failed for a reason that can pass. */
+async function rebuild(ledger: ChainLedger, t: Task, said: { last: string }): Promise<Step2 | 'again'> {
   const cid = t.chain!.contract_task_id;
   let r: Awaited<ReturnType<ChainLedger['restore']>>;
   try {
     r = await ledger.restore(t.id, t.chain!, { funder: t.funder ?? '', budget: BigInt(t.budget_atomic), reserve_share: t.reserve_share, saved: t.ledger_saved });
   } catch (e) {
-    const next = e instanceof OtherContract
-      ? 'It is left as it is, for a Rook that runs that contract.'
-      : 'Nothing was changed; start the services again once the chain gateway answers.';
-    emit(t, 'error', { kind: 'restore', message: `after a restart Rook could not rebuild contract task ${cid}: ${msg(e)}. ${next}` }, undefined, true);
-    return null;
+    const other = e instanceof OtherContract;
+    const next = other ? 'It is left as it is, for a Rook that runs that contract.' : 'Rook tries again, waiting longer each time.';
+    const message = `after a restart Rook could not rebuild contract task ${cid}: ${msg(e)}. ${next}`;
+    if (message !== said.last) emit(t, 'error', { kind: 'restore', message }, undefined, true);
+    said.last = message;
+    return other ? null : 'again';
   }
   for (const note of r.notes) emit(t, 'error', { kind: 'restore_note', message: `restore: ${note}` }, undefined, true);
   // Closed on chain with Rook's books still open: the funder or the owner closed a killed task while sub-accounts

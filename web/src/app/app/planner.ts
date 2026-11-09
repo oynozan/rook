@@ -67,29 +67,47 @@ export function budgetToHire(plan: Pick<PlanView, 'subtasks' | 'budget'>, upTo?:
 }
 
 /**
- * Why Rook does this part with its own model; `budget`: what would hire one (budgetToHire); `afterHired`: a hired part
- * comes before it, so took its share of the budget first. Older plans don't say why, so that wording claims no reason.
+ * The largest budget this Rook takes (GET /mode max_budget_atomic, atomic USDC) when `budget` is above it, so no draft
+ * can hire what `budget` would; null otherwise, or when the services don't say.
  */
-export function selfDoWhy(s: Pick<Subtask, 'self_do_reason' | 'self_do_need_atomic'>, budget?: bigint | null, afterHired = true): string {
+function aboveLargest(budget: bigint | null | undefined, max: string | null | undefined): bigint | null {
+  const largest = typeof max === 'string' && /^\d+$/.test(max) ? BigInt(max) : null;
+  return budget && largest !== null && budget > largest ? largest : null;
+}
+const tooSmall = (largest: bigint, whom: string) => `Even the largest budget Rook takes, ${usdc(largest)} USDC, is too small to hire ${whom}.`;
+
+/**
+ * Why Rook does this part with its own model; `budget`: what would hire one (budgetToHire); `afterHired`: a hired part
+ * comes before it, so took its share of the budget first; `max`: the largest budget Rook takes (GET /mode), never
+ * suggested past. Older plans don't say why, so that wording claims no reason.
+ */
+export function selfDoWhy(s: Pick<Subtask, 'self_do_reason' | 'self_do_need_atomic'>, budget?: bigint | null, afterHired = true, max?: string | null): string {
   if (s.self_do_reason === 'no_agent') return 'No agent on the market fits this part, so Rook does it with its own model.';
   if (s.self_do_reason === 'over_budget') {
     const left = `this budget has left for it after the reserve${afterHired ? ' and the parts before it' : ''}, so Rook does it with its own model.`;
     if (!s.self_do_need_atomic) return `The agents found for this part cost more than ${left} A larger budget would hire one.`;
-    return `The cheapest agent found for this part asks ${usdc(s.self_do_need_atomic)} USDC, more than ${left} ${budget ? `A budget of about ${usdc(budget)} USDC would hire one.` : 'A larger budget would hire one.'}`;
+    const largest = aboveLargest(budget, max);
+    const hire = largest !== null ? tooSmall(largest, 'one') : budget ? `A budget of about ${usdc(budget)} USDC would hire one.` : 'A larger budget would hire one.';
+    return `The cheapest agent found for this part asks ${usdc(s.self_do_need_atomic)} USDC, more than ${left} ${hire}`;
   }
   return 'No agent is hired: Rook does this part with its own model.';
 }
 
-/** The same for a plan that hires no agent at all, from every subtask's reason; `budget`: what would hire them (budgetToHire). */
-export function allSelfDoWhy(reasons: SelfDoReason[], budget?: bigint | null): string {
+/**
+ * The same for a plan that hires no agent at all, from every subtask's reason; `budget`: what would hire them
+ * (budgetToHire); `max`: the largest budget Rook takes.
+ */
+export function allSelfDoWhy(reasons: SelfDoReason[], budget?: bigint | null, max?: string | null): string {
   const every = (r: SelfDoReason) => reasons.length > 0 && reasons.every((x) => x === r);
-  const larger = budget ? `a budget of about ${usdc(budget)} USDC` : 'a larger budget';
+  const largest = aboveLargest(budget, max);
+  const hire = (whom: string) => largest !== null ? tooSmall(largest, whom)
+    : `Draft it again with ${budget ? `a budget of about ${usdc(budget)} USDC` : 'a larger budget'} to hire ${whom}.`;
   if (every('no_agent')) return 'No agent on the market fits these parts, so Rook does them all itself with its own model.';
   if (every('over_budget')) {
-    return `The agents Rook found for these parts cost more than this budget allows, so Rook does them all itself with its own model. Draft it again with ${larger} to hire them.`;
+    return `The agents Rook found for these parts cost more than this budget allows, so Rook does them all itself with its own model. ${hire('them')}`;
   }
   if (reasons.includes('no_agent') && reasons.includes('over_budget')) {
-    return `No agent on the market fits some of these parts, and the agents found for the others cost more than this budget allows, so Rook does them all itself with its own model. Draft it again with ${larger} to hire agents for those.`;
+    return `No agent on the market fits some of these parts, and the agents found for the others cost more than this budget allows, so Rook does them all itself with its own model. ${hire('agents for those')}`;
   }
   return 'No agent is hired for these parts, so Rook does them all itself with its own model.';
 }

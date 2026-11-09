@@ -35,7 +35,11 @@ export function actionRefusal(action: TaskAction, status: number | null, message
     let m = /^task is (?:already )?(\w+)/.exec(message);
     // Stop is refused only once a task has ended, which says it all.
     if (m) return known(`This task ${NOW[m[1]] ?? `is ${m[1]}`}${action === 'stop' ? '' : `, so it can't be ${DONE[action]}`}.`);
+    // Stop on a page that still showed the run after the report was written.
+    if (/^the report is written/.test(message)) return known('This task has already finished. Rook is sending the unspent USDC back to your wallet.');
     if (/^the plan has no subtasks/.test(message)) return known("This plan has nothing to run, so it can't be started.");
+    // A plan drafted before 0 USDC quotes were dropped: asking again can never work, only a new plan can.
+    if (/0 USDC cap/.test(message)) return known('This plan has a part capped at 0 USDC, which the Rook contract refuses. Draft the task again.');
     if (/^live market: paying agents/.test(message)) return known("Paying live agents isn't switched on yet, so this plan can't be started.");
     m = /already has (\d+) open tasks on the contract/.exec(message);
     if (m) {

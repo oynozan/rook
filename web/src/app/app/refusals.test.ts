@@ -14,7 +14,12 @@ test('a task that moved on says where it is, never "task is killed, cancel needs
   assert.deepEqual(actionRefusal('cancel', 409, 'task is killed, cancel needs planned'), { message: "This task was stopped, so it can't be cancelled.", known: true });
 });
 
-test('known refusals: no task for this account, an empty plan, payments off, the open-task limit, the contract minimum', () => {
+test('Stop after the report is written says the task finished and the refund is on its way, never "try again"', () => {
+  assert.deepEqual(actionRefusal('stop', 409, 'the report is written; Rook is only returning the unspent USDC now, so there is nothing left to stop'),
+    { message: 'This task has already finished. Rook is sending the unspent USDC back to your wallet.', known: true });
+});
+
+test('known refusals: no task for this account, an empty plan, payments off, the open-task limit, the contract minimum, a 0 USDC cap', () => {
   assert.equal(words('stop', 404, 'no task t_1'), "Rook has no task at this link for the wallet you're signed in with.");
   assert.equal(words('approve', 409, 'the plan has no subtasks'), "This plan has nothing to run, so it can't be started.");
   assert.equal(words('approve', 409, 'live market: paying agents needs ROOK_LEDGER=chain (signer, chain-gateway, budget contract); see docs/x402-payments-plan.md'),
@@ -24,6 +29,10 @@ test('known refusals: no task for this account, an empty plan, payments off, the
   assert.match(limit, /refund it to your wallet\.$/);
   assert.equal(words('approve', 409, "budget 0.05 USDC is below the contract's minimum of 0.10 USDC"),
     "This task's budget is below the contract's smallest, 0.10 USDC. Draft it again with a larger budget.");
+  // A plan with a 0 USDC cap: drafting again is the only way, on the button and on the funding step's re-ask.
+  const zero = 'This plan has a part capped at 0 USDC, which the Rook contract refuses. Draft the task again.';
+  assert.deepEqual(actionRefusal('approve', 409, 'this plan has a 0 USDC cap; draft the task again'), { message: zero, known: true });
+  assert.equal(words('fund', 409, 'this plan has a 0 USDC cap; draft the task again'), zero);
 });
 
 test('anything else gets a plain fallback per button, and is marked for the server log', () => {
