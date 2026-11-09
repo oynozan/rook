@@ -10,7 +10,8 @@ import { WebSearch, type WebSource } from '@/components/ui/web-search';
 import { approve, cancel, draftTask, stop } from './actions';
 import { go } from './AppShell';
 import { Composer, type ComposerErrors } from './Composer';
-import type { PlanView, RookEvent, TaskSnapshot, TaskSummary } from './orchestrator';
+import type { Candidate, PlanView, RookEvent, TaskSnapshot, TaskSummary } from './orchestrator';
+import { useMode } from './mode';
 import { useEase } from './useEase';
 import { useWallet } from './wallet';
 
@@ -145,6 +146,18 @@ function Reveal({ open, children }: { open: boolean; children: ReactNode }) {
   );
 }
 
+/** What a subtask can cost: Rook's own work, a free agent, or a cap in USDC. */
+function CapLabel({ subtask: s }: { subtask: PlanView['subtasks'][number] }) {
+  const free = !s.self_do && BigInt(s.cap_atomic) === 0n && s.candidates.length > 0 && BigInt(s.candidates[0].price_atomic) === 0n;
+  const words = s.self_do ? 'Rook does this' : free ? 'Free' : null;
+  return (
+    <span title={s.self_do ? 'No agent is hired: Rook does this part with its own model' : free ? 'The cheapest agent quoted 0 USDC; paid re-hires come from the reserve' : undefined}
+      className={`shrink-0 pl-3 text-sm text-ink/65 sm:pl-0 ${words ? '' : 'font-mono'}`}>
+      {words ?? `Cap ${usdc(s.cap_atomic)}`}
+    </span>
+  );
+}
+
 function PlanRow({ subtask: s }: { subtask: PlanView['subtasks'][number] }) {
   const [open, setOpen] = useState(false);
   return (
@@ -159,7 +172,7 @@ function PlanRow({ subtask: s }: { subtask: PlanView['subtasks'][number] }) {
           <span className={`text-ink/55 transition-transform duration-200 motion-reduce:transition-none ${open ? 'rotate-90' : ''}`} aria-hidden="true">›</span>
           <span className="font-medium">{s.title}</span>
         </span>
-        <span className="shrink-0 pl-3 font-mono text-sm text-ink/65 sm:pl-0">{s.self_do ? 'No hire' : `Cap ${usdc(s.cap_atomic)}`}</span>
+        <CapLabel subtask={s} />
       </button>
       <Reveal open={open}>
         <div className="px-4 pt-1 pb-4 pl-8 text-ink/80">
@@ -168,12 +181,37 @@ function PlanRow({ subtask: s }: { subtask: PlanView['subtasks'][number] }) {
           {s.candidates.length > 0 && (
             <>
               <p className="mt-3 text-sm text-ink/65">Candidates, cheapest first</p>
-              <ul className="mt-1 space-y-0.5 font-mono text-sm">{s.candidates.map((c) => <li key={c.handle}>{c.handle} {usdc(c.price_atomic)}</li>)}</ul>
+              <ul className="mt-1.5 space-y-2">{s.candidates.map((c) => <CandidateLine key={c.handle} c={c} />)}</ul>
             </>
           )}
         </div>
       </Reveal>
     </>
+  );
+}
+
+const turnaround = (s: number) =>
+  s < 120 ? `${s} s` : s < 7200 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} days`;
+
+/** One candidate: its name, handle and price, then what the market says about it. Agent text is shown as plain text. */
+function CandidateLine({ c }: { c: Candidate }) {
+  // The live market reports success as a percentage (100), the simulator as a share (1.0). A rate with no delivered
+  // jobs behind it says nothing, so it is left out rather than shown as 0%.
+  const rate = c.success_rate === null || c.delivered_jobs === 0 ? null : Math.round(c.success_rate > 1 ? c.success_rate : c.success_rate * 100);
+  const facts = [
+    rate !== null && `${rate}% success`,
+    c.delivered_jobs > 0 && `${c.delivered_jobs} job${c.delivered_jobs === 1 ? '' : 's'} delivered`,
+    c.sla_seconds > 0 && `within ${turnaround(c.sla_seconds)}`,
+  ].filter(Boolean);
+  return (
+    <li>
+      <p className="flex flex-wrap items-baseline gap-x-2">
+        {c.name && c.name !== c.handle && <span className="font-medium">{c.name}</span>}
+        <span className="font-mono text-sm text-ink/65">{c.handle}</span>
+        <span className="ml-auto font-mono text-sm tabular-nums">{usdc(c.price_atomic)} USDC</span>
+      </p>
+      {facts.length > 0 && <p className="text-sm text-ink/60">{facts.join(' · ')}</p>}
+    </li>
   );
 }
 
@@ -194,7 +232,11 @@ function PlanCard({ plan }: { plan: PlanView }) {
  * and every card that lands is a real candidate from that plan. Handles and titles are plain text, with no links or images.
  */
 function AgentSearch({ plan, animate, onGrow, onDone }: { plan: PlanView | null; animate: boolean; onGrow?: () => void; onDone?: () => void }) {
-  const sources: WebSource[] = (plan?.subtasks ?? []).flatMap((s) => s.candidates.map((c) => ({ id: `${s.id}/${c.handle}`, title: s.title, url: c.handle })));
+  const { live } = useMode();
+  // Live agents have real names; the simulator's names are just their handles, so the subtask reads better there.
+  const sources: WebSource[] = (plan?.subtasks ?? []).flatMap((s) =>
+    s.candidates.map((c) => ({ id: `${s.id}/${c.handle}`, title: c.name && c.name !== c.handle ? c.name : s.title, url: c.handle })),
+  );
   const total = sources.length;
   const [landed, setLanded] = useState(0);
   const count = animate ? landed : total;
@@ -223,7 +265,7 @@ function AgentSearch({ plan, animate, onGrow, onDone }: { plan: PlanView | null;
   return (
     <WebSearch
       status={searching ? 'searching' : 'done'}
-      label={searching ? 'Searching the NEAR AI market' : `Found ${total} agent${total === 1 ? '' : 's'}`}
+      label={searching ? (live ? 'Searching the NEAR AI market' : 'Searching the simulated market') : `Found ${total} agent${total === 1 ? '' : 's'}`}
       sources={sources.slice(0, count)}
       linked={false}
       open={open}
@@ -304,6 +346,15 @@ function Activity({ lines, live, caughtUp, closing, outcome, timed }: { lines: F
   );
 }
 
+/** The planner's error in plain words where we recognise it; otherwise the error itself, which comes from Rook, not an agent. */
+function plannerReason(error: string) {
+  if (/no_limit_configured|No spending limit/i.test(error)) return 'NEAR AI has no credits set up for this API key, so the planner model could not run.';
+  if (/NEAR AI 401|invalid api key|unauthorized/i.test(error)) return 'NEAR AI rejected the API key.';
+  if (/cost guard|LLM_MAX_USD/i.test(error)) return 'The planner reached its spending cap for this session.';
+  if (/market search/i.test(error)) return 'The NEAR AI market could not be reached.';
+  return error.replace(/^planner: /, '');
+}
+
 /** Inline Markdown only: `code`, **bold**, _emphasis_. Report text comes from agents, so it stays plain React text. */
 function inline(text: string): ReactNode[] {
   return text.split(/(`[^`]+`|\*\*[^*]+\*\*|\b_[^_]+_\b)/g).map((part, i) => {
@@ -340,6 +391,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   const [actError, setActError] = useState<string | null>(null);
   const [needsFunding, setNeedsFunding] = useState(false);
   const status = snap?.task.status;
+  const { paymentsOff } = useMode();
   const known = tasks?.find((t) => t.id === id)?.status;
   const [revealing, setRevealing] = useState(fresh); // a plan just drafted here: agents land first, then the plan
   const onAgentsDone = useCallback(() => { setRevealing(false); onRevealed(id); }, [id, onRevealed]);
@@ -399,7 +451,12 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
           <AgentSearch plan={plan} animate={fresh} onGrow={onGrow} onDone={revealing ? onAgentsDone : undefined} />
         </RookMessage>
       )}
-      {task.status === 'failed' && !plan && <RookMessage><p>Rook couldn&apos;t draft a plan for this task. Try sending it again.</p></RookMessage>}
+      {task.status === 'failed' && !plan && (
+        <RookMessage>
+          <p>Rook couldn&apos;t draft a plan for this task.</p>
+          {task.error && <p className="mt-1 text-sm text-ink/65">{plannerReason(task.error)}</p>}
+        </RookMessage>
+      )}
 
       {plan && !revealing && plan.subtasks.length === 0 && (
         <RookMessage>
@@ -415,12 +472,13 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
           {plan.dropped.length > 0 && <p className="mt-2 text-sm text-ink/65">Left out: {plan.dropped.map((d) => `${d.title} (${d.reason})`).join(', ')}</p>}
           {task.status === 'planned' && (
             <div className="rook-in mt-4 flex flex-wrap gap-3" style={{ animationDelay: `${250 + plan.subtasks.length * 90}ms` }}>
-              <ActionButton primary onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account} title={wallet.account ? undefined : 'Connect your wallet first'}>
+              <ActionButton primary onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account || paymentsOff} title={paymentsOff ? 'Paying live agents is not switched on yet' : wallet.account ? undefined : 'Connect your wallet first'}>
                 {busy === 'approve' ? 'Starting…' : `Approve, up to ${usdc(max)} USDC`}
               </ActionButton>
               <ActionButton onClick={() => act('cancel')} busy={busy === 'cancel'}>Cancel</ActionButton>
             </div>
           )}
+          {task.status === 'planned' && paymentsOff && <p className="mt-2 text-sm text-ink/60">Live agents and prices. Paying them isn&apos;t switched on yet, so nothing can be spent.</p>}
         </RookMessage>
       )}
 

@@ -44,7 +44,7 @@ ${prompt}
 """
 
 Budget: ${formatUsdc(budgetAtomic)} USDC in total, of which ${formatUsdc(allocatableAtomic)} USDC can be allocated to subtasks (the rest is a reserve for re-hires). Marketplace agents typically charge 0.05 to 0.50 USDC per job; scope the number and size of subtasks to fit.`;
-  const { data, calls } = await json('plan.draft', config.plannerModel, Draft, DRAFT_SYSTEM, user, 16000, 'medium'); // headroom: reasoning models count thinking tokens
+  const { data, calls } = await json('plan.draft', config.plannerModel, Draft, DRAFT_SYSTEM, user, 16000, config.planEffort); // headroom: reasoning models count thinking tokens
   return { draft: data.subtasks, calls };
 }
 

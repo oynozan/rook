@@ -29,6 +29,9 @@ export const config = {
   // Planner and evaluator calls are Rook's evidence; defaults are TEE-hosted models chosen by benchmark, see docs/model-choice.md.
   // Simulated agents need no signature.
   get plannerModel() { return env('PLANNER_MODEL', 'z-ai/glm-5.3'); },
+  // Reasoning effort for drafting the plan. 'medium' made GLM 5.3 think for ~12k tokens (most of a minute and ~90% of
+  // the plan's cost); 'low' skips the thinking. Raise it if plans for complex tasks come out too shallow.
+  get planEffort() { const e = env('ROOK_PLAN_EFFORT', 'low'); return (['low', 'medium', 'high'].includes(e) ? e : 'low') as 'low' | 'medium' | 'high'; },
   get evaluatorModel() { return env('EVALUATOR_MODEL', 'deepseek-ai/DeepSeek-V4.1-Flash-1017'); },
   get simAgentModel() { return env('SIM_AGENT_MODEL', 'anthropic/claude-haiku-5-5'); },
   get llmMaxUsd() { return num('ROOK_LLM_MAX_USD', 1); },

@@ -10,7 +10,7 @@ function reserveLabel(budget: string) {
   return budget.trim() && n > 0 ? `${(n * 0.2).toFixed(2)} held for re-hires` : '20% held for re-hires';
 }
 
-/** Stays mounted through a conversation, so typed text survives a failed send. Clears only when the send succeeds. */
+/** Stays mounted through a conversation. Clears as soon as a task is sent, and gives the text back if the send fails. */
 export function Composer({ onSend, errors, sending, compact }: {
   onSend: (prompt: string, budget: string) => Promise<boolean>;
   errors: ComposerErrors | null;
@@ -31,7 +31,11 @@ export function Composer({ onSend, errors, sending, compact }: {
     if (locked || sending) return;
     // Phones: put the keyboard away, or it covers the plan this is about to bring up.
     if (window.matchMedia('(max-width: 639px)').matches) (document.activeElement as HTMLElement | null)?.blur();
-    if (await onSend(prompt, budget)) setPrompt('');
+    // Cleared straight away: live planning can take a minute, and the sent task already shows in the thread.
+    // If the send fails, the text comes back, unless something new has been typed meanwhile.
+    const sent = prompt;
+    setPrompt('');
+    if (!(await onSend(sent, budget))) setPrompt((now) => now || sent);
   }
 
   return (

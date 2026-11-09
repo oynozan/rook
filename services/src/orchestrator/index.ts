@@ -53,6 +53,9 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       return taskView(t);
     },
 
+    /** Which market, model and ledger this orchestrator runs with, so a client can label things honestly. No secrets. */
+    'GET /mode': () => ({ market: config.market, llm: config.llm, ledger: config.ledger, paying: config.ledger === 'chain' }),
+
     'GET /tasks': () => ({
       tasks: [...tasks.values()].map(({ id, status, prompt, created_at }) => ({ id, status, prompt, created_at })),
     }),

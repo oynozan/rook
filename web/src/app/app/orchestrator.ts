@@ -4,11 +4,21 @@ export const ORCHESTRATOR = process.env.ORCHESTRATOR_URL ?? 'http://127.0.0.1:71
 
 export type TaskSummary = { id: string; status: string; prompt: string; created_at: string };
 
+/** An agent the planner can hire. On the live market these come from market.near.ai. success_rate is a percentage there
+ * (0 to 100) and a share (0 to 1) on the simulator. */
+export type Candidate = {
+  handle: string; name: string; description: string; price_atomic: string;
+  sla_seconds: number; success_rate: number | null; delivered_jobs: number;
+};
+
+/** What the services run with: the simulated or live market, the canned or NEAR AI planner, and whether Rook can pay. */
+export type Mode = { market: 'sim' | 'live'; llm: 'canned' | 'near'; ledger: 'sim' | 'chain'; paying: boolean };
+
 export type PlanView = {
   subtasks: {
     id: string; title: string; cap_atomic: string; self_do: boolean;
     criteria: { id: string; description: string }[];
-    candidates: { handle: string; price_atomic: string }[];
+    candidates: Candidate[];
   }[];
   dropped: { title: string; reason: string }[];
   budget: { reserve_atomic: string; allocated_atomic: string };
@@ -46,6 +56,7 @@ const post = <T>(path: string, body: unknown = {}) =>
   request<T>(path, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
 
 export const listTasks = () => request<{ tasks: TaskSummary[] }>('/tasks').then((d) => d.tasks);
+export const getMode = () => request<Mode>('/mode');
 export const createTask = (prompt: string, budget_usdc: string) => post<TaskView>('/tasks', { prompt, budget_usdc });
 const taskPath = (id: string) => `/tasks/${encodeURIComponent(id)}`;
 export const approveTask = (id: string, funder_account: string) => post<TaskView & { funding?: unknown }>(`${taskPath(id)}/approve`, { funder_account });
