@@ -46,7 +46,7 @@ export function Composer({ onSend, errors, sending, compact }: {
     // If the send fails, the text comes back, unless something new has been typed meanwhile.
     const sent = prompt;
     setPrompt('');
-    if (!(await onSend(sent, check.usdc))) setPrompt((now) => now || sent);
+    if (!(await onSend(sent, check.usdc).catch(() => false))) setPrompt((now) => now || sent);
   }
 
   return (

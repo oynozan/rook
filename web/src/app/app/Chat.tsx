@@ -939,6 +939,9 @@ function Report({ markdown }: { markdown: string }) {
 
 // ---- one conversation ----
 
+/** A server action call that never got an answer: the network dropped, or the web server was restarting. */
+const UNREACHABLE = "This page couldn't reach Rook. Check your connection and try again.";
+
 function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; loaded: Loaded; tasks: TaskSummary[] | null; onGrow: () => void; fresh: boolean; onRevealed: (id: string) => void }) {
   const { snap, events, problem, refetch } = loaded;
   const router = useRouter();
@@ -1000,7 +1003,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   async function act(kind: 'approve' | 'cancel' | 'stop') {
     setBusy(kind);
     setActError(null);
-    const out = kind === 'approve' ? await approve(id) : kind === 'cancel' ? await cancel(id) : await stop(id);
+    const out = await (kind === 'approve' ? approve(id) : kind === 'cancel' ? cancel(id) : stop(id)).catch(() => ({ ok: false as const, message: UNREACHABLE }));
     setBusy(null);
     if (!out.ok) setActError(out.message);
     else if (out.funding) { setFunding(out.funding); if (kind === 'approve') setAutoFund(true); }
@@ -1154,8 +1157,9 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
   async function send(prompt: string, budget: string) {
     setErrors(null);
     setSending({ prompt: prompt.trim(), budget });
-    // Returns as soon as the task exists; the plan then streams in on the task's page.
-    const out = await draftTask({ prompt, budget });
+    // Returns as soon as the task exists; the plan then streams in on the task's page. The call itself can fail (the
+    // network, or the web server restarting): then the composer gets its text back and says so.
+    const out = await draftTask({ prompt, budget }).catch(() => ({ kind: 'error' as const, message: UNREACHABLE }));
     if (out.kind === 'planned') {
       // Keep showing this message until the task has loaded, so the thread takes over with no gap.
       justDrafted.current.add(out.id);
