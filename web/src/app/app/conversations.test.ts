@@ -2,7 +2,7 @@
 // Run: npx tsx --test src/app/app/*.test.ts
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { conversationOf, conversations, currentTask, outgoing, placeholderFor, revisedPlan, sameTaskAt, waitReason } from './conversations';
+import { amountsNamed, conversationOf, conversations, currentTask, outgoing, placeholderFor, revisedPlan, sameTaskAt, waitReason } from './conversations';
 import type { TaskSummary } from './orchestrator';
 
 const task = (id: string, minute: number, o: Partial<TaskSummary> = {}): TaskSummary =>
@@ -88,6 +88,15 @@ test('a changed budget alone asks for the same task at that budget; typed words 
   assert.equal(outgoing('', 'abc', planned), ''); // the budget field says what is wrong with it
   assert.equal(outgoing('', '1.50', task('b', 1, { budget_atomic: undefined })), ''); // older services: budget unknown
   assert.equal(outgoing('', '1.50', null), '');
+});
+
+test('amounts a message names as money, which the wallet check before drafting may use instead of the Budget field', () => {
+  assert.deepEqual(amountsNamed('Make it 1 USDC'), [1_000_000n]);
+  assert.deepEqual(amountsNamed('is it possible to reduce budget?'), []);
+  assert.deepEqual(amountsNamed('reduce the budget to 1.5'), [1_500_000n]);
+  assert.deepEqual(amountsNamed('Do it for 2 usdc, or $1,5 if you can'), [2_000_000n, 1_500_000n]);
+  assert.deepEqual(amountsNamed('Due diligence on the NEAR token, budget: 5 USDC'), [5_000_000n]);
+  assert.deepEqual(amountsNamed('Top 10 holders of NEAR in 2026'), []); // numbers that aren't money
 });
 
 test('the placeholder says what a message does there', () => {

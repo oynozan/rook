@@ -96,6 +96,24 @@ export function outgoing(prompt: string, budget: string, current: TaskSummary | 
   return usdc ? sameTaskAt(usdc) : '';
 }
 
+const NUM = String.raw`(\d+(?:[.,]\d+)?)`;
+const NAMED = new RegExp(String.raw`${NUM}\s*(?:usdc|usd|dollars?)\b|\$\s*${NUM}|\bbudget\b[^\d\n]{0,24}?${NUM}`, 'gi');
+
+/**
+ * Amounts the message itself names as money ("make it 1.5 USDC", "$2", "reduce the budget to 1"), in atomic USDC. Rook
+ * plans at a total the message names instead of the Budget field, so the wallet check before drafting takes the
+ * smallest of these and the field. A rough reading that can only make that check lenient: the plan's own budget is
+ * checked again before it is funded.
+ */
+export function amountsNamed(prompt: string): bigint[] {
+  const out: bigint[] = [];
+  for (const m of prompt.matchAll(NAMED)) {
+    const b = parseBudget(m[1] ?? m[2] ?? m[3]);
+    if (b.ok) out.push(b.atomic);
+  }
+  return out;
+}
+
 /** The composer's placeholder in a conversation: what sending does there. `chain` as in waitReason. */
 export function placeholderFor(current: TaskSummary | null, budget: string, chain = false): string {
   if (!current) return 'Ask a follow-up';

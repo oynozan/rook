@@ -2,6 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { forgetFundingOf, forgetUnreadFunding, fundingSent, giveBackDraftSlot, markFundingRefunded, recordFundingSent, takeDraftSlot } from './db';
+import { amountsNamed } from './conversations';
 import { checkDraft, draftRefusal, followUpRefusal } from './draft';
 import { CONTRACT_TASK, draftShortfall, TX_HASH, untilFinal, type Funding } from './funding';
 import { approveTask, cancelTask, createTask, fundedTask, getMode, getTask, killTask, OrchestratorDown, OrchestratorError } from './orchestrator';
@@ -42,8 +43,10 @@ export async function draftTask(input: { prompt: string; budget: string; parent_
   const check = checkDraft({ prompt: String(input?.prompt ?? ''), budget: String(input?.budget ?? '') }, mode);
   if (!check.ok) return { kind: 'invalid', prompt: check.prompt, budget: check.budget };
   // Chain mode: the signed-in wallet funds the plan, so one that can't cover the budget hears it now, before any
-  // planning is paid for, rather than after the plan is drafted.
-  const short = await draftShortfall(mode, owner, check.atomic);
+  // planning is paid for, rather than after the plan is drafted. A total the message names ("make it 1 USDC") is planned
+  // at instead of the field's, so the smallest of them is checked: a wallet short of 3.00 can still ask for 1.00.
+  const least = amountsNamed(check.prompt).reduce((a, b) => (b < a ? b : a), check.atomic);
+  const short = await draftShortfall(mode, owner, least);
   if (short) return { kind: 'invalid', budget: short };
 
   const slot = takeDraftSlot(owner, DRAFTS_PER_HOUR, 3_600_000);
