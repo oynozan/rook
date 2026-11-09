@@ -117,6 +117,8 @@ function printPlan(task: any) {
   const cost = (p.llm_calls ?? []).reduce((x: number, c: any) => x + (c.cost_usd ?? 0), 0);
   console.log(`${bold('LLM')} ${p.llm_calls?.length ?? 0} calls, ${cost.toFixed(4)} USD (planning)`);
   console.log(`${bold('Task id')} ${task.id}`);
+  // A plan with every part dropped ends the task: say why (task.error) rather than only the drop list.
+  if (task.status === 'failed' && task.error) console.log(red(task.error));
 }
 
 // ---- event stream ----
@@ -225,7 +227,8 @@ function printSummary(snap: any) {
     console.log(bold('\nLedger'));
     console.log(`  budget ${usdc(l.budget_atomic)}  spent ${bold(usdc(l.spent_atomic))}  reserve used ${usdc(l.reserve_used_atomic)} of ${usdc(l.reserve_atomic)}  refunded to ${l.funder} ${usdc(l.refunded_atomic)}`);
     const open = BigInt(l.unallocated_atomic) + BigInt(l.reserve_remaining_atomic) + l.subtasks.reduce((x: bigint, s: any) => x + BigInt(s.balance_atomic), 0n);
-    if (open > 0n) console.log(`  still locked ${usdc(open)}${l.killed ? '  (killed: not refunded automatically, section 8.7)' : ''}`);
+    // A stopped or closing task's unwind keeps returning it until the books close (docs/agentic-system.md 8.7).
+    if (open > 0n) console.log(`  still locked ${usdc(open)}${TERMINAL.includes(t.status) || t.status === 'closing' ? '  (Rook is still returning it to the funder)' : ''}`);
     console.log(`  invariant ${l.invariant_holds ? green('holds') : red('BROKEN')}${l.killed ? red('  killed') : ''}`);
   }
   const c = snap.llm_cost;
