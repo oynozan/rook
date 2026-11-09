@@ -348,6 +348,22 @@ test('the draft returns the total budget a message names, in atomic USDC, and as
   assert.match(second.at(-1)!.content, /budget_usdc must be an amount of USDC/);
 });
 
+test('the reply shape in the draft prompt carries no literal amount, nor any other value, for the model to copy', async () => {
+  // It once ended with "budget_usdc":1.5: a low-effort model could copy that into a message naming no budget.
+  const [[system]] = await promptsSent(({ draft }) => draft('Due diligence on the NEAR token', 3_000_000n, 2_400_000n));
+  const shape = system.content.slice(system.content.indexOf('Reply shape')).split('\n\n')[0];
+  assert.match(shape, /^Reply shape \(leave "budget_usdc" out unless the message names a total budget\):\n\{"subtasks":/);
+  assert.match(shape, /"budget_usdc":<[^>]+>\}$/); // where it goes, as a placeholder
+  assert.doesNotMatch(shape, /\d/);
+  assert.doesNotMatch(shape, /:\s*(true|false|null)\b/);
+});
+
+test('a message names an amount when it holds a number or a share of the budget', async () => {
+  const { namesAmount } = await import('../src/shared/money.ts');
+  for (const m of ['make it 1 USDC', 'reduce the budget to 1.5', 'do it for $2', 'Halve it', 'double the budget', 'Top 10 holders']) assert.equal(namesAmount(m), true, m);
+  for (const m of ['Now translate it to Turkish', 'is it possible to reduce the budget?', 'go ahead', 'Same task, cheaper']) assert.equal(namesAmount(m), false, m);
+});
+
 test('a total budget named in the message is planned at, within the limits; one out of range is refused before any search', async (t) => {
   const { serve, call } = await import('../src/shared/http.ts');
   const searched: string[] = [];
@@ -366,24 +382,29 @@ test('a total budget named in the message is planned at, within the limits; one 
   const answer = (system: string) => system.includes('Split the user')
     ? { subtasks: [sub('Holders')], ...(named === undefined ? {} : { budget_usdc: named }) }
     : system.includes('For each subtask below') ? { selections: [{ subtask_index: 1, handles: ['holders-agent'] }] } : undefined;
-  const body = { task_id: 't', prompt: 'Holders of NEAR', budget_atomic: '3000000', reserve_share: 0.2, min_budget_atomic: '100000' };
+  const body = { task_id: 't', prompt: 'Holders of NEAR, for less if you can', budget_atomic: '3000000', reserve_share: 0.2, min_budget_atomic: '100000' };
   const plans: any[] = [];
   const errors: any[] = [];
   await promptsSent(async () => {
     named = 1.5;
-    plans.push(await call(`${planner.url}/plan`, body));
+    plans.push(await call(`${planner.url}/plan`, { ...body, prompt: 'Holders of NEAR, make it 1.5 USDC' }));
     named = undefined;
+    plans.push(await call(`${planner.url}/plan`, body));
+    named = 1.5; // read into a message that names no amount
     plans.push(await call(`${planner.url}/plan`, body));
     searched.length = 0;
     for (const n of [60, '0.05', 0]) {
       named = n;
-      errors.push(await call(`${planner.url}/plan`, body).catch((e) => [e.status, e.message]));
+      errors.push(await call(`${planner.url}/plan`, { ...body, prompt: `Holders of NEAR for ${n} USDC` }).catch((e) => [e.status, e.message]));
     }
   }, answer);
   // Planned at the named 1.50: the cap is the agent's price, every other unit is reserve (80%), flagged as the message's.
   assert.deepEqual(plans[0].budget, { budget_atomic: '1500000', reserve_atomic: '1200000', reserve_bps: 8000, allocatable_atomic: '300000', allocated_atomic: '300000', from_message: true });
   assert.equal(plans[1].budget.budget_atomic, '3000000');
   assert.equal(plans[1].budget.from_message, undefined);
+  // A total the model read into a message with no amount in it is its mistake: planned at the budget sent, with a note.
+  assert.deepEqual([plans[2].budget.budget_atomic, plans[2].budget.from_message], ['3000000', undefined]);
+  assert.equal(plans[2].notes[0], 'the draft set a budget of 1.50 USDC, but the message names no amount: planned at the budget sent');
   assert.deepEqual(errors, [
     [422, 'Your message asks for a budget of 60.00 USDC, but the most Rook takes is 50.00 USDC.'],
     [422, 'Your message asks for a budget of 0.05 USDC, but the smallest the Rook contract takes is 0.10 USDC.'],

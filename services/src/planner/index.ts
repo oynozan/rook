@@ -3,7 +3,7 @@
 import { config, MAX_PROMPT_CHARS } from '../shared/config.ts';
 import { HttpError, bigintReplacer, call, serve, type Running } from '../shared/http.ts';
 import { AggregateRequest, PlanRequest, SelfDoRequest, type AgentSummary, type AggregateResult, type LlmCall, type Plan, type X402Config } from '../shared/types.ts';
-import { formatUsdc, namedBudgetProblem, share } from '../shared/money.ts';
+import { formatUsdc, namedBudgetProblem, namesAmount, share } from '../shared/money.ts';
 import { applySelection, buildPlan, filterSearch, type QuoteResult } from './plan.ts';
 import { aggregate, draft, select, selfDo } from './prompts.ts';
 import { agentOf, isMerged } from './canned.ts';
@@ -26,10 +26,14 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
   if (req.conversation?.earlier.some((m) => m.length > MAX_PROMPT_CHARS)) throw new HttpError(400, `an earlier message is over ${MAX_PROMPT_CHARS} characters`);
   const calls: LlmCall[] = [];
 
-  const { draft: d, notATask, budgetAtomic: named } = await llmStep(calls, () => draft(req.prompt, sent, sent - share(sent, req.reserve_share), req.conversation));
+  const { draft: d, notATask, budgetAtomic: drafted } = await llmStep(calls, () => draft(req.prompt, sent, sent - share(sent, req.reserve_share), req.conversation));
   if (!d.length) throw new HttpError(422, notATask || 'This does not read as a task Rook can plan: say what you want done.', { llm_calls: calls });
   // A total the message names ("make it 1 USDC") replaces the budget sent with it, within the same limits, refused
-  // before the market is searched; the orchestrator checks it again.
+  // before the market is searched; the orchestrator checks it again. One the model read into a message that names no
+  // amount is its mistake: the plan is made at the budget sent.
+  const named = drafted !== undefined && namesAmount(req.prompt) ? drafted : undefined;
+  const ignored = drafted !== undefined && named === undefined
+    ? [`the draft set a budget of ${formatUsdc(drafted)} USDC, but the message names no amount: planned at the budget sent`] : [];
   const problem = named === undefined ? null : namedBudgetProblem(named, BigInt(req.min_budget_atomic ?? '0'), config.maxBudgetAtomic);
   if (problem) throw new HttpError(422, problem, { llm_calls: calls });
   const budget = named ?? sent;
@@ -57,7 +61,7 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
   })));
 
   const out = buildPlan({ draft: d, selected, quotes, recipients: x402.recipients ?? [], budget_atomic: budget, reserve_share: req.reserve_share, history: req.history });
-  return { ...out, ...(named !== undefined ? { budget: { ...out.budget, from_message: true } } : {}), llm_calls: calls };
+  return { ...out, notes: [...ignored, ...out.notes], ...(named !== undefined ? { budget: { ...out.budget, from_message: true } } : {}), llm_calls: calls };
 }
 
 /** An LLM failure is a 502 carrying the calls already paid for, so the orchestrator can fail the task with a trace. */

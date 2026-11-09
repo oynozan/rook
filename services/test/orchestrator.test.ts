@@ -543,6 +543,13 @@ test("a total budget the message names becomes the task's budget, within the lim
   const big = await call(`${orch.url}/tasks`, { prompt: 'Holders of NEAR for 60 USDC', budget_usdc: '3', owner: 'erin.near' });
   assert.deepEqual([big.status, big.error, big.budget_atomic, big.plan],
     ['failed', 'Your message asks for a budget of 60.00 USDC, but the most Rook takes is 50.00 USDC.', '3000000', null]);
+
+  // A planner that says the message named a total when it names no amount at all: the plan is never kept, so the
+  // budget sent is never moved by a model's mistake.
+  const { BUDGET_NOT_NAMED } = await import('../src/orchestrator/index.ts');
+  plan = named('1500000', '1200000', 8000);
+  const silent = await call(`${orch.url}/tasks`, { prompt: 'Now translate it to Turkish', budget_usdc: '3', owner: 'erin.near' });
+  assert.deepEqual([silent.status, silent.error, silent.budget_atomic, silent.plan], ['failed', BUDGET_NOT_NAMED, '3000000', null]);
 });
 
 test('the conversation sent to the planner keeps the first and the newest messages, and the newest report cut to size', async () => {

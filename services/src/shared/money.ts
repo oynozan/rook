@@ -25,6 +25,15 @@ export function namedBudgetProblem(atomic: bigint, min: bigint, max: bigint): st
   return null;
 }
 
+/**
+ * Whether a message names an amount at all: a number, or a share of the budget sent ("halve it", "double it"). A cheap
+ * check that a total the planner's model read into a message ("make it 1 USDC") can be there, so a model mistake never
+ * re-budgets a task whose message names none.
+ */
+export function namesAmount(message: string): boolean {
+  return /\d/.test(message) || /\b(half|halve|halved|double|doubled|twice|triple|tripled)\b/i.test(message);
+}
+
 /** floor(amount * share) for a share like 0.2, without floats on the amount. */
 export function share(amount: bigint, s: number): bigint {
   return (amount * BigInt(Math.round(s * 1_000_000))) / 1_000_000n;
