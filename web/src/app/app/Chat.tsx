@@ -319,6 +319,10 @@ function FundingStep({ id, plan, budget, funding, sent, contractId, onConfirmed,
   const [made, setMade] = useState<{ contract_task_id: string; tx_hash: string | null } | null>(null);
   // This page's own transfer, by hash, while what it did isn't settled: sent from here, or remembered by the server.
   const [ownTx, setOwnTx] = useState<string | null>(null);
+  // This account's transfer created a contract task on other terms than the plan's: Rook never runs it, so the only way
+  // for its USDC is back to the wallet (the funder's close_task). Then the plan can be funded again.
+  const [stray, setStray] = useState<{ task_id: string; tx: string | null } | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const held = sent && !sent.refunded && sent.contract_task_id ? { contract_task_id: sent.contract_task_id, tx_hash: sent.tx_hash } : null;
   const done = held ?? made;
   const unreadTx = !done && sent && !sent.refunded && !sent.contract_task_id ? sent.tx_hash : null;
@@ -363,7 +367,9 @@ function FundingStep({ id, plan, budget, funding, sent, contractId, onConfirmed,
       const bad = fundingMismatch(result, want, wallet.account ?? '');
       if (bad) {
         setPhase('idle');
-        return setError(`That transaction created contract task ${result.task_id}, but not for this plan: ${bad}. Rook won't use it for this task.`);
+        const mine = !!wallet.account && result.funder === wallet.account && own;
+        if (mine) setStray({ task_id: result.task_id, tx });
+        return setError(`That transaction created contract task ${result.task_id}, but not for this plan: ${bad}. Rook won't use it for this task.${mine ? ' Take its USDC back to your wallet, then fund the plan again.' : ''}`);
       }
       setPasted(null); setMayBeUnsent(false); setOwnTx(null);
       setMade({ contract_task_id: result.task_id, tx_hash: tx });
@@ -389,6 +395,7 @@ function FundingStep({ id, plan, budget, funding, sent, contractId, onConfirmed,
   async function fund() {
     if (!funding) return;
     setError(null);
+    setNotice(null);
     setRefundable(false);
     setPhase('wallet');
     let outcome: unknown;
@@ -491,7 +498,18 @@ function FundingStep({ id, plan, budget, funding, sent, contractId, onConfirmed,
       <div className="rounded-2xl border border-ink/15 p-4">
         <p>Your wallet sent the funding transfer<TxLink network={network} tx={pendingTx} />.</p>
         {phase === 'reading' && <div className="mt-3"><Working label="Reading what it did" /></div>}
-        <div className="mt-4 flex flex-wrap gap-3">{stopButton('Stop')}</div>
+        <div className="mt-4 flex flex-wrap gap-3">
+          {stray && phase === 'idle' && contract && (
+            <RefundButton id={id} contractId={contract} taskId={stray.task_id} network={network} stray onRefunded={async (r) => {
+              // Nothing of this task's funding is left: forget the transfer, so the plan can be funded again.
+              if (stray.tx) await forgetTransfer(id, stray.tx).catch(() => null);
+              setStray(null); setOwnTx(null); setPasted(null); setError(null);
+              setNotice(`Contract task ${stray.task_id} refunded ${usdc(r.amount)} USDC to your wallet.`);
+              onChanged();
+            }} />
+          )}
+          {stopButton('Stop')}
+        </div>
         {pasted !== null && pasteForm()}
         {error && <p role="alert" className="mt-3 text-alert">{error}</p>}
       </div>
@@ -511,6 +529,7 @@ function FundingStep({ id, plan, budget, funding, sent, contractId, onConfirmed,
 
   return (
     <div className="rounded-2xl border border-ink/15 p-4">
+      {notice && <p className="mb-3 text-sm">{notice}</p>}
       <p className="font-medium">Fund this plan</p>
       <p className="mt-1">
         This moves {funding.network === 'mainnet' ? 'real USDC' : 'USDC test tokens'} on NEAR {funding.network}: {usdc(funding.amount_atomic)} USDC from your wallet to the Rook contract.
@@ -556,7 +575,11 @@ function FundingStep({ id, plan, budget, funding, sent, contractId, onConfirmed,
  * It says the refund went through only on the contract's word (readCloseOutcome); then this web server remembers it
  * and stops the task, which can't run without that funding.
  */
-function RefundButton({ id, contractId, taskId, network, onRefunded }: { id: string; contractId: string; taskId: string; network: Network; onRefunded: () => void }) {
+function RefundButton({ id, contractId, taskId, network, onRefunded, stray = false }: {
+  id: string; contractId: string; taskId: string; network: Network; onRefunded: (r: { amount: string; tx: string | null }) => void;
+  /** A contract task that was never this task's funding (other terms): its refund doesn't touch this task's record or status. */
+  stray?: boolean;
+}) {
   const wallet = useWallet();
   const [state, setState] = useState<'idle' | 'wallet' | 'reading' | 'done'>('idle');
   const [amount, setAmount] = useState('0');
@@ -585,8 +608,8 @@ function RefundButton({ id, contractId, taskId, network, onRefunded }: { id: str
     if (result.kind === 'refunded') {
       setAmount(result.amount);
       setState('done');
-      await fundingRefunded(id, { contract_task_id: taskId, refund_tx: hash }).catch(() => null);
-      return onRefunded();
+      if (!stray) await fundingRefunded(id, { contract_task_id: taskId, refund_tx: hash }).catch(() => null);
+      return onRefunded({ amount: result.amount, tx: hash });
     }
     setState('idle');
     setError(result.kind === 'refused' ? `The refund didn't go through: ${result.reason.replace(/\.?$/, '.')}`
@@ -614,6 +637,7 @@ function HeldFunding({ id, sent, want, contractId, network, onChanged }: {
   const wallet = useWallet();
   const unread = !sent.refunded && !sent.contract_task_id ? sent.tx_hash : null;
   const [note, setNote] = useState<string | null>(null);
+  const [strayTask, setStrayTask] = useState<string | null>(null); // this account's transfer, on other terms than the plan's
   const [tries, setTries] = useState(0);
   useEffect(() => {
     if (!unread || !contractId || !wallet.account) return;
@@ -625,7 +649,10 @@ function HeldFunding({ id, sent, want, contractId, network, onChanged }: {
       if (r.kind === 'unknown') return setNote("Rook can't read it from NEAR yet.");
       if (r.kind === 'created') {
         const bad = fundingMismatch(r, want, account);
-        if (bad) return setNote(`It created contract task ${r.task_id}, which isn't this plan's funding: ${bad}.`);
+        if (bad) {
+          if (r.funder === account) setStrayTask(r.task_id);
+          return setNote(`It created contract task ${r.task_id}, which isn't this plan's funding: ${bad}.`);
+        }
         await rememberTransfer(id, { tx_hash: unread, contract_task_id: r.task_id }).catch(() => null);
       } else await forgetTransfer(id, unread).catch(() => null); // it moved no USDC
       onChanged();
@@ -646,7 +673,13 @@ function HeldFunding({ id, sent, want, contractId, network, onChanged }: {
   return (
     <div className="mt-3">
       <p>Your wallet sent a funding transfer<TxLink network={network} tx={sent.tx_hash} />. {note ?? (contractId ? 'Reading what it did…' : '')}</p>
-      {note && <div className="mt-3"><ActionButton onClick={() => setTries((n) => n + 1)}>Read it again</ActionButton></div>}
+      {note && (
+        <div className="mt-3 flex flex-wrap gap-3">
+          {strayTask && contractId
+            ? <RefundButton id={id} contractId={contractId} taskId={strayTask} network={network} stray onRefunded={async () => { await forgetTransfer(id, unread!).catch(() => null); onChanged(); }} />
+            : <ActionButton onClick={() => setTries((n) => n + 1)}>Read it again</ActionButton>}
+        </div>
+      )}
     </div>
   );
 }
