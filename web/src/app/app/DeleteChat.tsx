@@ -79,13 +79,13 @@ export function DeleteChatDialog({ chat, onClose, onDeleted, onOpenTask }: {
       aria-describedby={`${uid}-body`}
       onCancel={(e) => { e.preventDefault(); if (!busy) onClose(); }} // a close request without a key (a phone's back gesture)
       onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }} // the backdrop
-      className="m-auto w-[min(28rem,calc(100%-2rem))] overflow-visible rounded-2xl border border-ink/15 bg-surface p-0 text-ink shadow-2xl shadow-ink/20 backdrop:bg-ink/40"
+      className="m-auto w-[min(28rem,calc(100%-2rem))] rounded-2xl border border-ink/15 bg-surface p-0 text-ink shadow-2xl shadow-ink/20 backdrop:bg-ink/40"
     >
       <div className="rook-in p-5">
         <h2 id={`${uid}-title`} className="text-lg font-medium tracking-[-0.01em]">Delete this chat?</h2>
         <p id={`${uid}-body`} className="mt-2 text-ink/80">
           <span className="line-clamp-3 font-medium break-words text-ink">“{chat.title}”</span>
-          <span className="mt-1 block">Its messages, plans and reports leave your tasks. This can&apos;t be undone.</span>
+          <span className="mt-1 block">Its messages, plans and reports will be removed from your tasks. This can&apos;t be undone.</span>
         </p>
         {error && (
           <p role="alert" className="mt-3 text-sm text-alert">
