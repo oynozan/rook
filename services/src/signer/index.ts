@@ -207,7 +207,9 @@ export async function start(port = config.ports.signer): Promise<Running> {
       if ((await ftBalance(cfg.usdc, account_id)) !== 0n) refuse(`${account_id} still holds USDC`);
       let unregister: string | null = null;
       if (await viewCall(cfg.usdc, 'storage_balance_of', { account_id })) {
-        const u = await sendTx(account_id, key, cfg.usdc, [functionCall('storage_unregister', { force: false }, 30, 1n)]);
+        // A sub-account funded before 0.06 NEAR cannot prepay 30 Tgas: the RPC refuses the tx and it is deleted anyway.
+        const u = await sendTx(account_id, key, cfg.usdc, [functionCall('storage_unregister', { force: false }, 30, 1n)])
+          .catch((e): { success: false; hash: null; failure: unknown } => ({ success: false, hash: null, failure: e?.message ?? String(e) }));
         unregister = u.success ? u.hash : null;
         if (!u.success) console.warn(`[signer] storage_unregister for ${account_id} failed: ${JSON.stringify(u.failure)}`);
       }
