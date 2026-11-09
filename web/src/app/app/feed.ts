@@ -49,7 +49,8 @@ export const alertLine = (flag: string, agent?: string) => /is not the marketpla
   ? `Security alert: ${agent ?? 'an agent'} asked to be paid to an account that isn't the marketplace's.`
   : `Security alert on ${agent ?? 'an agent'}: ${flag}`;
 
-export type ProblemLine = { text: string; tone: 'muted' | 'alert'; label: string };
+/** `ended`: the agent whose work on the part this line ends, so the run's status stops waiting on it. */
+export type ProblemLine = { text: string; tone: 'muted' | 'alert'; label: string; ended?: string };
 
 /**
  * Infers the kind of an error event stored before the services named one, from runner.ts's messages; `agent` is the
@@ -78,9 +79,10 @@ function inferKind(message: string): { kind?: string; agent?: string } {
 
 /**
  * One of Rook's own error events as a line for people (null: nothing to show, another line already says it). Retries
- * and notes are muted; real problems show as alerts but are Rook's, never an agent's flag. `part`: the subtask's title.
+ * and notes are muted; real problems show as alerts but are Rook's, never an agent's flag. `part`: the subtask's title;
+ * `hired`: the agent its latest hire went to, which a part given up on is no longer waiting for.
  */
-export function problemLine(data: { kind?: string; message?: string; agent_handle?: string }, part?: string): ProblemLine | null {
+export function problemLine(data: { kind?: string; message?: string; agent_handle?: string }, part?: string, hired?: string): ProblemLine | null {
   const message = data.message ?? '';
   const guess = data.kind ? {} : inferKind(message);
   const kind = data.kind ?? guess.kind;
@@ -88,7 +90,7 @@ export function problemLine(data: { kind?: string; message?: string; agent_handl
   const it = part ?? 'this part';
   const note = (text: string): ProblemLine => ({ text, tone: 'muted', label: 'Note' });
   const retry = (text: string): ProblemLine => ({ text, tone: 'muted', label: 'Retrying' });
-  const problem = (text: string): ProblemLine => ({ text, tone: 'alert', label: 'Problem' });
+  const problem = (text: string, ended?: string): ProblemLine => ({ text, tone: 'alert', label: 'Problem', ...(ended ? { ended } : {}) });
   switch (kind) {
     case 'eval_retry': return retry(`Checking ${it} didn't go through, so Rook is trying again.`);
     case 'close_retry': return retry("Sending the unspent USDC back didn't go through yet, so Rook is trying again.");
@@ -99,8 +101,8 @@ export function problemLine(data: { kind?: string; message?: string; agent_handl
     case 'unpaid': return null; // the receipt line says it: delivered, nothing paid
     case 'aggregate': return note("Rook couldn't write the report itself, so the report puts the deliverables together as they are.");
     case 'restore_note': return note("Rook restarted and found its records differ from the contract's, so it goes by the contract.");
-    case 'abandoned': return problem(`Rook couldn't finish ${it} because of a problem on its side.`);
-    case 'unchecked': return problem(`Rook couldn't check ${who ? `${who}'s` : 'the'} work on ${it}, so that part is left out.`);
+    case 'abandoned': return problem(`Rook couldn't finish ${it} because of a problem on its side.`, hired);
+    case 'unchecked': return problem(`Rook couldn't check ${who ? `${who}'s` : 'the'} work on ${it}, so that part is left out.`, who ?? hired);
     case 'close': return problem('Sending the unspent USDC back hit a problem. Rook is still finishing the refund.');
     case 'unwind': return problem("Rook couldn't send all the unspent USDC back yet. It will try again.");
     case 'run': return problem("The run stopped because of a problem on Rook's side.");

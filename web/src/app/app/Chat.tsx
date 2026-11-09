@@ -1021,8 +1021,14 @@ function feedFrom(events: RookEvent[], ctx: FeedContext): FeedLine[] {
     else if (type === 'ledger' && data.op === 'closeTask' && data.amount_atomic != null && !ctx.free) lines.push({ key, text: `Closed the budget: ${usdc(data.amount_atomic)} USDC went back to your wallet${ctx.simNote}.`, tone: 'muted', now: { state: 'analyzing', label: 'Closed' } });
     // Rook's own errors: plain words, the raw text as a tooltip, never counted as an agent's flag.
     else if (type === 'error') {
-      const p = problemLine(data ?? {}, subtask_id && ctx.titles.get(subtask_id));
-      if (p) lines.push({ key, text: p.text, tone: p.tone, detail: data?.message, ...(self && p.tone === 'alert' ? { written: part(subtask_id) } : {}), now: { state: 'analyzing', label: p.label } });
+      // A part given up on (abandoned, or its work unchecked) ends its agent's wait too, not only Rook's own work.
+      const p = problemLine(data ?? {}, subtask_id && ctx.titles.get(subtask_id), self || !subtask_id ? undefined : hired.get(subtask_id));
+      if (p) {
+        lines.push({
+          key, text: p.text, tone: p.tone, detail: data?.message, ...(p.ended ? { ended: p.ended } : {}),
+          ...(self && p.tone === 'alert' ? { written: part(subtask_id) } : {}), now: { state: 'analyzing', label: p.label },
+        });
+      }
     }
   }
   return lines;
