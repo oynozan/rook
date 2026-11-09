@@ -1,17 +1,25 @@
 // Env-driven config shared by every service. See docs/agentic-system.md sections 2, 3, 11.
 import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { homedir } from 'node:os';
+import { join, relative, resolve } from 'node:path';
 import { parseUsdc } from './money.ts';
 
-// ponytail: tiny .env loader (repo root, then cwd); real env vars win.
-// NEAR role keys are never read from a .env file: keys come from the environment or files outside the repo.
-const NEAR_KEY = /^ROOK_(SIGNER|ORCHESTRATOR)_KEY$/;
-for (const p of [resolve(import.meta.dirname, '../../../.env'), resolve(process.cwd(), '.env')]) {
-  if (!existsSync(p)) continue;
+// ponytail: tiny .env loader; real env vars win. First the real-mode env file outside the repo (ROOK_ENV_FILE, or
+// ~/.rook/mainnet.env for `pnpm live`, written by scripts/deploy.ts), the only file NEAR role keys are read from;
+// then the repo's .env (root, then cwd). The admin key in the repo's .env is for scripts/deploy.ts, never a service.
+const REPO = resolve(import.meta.dirname, '../../..');
+const NEAR_KEY = /^ROOK_(SIGNER|ORCHESTRATOR)_KEY$/, ADMIN_KEY = /^(ADMIN_WALLET_PRIVATE_KEY|ROOK_ADMIN_KEY)$/;
+const live = process.env.ROOK_PROFILE === 'live' || process.argv.includes('--live');
+// A child of scripts/dev.ts gets its env from the parent, which hands each role key only to the service that uses it.
+const outside = process.env.ROOK_DEV_CHILD ? '' : process.env.ROOK_ENV_FILE || (live ? join(homedir(), '.rook', 'mainnet.env') : '');
+for (const p of [outside, resolve(REPO, '.env'), resolve(process.cwd(), '.env')]) {
+  if (!p || !existsSync(p)) continue;
+  const inRepo = !relative(REPO, resolve(p)).startsWith('..');
   for (const line of readFileSync(p, 'utf8').split(/\r?\n/)) {
     const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
-    if (m && NEAR_KEY.test(m[1])) { console.warn(`[config] ignoring ${m[1]} in ${p}: set it in the environment, never in a file in the repo`); continue; }
-    if (m && process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^['"]|['"]$/g, '');
+    if (!m || ADMIN_KEY.test(m[1])) continue;
+    if (inRepo && NEAR_KEY.test(m[1])) { console.warn(`[config] ignoring ${m[1]} in ${p}: set it in the environment or ~/.rook, never in a file in the repo`); continue; }
+    if (process.env[m[1]] === undefined) process.env[m[1]] = m[2].replace(/^['"]|['"]$/g, '');
   }
 }
 
@@ -76,7 +84,7 @@ export const config = {
   },
   get contractId() { return env('ROOK_CONTRACT_ID', ''); },
   /** Longest payment validity Rook signs or accepts, in blocks (about seconds): a quote asking more is refused. */
-  get maxPaymentTimeoutS() { return num('ROOK_MAX_PAYMENT_TIMEOUT_S', 3600); },
+  get maxPaymentTimeoutS() { return num('ROOK_MAX_PAYMENT_TIMEOUT_S', 90_000); },
 
   /** `live`: `pnpm live`, nothing simulated (checkProfile). Anything else: the simulation profile of `pnpm dev`. */
   get profile() { return process.env.ROOK_PROFILE === 'live' ? 'live' as const : 'sim' as const; },

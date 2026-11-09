@@ -228,13 +228,13 @@ export async function unwind(ledger: Ledger, t: Task, why: string, afterRun = fa
 
 /**
  * Kill switch (section 8.7). Synchronous, so no loop can emit between the ledger kill and the killed status. In chain
- * mode the funds then come back (unwind); the contract's own kill_task is the owner's call, which the event says.
+ * mode the funds then come back (unwind); the contract's own kill_task is the funder's call, which the event says.
  */
 export function kill(ledger: Ledger, t: Task) {
   ledger.kill(t.id);
   const chain = onChain(ledger) && ledger.contractTaskOf(t.id) !== null ? ledger : null;
   emit(t, 'ledger', { op: 'kill', ...(chain ? {
-    human_action: `Rook signs no more payments for this task and returns what its sub-accounts hold. Stopping it on the contract too is the owner's call: ${chain.ownerKillCommand(t.id)}`,
+    human_action: `Rook signs no more payments for this task and returns what its sub-accounts hold. Stopping it on the contract too is its funder's call: ${chain.killCommand(t.id, t.funder)}`,
   } : {}) });
   t.abort.abort();
   const sending = new Set<number>();
@@ -366,7 +366,8 @@ async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Defer
       pending = null;
       hire = h.paid ? h : await resumeHire(ledger, t, s, h);
     } else {
-      const c = s.candidates.find((x) => !s.tried.includes(x.handle)); // plan order = cheapest first
+      // The plan's order (lowest expected cost first, docs 5.2 step 4), never re-sorted by price here.
+      const c = s.candidates.find((x) => !s.tried.includes(x.handle));
       if (!c) return finish(t, s, 'abandoned', done);
       s.tried.push(c.handle);
       setSub(t, s, 'quoting');

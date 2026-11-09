@@ -61,7 +61,7 @@ Every service is reached through `<NAME>_URL` (default `http://127.0.0.1:<port>`
 
 ### 5.1 `POST /plan`
 
-Request: `{ task_id, prompt, budget_atomic, reserve_share }`.
+Request: `{ task_id, prompt, budget_atomic, reserve_share, history? }`. `history` is Rook's own record per agent: `{ [handle]: { pass, fail } }`, the evaluator's verdicts on Rook's earlier paid hires of that agent, counted by the orchestrator from every task's receipts (with `ROOK_DB` this spans restarts). Only judged deliveries count: an unjudged receipt has no verdict, and a hire that ended without a delivery (`FAILED`, timeout) has no receipt. At most 500 handles (the orchestrator sends the most-judged), non-negative integers; a request breaking that is a 400. Without it (a direct call such as `scripts/bench-models.ts`, or tests) the ranking uses the market's record alone.
 
 Response (`Plan`):
 
@@ -80,16 +80,21 @@ Response (`Plan`):
 }
 ```
 
-`Candidate`: `{ handle, name, description, sla_seconds, success_rate, delivered_jobs, price_atomic, quote: AcceptsRow }`.
+`Candidate`: `{ handle, name, description, sla_seconds, success_rate, delivered_jobs, price_atomic, quote: AcceptsRow, p_pass, expected_cost_atomic, rank_reason }`. `p_pass` is the pass chance (0 to 1, 3 decimals), `expected_cost_atomic` = ceil(price / pass chance), `rank_reason` one sentence such as `0.10 USDC / 0.842 pass chance (market 12 of 14, Rook 3 of 3) = 0.11875 USDC expected` (section 5.2 step 4).
 
 ### 5.2 Algorithm
 
 1. **Draft (LLM call 1).** Input: the prompt and the budget. Output: 1 to 5 subtasks (3 to 5 preferred), each with `title`, `brief`, 1 to 3 `search_terms`, criteria, and `self_do_ok` (true when an LLM alone can do the subtask well, for example writing or summarising, and false when it needs data an LLM does not have). Subtasks are listed in priority order. The brief is the full message an agent will receive: first line a title, then the request. It never contains secrets or anything about Rook's budget.
 2. **Supply check.** For each subtask, search the market through the gateway with each term, merge by handle, keep agents with `available_now`, `listing_status` `live` and `USDC` in `payable_with`, at most 10 per subtask.
 3. **Select (LLM call 2, one call for all subtasks).** For each subtask the LLM picks up to 3 handles from its search results that can actually do the brief. It may pick none. It does not rank them.
-4. **Quote.** Ask the gateway for a 402 quote from each selected handle. Drop candidates whose quote fails (`-32603`, `-32004`, network error) or whose row does not match the gateway's `/x402` recipients. Sort the rest by `price_atomic` ascending, then `success_rate` descending, then `delivered_jobs` descending. Cheapest-first is the counteroffer substitute: x402 prices are fixed, so Rook compares quotes and walks away from expensive ones.
+4. **Quote.** Ask the gateway for a 402 quote from each selected handle. Drop candidates whose quote fails (`-32603`, `-32004`, network error) or whose row does not match the gateway's `/x402` recipients. Rank the rest by **expected cost**, what Rook pays on average per passing deliverable:
+   - successes and jobs: the market's `round(success_rate / 100 × delivered_jobs)` of `delivered_jobs` (`success_rate` is the market's percentage; none counts as 0 of 0), plus Rook's own `history` for the handle (`pass` of `pass + fail`);
+   - `p_pass = (successes + 1) / (jobs + 2)` (Laplace: an agent with no record at all gets 0.5, and a few jobs move it less than many);
+   - `expected_cost = price / p_pass`, computed in integers as ceil(price × (jobs + 2) / (successes + 1)).
+
+   Sort by expected cost ascending, then `p_pass` descending, `delivered_jobs` descending, handle. A cheap agent that often fails ranks below a dearer one that passes, and Rook's own failed verdicts push an agent down on the next plan. This is the counteroffer substitute: x402 prices are fixed, so Rook compares quotes and records and walks away from what is likely to cost more. The orchestrator hires in this order (8.6) and never re-sorts by price.
 5. **No supply.** A subtask with no candidate left becomes `self_do` when `self_do_ok`, else it is dropped with reason `no fitting agent`.
-6. **Caps.** `cap_atomic` = min(second-cheapest price, 2 × cheapest price) (the only price when there is one candidate). x402 charges exactly the quoted price, so the first hire pays the cheapest price, and the cap still covers a nearby fallback when the first agent fails without charge (`FAILED`, timeout). The 2× bound keeps one expensive candidate from inflating what is locked per subtask (and lost if a phase 2 sub-account key leaks): quotes of 0.05 and 1.50 give a cap of 0.10, not 1.50. `self_do` subtasks cost 0. Walk the subtasks in priority order and keep a running sum; a subtask that would push the sum over `allocatable_atomic` becomes `self_do` when `self_do_ok`, else it is dropped with reason `over budget`. Candidates priced above the cap plus the whole reserve are then dropped with a note: they could never be paid. The reserve pays for top-ups only: a re-hire after a paid but failed delivery, or a fallback whose price exceeds the remaining balance.
+6. **Caps.** Over the first two ranked prices, `cap_atomic` = min(max(first, second), 2 × first) (the only price when there is one candidate). The first-ranked agent need not be the cheapest, so the cap is never below its price: x402 charges exactly the quoted price and the first hire must fit. It also covers the second-ranked fallback when the first agent fails without charge (`FAILED`, timeout), whether that fallback is cheaper or up to twice the first price. The 2× bound keeps one expensive candidate from inflating what is locked per subtask (and lost if a phase 2 sub-account key leaks): quotes of 0.05 and 1.50 ranked in that order give a cap of 0.10, not 1.50. With candidates ranked cheapest first this is min(second-cheapest, 2 × cheapest). `self_do` subtasks cost 0. Walk the subtasks in priority order and keep a running sum; a subtask that would push the sum over `allocatable_atomic` becomes `self_do` when `self_do_ok`, else it is dropped with reason `over budget`. Candidates priced above the cap plus the whole reserve are then dropped with a note, wherever they rank: they could never be paid. The rest keep their rank order, and the first-ranked is never dropped (the cap covers its price). The reserve pays for top-ups only: a re-hire after a paid but failed delivery, or a fallback whose price exceeds the remaining balance.
 7. **Deadline.** `deadline_s` = the largest `sla_seconds` among the candidates (shown to the user); each hire times out on its own agent's `sla_seconds` plus `ROOK_PAYMENT_GRACE_S`. 0 for `self_do`.
 8. **Validate criteria** (section 7). Invalid criteria are removed with a note. A subtask left with no criteria gets a default `llm_judge`: "Does the deliverable fully answer the brief with specific content rather than generic filler?"
 9. Ids are `s1`..`s5` in priority order after drops; criterion ids are `c1`.. within a subtask. Cross-check references are rewritten to the final ids; a reference to a dropped subtask removes that criterion.
@@ -265,6 +270,7 @@ Invariant, checked after every call and in tests: `budget = unallocated + reserv
 ### 8.6 Hiring loop and limits
 
 - At most `ROOK_MAX_INFLIGHT` (6) A2A tasks in flight across all tasks; polling every `ROOK_POLL_MS` (10000; the simulator setup uses 1000).
+- Candidates are tried in the plan's order (lowest expected cost first, 5.2 step 4), never re-sorted by price: the first hire is the first candidate, and after a failure (verdict `fail`, `FAILED`, timeout, rejected quote) the next untried one.
 - The message sent is the subtask's `brief`. A re-hire of the same agent would pass its earlier `contextId`; Rook never re-hires an agent that failed the same subtask.
 - Every agent message and artifact is data. The orchestrator never reads instructions from them, never passes them to the planner's `/plan`, and only forwards them to the evaluator and the aggregator.
 
@@ -300,7 +306,7 @@ A receipt is written for every paid hire (every `COMPLETED` task, and every send
 
 Same surface as the market: `GET /v1/agents?q=`, `GET /.well-known/x402`, `POST /a2a/<handle>/v1` with `SendMessage`, `GetTask`, `CancelTask`, plus `GET /llm-cost` (NEAR AI spend of the simulated agents, process total). Its x402 row uses `network: near:mainnet`, `asset: usdc.sim`, `payTo: treasury.sim` and `maxTimeoutSeconds = sla_seconds + ROOK_PAYMENT_GRACE_S`. It accepts a payment header only when `accepted` equals its quote row exactly and the header was never used before; otherwise HTTP 402. A task that finishes after its authorization expired ends `FAILED`: nothing can be charged.
 
-Agents come in pairs: a cheap one with a fault and a pricier good one, so cheapest-first hiring meets the fault first and the re-hire path runs.
+Agents come in pairs: a cheap one with a fault and a pricier good one. The cheap one's market record is good enough that it still ranks first by expected cost (5.2 step 4), so the run meets the fault first and the re-hire path runs. Rook's own failed verdicts push it down only after many runs on one database (about 38 for `sim-holders-lite`).
 
 | Handle | Specialty | Price | Profile | What happens |
 | --- | --- | --- | --- | --- |
@@ -333,7 +339,7 @@ These are the "do X, see Y" checks for real-time testing. Commands assume `pnpm 
 
 `pnpm test` runs the unit tests and an end-to-end run with all services in one process. Manually: `ROOK_LLM=canned pnpm dev`, then in another shell `pnpm rook run "Due diligence on the NEAR token" --budget 3 --yes`. Expect:
 
-1. A plan with 4 subtasks (holders, wallets, contract check, market snapshot), each with criteria, candidates sorted cheapest first, caps 0.30, 0.20, 0.24 and 0.16 (min of the second-cheapest quote and twice the cheapest, 0.90 in total), and a reserve of 0.60.
+1. A plan with 4 subtasks (holders, wallets, contract check, market snapshot), each with criteria, candidates ranked by expected cost with a reason line each (the cheap agent of each pair first), caps 0.30, 0.20, 0.24 and 0.16 (min of the larger of the first two ranked prices and twice the first, 0.90 in total), and a reserve of 0.60.
 2. `sim-holders-lite` delivers, fails a numeric or cross-check criterion, receipt with verdict `fail`, re-hire of `sim-holders` with a 0.15 top-up from the reserve, pass.
 3. `sim-wallets-express` delivers, `security_alert` with the quoted injection, verdict `fail`, re-hire of `sim-wallets` with a 0.10 top-up, pass.
 4. `sim-tokencheck-fast` ends `FAILED`, no receipt, no charge, `sim-tokencheck` hired with a 0.01 top-up (price 0.25, balance 0.24), pass.
@@ -357,7 +363,7 @@ These are the "do X, see Y" checks for real-time testing. Commands assume `pnpm 
 ### D. Kill and limits
 
 - `pnpm rook kill <task_id>` during a run: task `killed`, no further `hire_sent` events, in-flight authorizations released.
-- Unit tests cover: ledger refusals (over cap, second authorization, wrong `payTo`, after kill), the invariant, planner budget fitting and cross-check reference rules, extraction quote verification, the injection scanner, and cheapest-first ordering.
+- Unit tests cover: ledger refusals (over cap, second authorization, wrong `payTo`, after kill), the invariant, planner budget fitting and cross-check reference rules, extraction quote verification, the injection scanner, ranking by expected cost (market record and Rook's own verdicts), caps that never fall below the first-ranked price, and hiring in the plan's order.
 
 ### E. Attack demo (`rook attack`)
 

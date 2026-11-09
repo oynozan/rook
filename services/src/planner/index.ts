@@ -49,7 +49,7 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
     return [handle, q] as const;
   })));
 
-  const out = buildPlan({ draft: d, selected, quotes, recipients: x402.recipients ?? [], budget_atomic: budget, reserve_share: req.reserve_share });
+  const out = buildPlan({ draft: d, selected, quotes, recipients: x402.recipients ?? [], budget_atomic: budget, reserve_share: req.reserve_share, history: req.history });
   return { ...out, llm_calls: calls };
 }
 

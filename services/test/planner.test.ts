@@ -16,7 +16,7 @@ const row = (amount: string, payTo = RECIPIENT.payTo): QuoteResult =>
   ({ ok: true, row: { scheme: 'exact', network: RECIPIENT.network, asset: RECIPIENT.asset, amount, payTo, maxTimeoutSeconds: 60 } });
 const agent = (handle: string, o: Partial<AgentSummary> = {}): AgentSummary => ({
   handle, name: handle, description: `${handle} agent`, category: null, tags: [], available_now: true,
-  listing_status: 'live', payable_with: ['USDC'], sla_seconds: 20, success_rate: 0.9, delivered_jobs: 10, ...o,
+  listing_status: 'live', payable_with: ['USDC'], sla_seconds: 20, success_rate: 90, delivered_jobs: 10, ...o, // success_rate: percent, as the market
 });
 const sub = (title: string, o: Partial<DraftSubtask> = {}): DraftSubtask => ({
   title, brief: `${title}\n\nDo it.`, search_terms: [title], self_do_ok: false,
@@ -25,16 +25,19 @@ const sub = (title: string, o: Partial<DraftSubtask> = {}): DraftSubtask => ({
 const input = (o: Partial<PlanInput>): PlanInput =>
   ({ draft: [], selected: [], quotes: {}, recipients: [RECIPIENT], budget_atomic: 3_000_000n, reserve_share: 0.2, ...o });
 
-test('candidates sort cheapest first, then success rate, then delivered jobs; cap is min(second cheapest, 2 x cheapest)', () => {
+test('candidates rank by expected cost = price / Laplace pass chance; cap is min(max(first, second), 2 x first)', () => {
   const p = buildPlan(input({
     draft: [sub('a'), sub('b')],
     selected: [
-      [agent('pricey'), agent('cheap-low', { success_rate: 0.5 }), agent('cheap-high', { success_rate: 0.95, sla_seconds: 45 })],
+      [agent('pricey'), agent('cheap-low', { success_rate: 50 }), agent('cheap-high', { success_rate: 95, sla_seconds: 45 })],
       [agent('only')],
     ],
     quotes: { 'pricey': row('300000'), 'cheap-low': row('150000'), 'cheap-high': row('150000'), 'only': row('120000') },
   }));
-  assert.deepEqual(p.subtasks[0].candidates.map((c) => c.handle), ['cheap-high', 'cheap-low', 'pricey']);
+  // 10 jobs each: cheap-high 10 passes -> 11/12; cheap-low 5 -> 6/12 = 0.5; pricey 9 -> 10/12.
+  assert.deepEqual(p.subtasks[0].candidates.map((c) => [c.handle, c.p_pass, c.expected_cost_atomic]),
+    [['cheap-high', 0.917, '163637'], ['cheap-low', 0.5, '300000'], ['pricey', 0.833, '360000']]);
+  assert.equal(p.subtasks[0].candidates[1].rank_reason, '0.15 USDC / 0.5 pass chance (market 5 of 10) = 0.30 USDC expected');
   assert.equal(p.subtasks[0].cap_atomic, '150000');
   assert.equal(p.subtasks[0].deadline_s, 45);
   assert.equal(p.subtasks[1].cap_atomic, '120000'); // single candidate: its own price
@@ -175,4 +178,110 @@ test('a large price gap does not inflate the cap; an unpayable fallback is dropp
   }));
   assert.equal(p.subtasks[0].cap_atomic, '100000'); // 2 x 0.05, not 1.50
   assert.deepEqual(p.subtasks[0].candidates.map((c) => c.handle), ['cheap']); // 1.50 > cap 0.10 + reserve 0.60
+});
+
+// ---- ranking by expected cost (5.2 step 4) ----
+
+test('a pricier agent with a much better record outranks a cheap agent with a bad record; the cap covers it', () => {
+  const p = buildPlan(input({
+    draft: [sub('a')],
+    selected: [[agent('cheap-bad', { success_rate: 20, delivered_jobs: 50 }), agent('dear-good', { success_rate: 98, delivered_jobs: 100 })]],
+    quotes: { 'cheap-bad': row('100000'), 'dear-good': row('300000') },
+  }));
+  const [first, second] = p.subtasks[0].candidates;
+  assert.deepEqual([first.handle, first.p_pass, first.expected_cost_atomic], ['dear-good', 0.971, '309091']); // 99/102
+  assert.deepEqual([second.handle, second.p_pass, second.expected_cost_atomic], ['cheap-bad', 0.212, '472728']); // 11/52
+  assert.equal(first.rank_reason, '0.30 USDC / 0.971 pass chance (market 98 of 100) = 0.309091 USDC expected');
+  assert.equal(p.subtasks[0].cap_atomic, '300000'); // the first hire's price; the cheaper fallback fits under it
+});
+
+test("Rook's own fails push an agent down; its passes count too", () => {
+  const plan = (history?: Record<string, { pass: number; fail: number }>) => buildPlan(input({
+    draft: [sub('a')],
+    selected: [[agent('a1'), agent('a2')]], // both 90% of 10 jobs on the market
+    quotes: { a1: row('100000'), a2: row('120000') },
+    history,
+  })).subtasks[0].candidates;
+  assert.deepEqual(plan().map((c) => c.handle), ['a1', 'a2']);
+  const after = plan({ a1: { pass: 0, fail: 5 }, a2: { pass: 2, fail: 0 }, unrelated: { pass: 9, fail: 9 } });
+  assert.deepEqual(after.map((c) => [c.handle, c.p_pass, c.expected_cost_atomic]), [['a2', 0.857, '140000'], ['a1', 0.588, '170000']]);
+  assert.match(after[1].rank_reason, /\(market 9 of 10, Rook 0 of 5\)/);
+});
+
+test('halves round up exactly: market successes and p_pass have no float drift', () => {
+  const [c] = buildPlan(input({
+    draft: [sub('a')],
+    selected: [[agent('half', { success_rate: 29, delivered_jobs: 50 })]], // 14.5 successes, 0.29 * 50 in floats is 14.4999...
+    quotes: { half: row('100000') },
+    history: { half: { pass: 185, fail: 163 } }, // 15 + 185 = 200 of 50 + 348 = 398: p = 201 / 400 = 0.5025
+  })).subtasks[0].candidates;
+  assert.deepEqual([c.p_pass, c.expected_cost_atomic], [0.503, '199005']); // ceil(0.10 x 400 / 201)
+  assert.match(c.rank_reason, /\(market 15 of 50, Rook 185 of 348\)/);
+});
+
+test('no record at all gives p_pass 0.5; ties break on p_pass, delivered jobs, then handle', () => {
+  const p = buildPlan(input({
+    draft: [sub('a')],
+    selected: [[agent('new-b', { success_rate: null, delivered_jobs: 30 }), agent('new-a', { success_rate: null, delivered_jobs: 0 })]],
+    quotes: { 'new-a': row('100000'), 'new-b': row('100000') },
+  }));
+  const cs = p.subtasks[0].candidates;
+  assert.ok(cs.every((c) => c.p_pass === 0.5 && c.expected_cost_atomic === '200000'));
+  assert.deepEqual(cs.map((c) => c.handle), ['new-b', 'new-a']); // more delivered jobs first at equal expected cost
+  assert.equal(cs[1].rank_reason, '0.10 USDC / 0.5 pass chance (no record yet) = 0.20 USDC expected');
+});
+
+test('caps never fall below the first-ranked price, and the drop rule follows rank, not price', () => {
+  // A pricey middle rank is dropped (2.00 > cap 0.20 + reserve 0.60) while a cheaper, lower-ranked one stays.
+  const p = buildPlan(input({
+    draft: [sub('a')],
+    selected: [[agent('top', { success_rate: 97, delivered_jobs: 100 }), agent('dear', { success_rate: 99, delivered_jobs: 100 }), agent('flaky', { success_rate: 1, delivered_jobs: 200 })]],
+    quotes: { top: row('100000'), dear: row('2000000'), flaky: row('50000') },
+  }));
+  assert.deepEqual(p.subtasks[0].candidates.map((c) => c.handle), ['top', 'flaky']);
+  assert.equal(p.subtasks[0].cap_atomic, '200000');
+  assert.ok(p.notes.some((n) => n.includes('dear dropped')) && !p.notes.some((n) => n.includes('flaky dropped')));
+
+  // Sweep: whatever the prices and records, first price <= cap <= 2 x first price, the first-ranked agent is never
+  // dropped, and the kept ones are the ranking minus those above cap + reserve, in rank order.
+  let seed = 7;
+  const rnd = (n: number) => (seed = (seed * 48271) % 2147483647) % n;
+  for (let i = 0; i < 300; i++) {
+    const agents = [0, 1, 2].map((k) => agent(`x${k}`, { success_rate: rnd(3) ? rnd(101) : null, delivered_jobs: rnd(400) }));
+    const quotes = Object.fromEntries(agents.map((a) => [a.handle, row(String(1000 + rnd(5_000_000)))]));
+    const history = rnd(2) ? { x0: { pass: rnd(5), fail: rnd(5) }, x2: { pass: rnd(5), fail: rnd(5) } } : undefined;
+    const plan = (budget_atomic: bigint) => buildPlan(input({ draft: [sub('a')], selected: [agents], quotes, history, budget_atomic }));
+    const all = plan(10n ** 15n).subtasks[0].candidates; // a reserve so large that nothing is dropped
+    const s = plan(20_000_000n).subtasks[0], cap = BigInt(s.cap_atomic), first = BigInt(all[0].price_atomic);
+    assert.ok(cap >= first && cap <= 2n * first, `case ${i}`);
+    assert.equal(s.candidates[0].handle, all[0].handle, `case ${i}`);
+    assert.deepEqual(s.candidates.map((c) => c.handle), all.filter((c) => BigInt(c.price_atomic) <= cap + 4_000_000n).map((c) => c.handle), `case ${i}`);
+  }
+});
+
+test('POST /plan history is optional and bounded: at most 500 handles, non-negative integers', async () => {
+  const { PlanRequest } = await import('../src/shared/types.ts');
+  const base = { task_id: 't', prompt: 'p', budget_atomic: '1000000', reserve_share: 0.2 };
+  assert.ok(PlanRequest.safeParse(base).success);
+  assert.ok(PlanRequest.safeParse({ ...base, history: { a: { pass: 3, fail: 0 } } }).success);
+  for (const bad of [{ a: { pass: -1, fail: 0 } }, { a: { pass: 1.5, fail: 0 } }, { a: { pass: 1 } }, { '': { pass: 1, fail: 0 } }]) {
+    assert.ok(!PlanRequest.safeParse({ ...base, history: bad }).success, JSON.stringify(bad));
+  }
+  const many = (n: number) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`h${i}`, { pass: 1, fail: 0 }]));
+  assert.ok(PlanRequest.safeParse({ ...base, history: many(500) }).success);
+  assert.ok(!PlanRequest.safeParse({ ...base, history: many(501) }).success);
+});
+
+test("verdictHistory counts Rook's judged receipts per handle and keeps the 500 most-judged", async () => {
+  const { verdictHistory } = await import('../src/orchestrator/store.ts');
+  const rc = (agent_handle: string, verdict: 'pass' | 'fail' | null) => ({ agent_handle, verdict });
+  const tasks: any[] = [
+    { receipts: [rc('a', 'pass'), rc('a', 'fail'), rc('b', null)] },
+    { receipts: [rc('a', 'pass'), rc('c', 'fail')] },
+  ];
+  assert.deepEqual(verdictHistory(tasks), { a: { pass: 2, fail: 1 }, c: { pass: 0, fail: 1 } }); // b was never judged
+  const crowd = [{ receipts: [...Array.from({ length: 500 }, (_, i) => [rc(`h${i}`, 'pass'), rc(`h${i}`, 'pass')]).flat(), rc('once', 'fail')] }];
+  const h = verdictHistory(crowd as any);
+  assert.equal(Object.keys(h).length, 500);
+  assert.ok(!('once' in h));
 });

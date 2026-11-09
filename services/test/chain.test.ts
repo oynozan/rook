@@ -490,7 +490,8 @@ test('orchestrator, ROOK_LEDGER=chain: approve gives funding instructions, /fund
   assert.equal(calls.length, 0);
 
   await refused(call(`${orch.url}/tasks/${t.id}/funded`, { contract_task_id: 'bad' }), /caps/);
-  assert.equal(a.funding.owner, 'owner.test'); // SHARED API DECISION 4 (`funder` kept for older clients)
+  assert.equal(a.funding.funder, null); // a CLI task: whoever sends the transfer funds it
+  assert.equal(a.funding.contract_owner, 'owner.test'); // informative only: any account funds its own task
   // A signed-in owner binds only a contract task their own wallet funded, never someone else's matching one.
   const alice = await call(`${orch.url}/tasks`, { prompt: 'p3', budget_usdc: '1', owner: 'alice.near' });
   await call(`${orch.url}/tasks/${alice.id}/approve`, { owner: 'alice.near' });

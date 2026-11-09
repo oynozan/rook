@@ -22,7 +22,9 @@ export async function rpc<T = any>(method: string, params: unknown): Promise<T> 
   const j: any = await r.json().catch(() => null);
   if (!j) throw new NearRpcError(`NEAR RPC ${method}: HTTP ${r.status}`);
   if (j.error) {
-    const why = j.error.cause?.info ?? j.error.data ?? j.error.message;
+    // cause.info is often {} (INVALID_TRANSACTION): the reason is then in data, e.g. {"TxExecutionError":{"InvalidTxError":...}}.
+    const info = j.error.cause?.info;
+    const why = info && Object.keys(info).length ? info : j.error.data ?? j.error.message;
     throw new NearRpcError(`NEAR RPC ${method}: ${j.error.cause?.name ?? j.error.name ?? 'error'} ${typeof why === 'string' ? why : JSON.stringify(why)}`, j.error);
   }
   return j.result as T;

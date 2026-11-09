@@ -39,12 +39,13 @@ const sent: { handle: string; payment: string }[] = [];
 const cancelled: string[] = [];
 const a2a = new Map<string, { handle: string; polls: number }>();
 const evalRequests: any[] = [];
+const planRequests: any[] = [];
 const servers: Running[] = [];
 let orch: Running;
 
 before(async () => {
   const planner = await serve('fake-planner', {
-    'POST /plan': async () => { await planGate; return plan; },
+    'POST /plan': async ({ body }) => { planRequests.push(body); await planGate; return plan; },
     'POST /aggregate': ({ body }) => {
       if (body.prompt.includes('AGG-DOWN')) throw new HttpError(502, 'planner LLM failed: cost guard', { llm_calls: [{ cost_usd: 0.01, signature_verified: true }] });
       return {
@@ -293,4 +294,21 @@ test('timeout with CancelTask refused waits until the authorization expires and 
   assert.deepEqual(s.subtasks[0].hires.map((h: any) => [h.agent_handle, h.state, h.paid]), [['late', 'COMPLETED', true]]);
   assert.deepEqual(s.receipts.map((r: any) => [r.agent_handle, r.verdict]), [['late', 'pass']]);
   spentMatchesReceipts(s);
+});
+
+test("hires in the plan's candidate order, not by price; the next /plan carries Rook's verdicts per agent", async () => {
+  // Ranked by expected cost, the pricier agent can come first: the runner must not re-sort by price.
+  const s = await runToEnd({ subtasks: [sub('s1', 'Ranked', '300000', [cand('holders-good', '300000'), cand('holders-bad', '150000')])], dropped: [], budget: budget('300000'), notes: [], llm_calls: [] });
+  assert.equal(s.task.status, 'closed', s.task.error);
+  assert.deepEqual(s.subtasks[0].hires.map((h: any) => h.agent_handle), ['holders-good']);
+  assert.equal(s.ledger.reserve_used_atomic, '0');
+
+  plan = { subtasks: [], dropped: [], budget: budget('0'), notes: [], llm_calls: [] };
+  const next = await call(`${orch.url}/tasks`, { prompt: 'p', budget_usdc: '1' });
+  const body = planRequests.at(-1);
+  const { PlanRequest } = await import('../src/shared/types.ts');
+  assert.ok(PlanRequest.safeParse(body).success);
+  assert.ok(body.history['holders-good'].pass >= 1);
+  assert.ok(Object.values(body.history).every((h: any) => h.pass + h.fail > 0)); // judged receipts only
+  await call(`${orch.url}/tasks/${next.id}/cancel`, {});
 });

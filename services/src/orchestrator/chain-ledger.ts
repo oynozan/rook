@@ -46,7 +46,8 @@ export type ChainLedger = Ledger & {
    * `index`: how many of the sub-account's payments to pay_to came before this one.
    */
   paymentTx(task_id: string, n: number, p: { amount_atomic: string; pay_to: string; after: string; index?: number }): Promise<{ payment_tx: string; payment_explorer_url: string } | null>;
-  ownerKillCommand(task_id: string): string | null;
+  /** The near-cli call that stops the task on the contract; its funder (or the contract owner) signs it. */
+  killCommand(task_id: string, funder: string | null): string | null;
   recordReceipt(task_id: string, n: number, receipt: Receipt): Promise<ReceiptEvidence & { receipt_explorer_url: string | null }>;
 };
 
@@ -185,6 +186,8 @@ export function createChainLedger(): ChainLedger {
       }
       const amount = m.returnLeftover(task_id, n);
       if (onChain !== amount) console.warn(`[orchestrator] ${task_id} subtask ${n}: returned ${onChain} on chain, ${amount} in Rook's books`);
+      // The emptied sub-account is deleted, its NEAR back to the contract; a failure only leaves that NEAR behind.
+      await signer('/reclaim', c).catch((e) => console.warn(`[orchestrator] ${task_id} subtask ${n}: reclaim ${c.account_id} failed: ${e?.message ?? e}`));
       return amount;
     },
 
@@ -197,15 +200,15 @@ export function createChainLedger(): ChainLedger {
     kill(task_id) {
       killed.add(task_id);
       if (!moving.get(task_id)) m.kill(task_id);
-      // The signer refuses every further /sign for this contract task. The contract's kill_task needs the owner's key.
+      // The signer refuses every further /sign for this contract task. The contract's kill_task needs the funder's key.
       const cid = bound.get(task_id)?.cid;
       if (cid !== undefined) signer('/kill', { task_id: cid }).catch((e) => console.error('[orchestrator] signer /kill failed:', e?.message ?? e));
     },
 
-    ownerKillCommand(task_id) {
+    killCommand(task_id, funder) {
       const cid = bound.get(task_id)?.cid;
       return cid === undefined ? null
-        : `near contract call-function as-transaction ${config.contractId || '<contract>'} kill_task json-args '{"task_id":"${cid}"}' prepaid-gas '30 Tgas' attached-deposit '0 NEAR' sign-as <owner> network-config ${config.nearNetwork} sign-with-keychain send`;
+        : `near contract call-function as-transaction ${config.contractId || '<contract>'} kill_task json-args '{"task_id":"${cid}"}' prepaid-gas '30 Tgas' attached-deposit '0 NEAR' sign-as ${funder || '<funder>'} network-config ${config.nearNetwork} sign-with-keychain send`;
     },
 
     holds: (task_id) => m.holds(task_id),
@@ -241,7 +244,18 @@ export function createChainLedger(): ChainLedger {
       // A funding, top-up or refund in flight resolves within a few blocks: wait for it rather than guess.
       let ct: any, subs: any[] = [];
       for (let i = 0; ; i++) {
-        ({ task: ct, subtasks: subs } = await retry(() => gateway(`/task/${encodeURIComponent(x.cid)}`)));
+        const got = await retry(() => gateway(`/task/${encodeURIComponent(x.cid)}`)).catch((e) => {
+          if (e instanceof HttpError && e.status === 404) return null;
+          throw e;
+        });
+        if (got === null) {
+          // The contract deletes a task closed with no subtask ever funded: its whole budget went back to the funder.
+          if (x.accounts.size) throw new Error(`contract task ${x.cid} is gone but Rook funded sub-accounts for it`);
+          m.createTask(task_id, t.funder, t.budget, t.reserve_share);
+          m.closeTask(task_id);
+          return { status: 'Closed', killed: false, notes: [`contract task ${x.cid} was closed with nothing funded and deleted; its budget went back to the funder`] };
+        }
+        ({ task: ct, subtasks: subs } = got);
         if (ct.status !== 'Closing' && !subs.some((s) => s.status === 'Funding' || s.status === 'ToppingUp')) break;
         // ponytail: 30 polls; a transfer stuck longer needs the owner's resolve_stuck, then another restart.
         if (i >= 30) throw new Error(`contract task ${x.cid} still has a transfer in flight; the owner may need resolve_stuck`);
