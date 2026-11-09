@@ -171,7 +171,8 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
           setStatus(t, 'planned');
         } catch (e: any) {
           if (isTerminal(t.status)) return; // killed while planning: stays killed
-          t.error = `planner: ${e?.message ?? e}`;
+          // A 422 is the planner's sentence for a message that isn't a task: kept as is, for the user. The rest is internal.
+          t.error = e instanceof HttpError && e.status === 422 ? e.message : `planner: ${e?.message ?? e}`;
           emit(t, 'error', { kind: 'planner', message: t.error });
           setStatus(t, 'failed');
         }

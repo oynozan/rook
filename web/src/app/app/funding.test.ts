@@ -4,8 +4,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
-  readCloseOutcome, readFundingOutcome, termsOf, txHashOf, whoseTransfer, untilFinal, type Funding,
+  balanceProblem, closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingLoadReason, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
+  moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, termsOf, txHashOf, typedUsdc, usdc, whoseTransfer, untilFinal, type Funding,
 } from './funding';
 
 const F: Funding = {
@@ -19,6 +19,27 @@ const outcome = (receipts: { executor_id: string; logs: string[]; status?: unkno
   transaction: { hash: '9xQ1oFz3pW7Zb6cQx6m3c7cR8mN4m2Qe5yVfK1sLdTzA', signer_id: 'ops.near', receiver_id: F.usdc },
   transaction_outcome: { id: '9xQ1oFz3pW7Zb6cQx6m3c7cR8mN4m2Qe5yVfK1sLdTzA', outcome: { logs: [] } },
   receipts_outcome: receipts.map((r, i) => ({ id: `r${i}`, outcome: { executor_id: r.executor_id, logs: r.logs, status: r.status ?? { SuccessValue: '' } } })),
+});
+
+test('USDC amounts show what really moves: at least 2 decimals, up to 6, no float rounding', () => {
+  assert.equal(usdc('3000000'), '3.00');
+  assert.equal(usdc('2999000'), '2.999'); // never "3.00" while the wallet sends 2.999
+  assert.equal(usdc('5000'), '0.005'); // a sub-cent price is not "0.00"
+  assert.equal(usdc('855000'), '0.855');
+  assert.equal(usdc('1500000'), '1.50');
+  assert.equal(usdc('100000'), '0.10');
+  assert.equal(usdc('1'), '0.000001');
+  assert.equal(usdc(0), '0.00');
+  assert.equal(usdc(125000n), '0.125');
+  assert.equal(usdc(2_130_000), '2.13'); // sums the page adds up as numbers
+  assert.equal(usdc('9007199254740993000000'), '9007199254740993.00');
+  assert.equal(usdc(-250000n), '-0.25');
+  assert.equal(usdc('abc'), '?');
+  // A budget as typed, before the task exists.
+  assert.equal(typedUsdc('2.999'), '2.999');
+  assert.equal(typedUsdc(' 3 '), '3.00');
+  assert.equal(typedUsdc('03.5'), '3.50');
+  assert.equal(typedUsdc('1,5'), '1,5');
 });
 
 test('the transfer: USDC ft_transfer_call to the contract with the approved msg, 1 yoctoNEAR, 100 Tgas', () => {
@@ -71,6 +92,7 @@ test('a contract task is this plan\'s funding only with its budget, reserve, cap
   // Another task's transfer, another account's, or a different plan: never this one.
   assert.match(fundingMismatch({ ...created, funder: 'alice.near' }, want, 'ops.near') ?? '', /sent by alice\.near, not ops\.near/);
   assert.match(fundingMismatch({ ...created, budget: '5000000' }, want, 'ops.near') ?? '', /budget is 5\.00 USDC, not 3\.00 USDC/);
+  assert.match(fundingMismatch({ ...created, budget: '2999000' }, want, 'ops.near') ?? '', /budget is 2\.999 USDC, not 3\.00 USDC/);
   assert.match(fundingMismatch({ ...created, reserve: '0' }, want, 'ops.near') ?? '', /reserve is 0\.00 USDC/);
   assert.match(fundingMismatch({ ...created, caps: ['800000', '1000000'] }, want, 'ops.near') ?? '', /caps are 0\.80 USDC, 1\.00 USDC/);
   assert.match(fundingMismatch({ ...created, caps: null, funder: null }, want, 'ops.near') ?? '', /unnamed account.*caps are missing/);
@@ -93,7 +115,8 @@ test('a failed confirm offers the refund only when Rook will never run that cont
   assert.equal(confirmFailure('task is running, funded needs approved'), 'refetch');
   assert.equal(confirmFailure("This task's funding is already contract task 1a, so Rook won't confirm contract task 1b for it."), 'refetch');
   assert.equal(confirmFailure("Rook's services aren't running. Start them with pnpm dev, then try again."), 'retry');
-  assert.equal(confirmFailure('no contract task 1a'), 'retry');
+  // Rook reads NEAR a few seconds behind the wallet: the contract task the transfer made isn't there for it yet.
+  assert.equal(confirmFailure('no contract task 1a'), 'not_final');
 });
 
 test('a refund counts only with the contract\'s word for it', () => {
@@ -217,6 +240,63 @@ test('a task stopped before its funding was bound never ran, though the kill add
   assert.equal(moneyMoved(none, [{ type: 'hire_sent' }]), true);
   assert.equal(moneyMoved({ ledger: null, receipts: [{}] }, []), true);
   assert.equal(moneyMoved({ ledger: { spent_atomic: '0' }, receipts: [] }, []), true);
+});
+
+test("reads the wallet's USDC balance and registration from NEAR before the wallet opens", async () => {
+  const bodies: any[] = [];
+  const rpc = (answers: Record<string, unknown>) => (async (_url: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body));
+    bodies.push(body);
+    const a = answers[body.params.method_name];
+    if (a instanceof Error) return new Response(JSON.stringify({ error: { cause: { name: a.message } } }));
+    return new Response(JSON.stringify({ result: { result: [...new TextEncoder().encode(JSON.stringify(a))], logs: [] } }));
+  }) as unknown as typeof fetch;
+
+  const held = await readUsdcBalance('http://rpc', F.usdc, 'alice.near', rpc({ ft_balance_of: '2130000', storage_balance_of: { total: '1250000000000000000000', available: '0' } }));
+  assert.deepEqual(held, { balance: 2_130_000n, registered: true });
+  assert.deepEqual(bodies[0].params, {
+    request_type: 'call_function', finality: 'optimistic', account_id: F.usdc, method_name: 'ft_balance_of', args_base64: btoa('{"account_id":"alice.near"}'),
+  });
+  assert.deepEqual(await readUsdcBalance('http://rpc', F.usdc, 'new.near', rpc({ ft_balance_of: '0', storage_balance_of: null })), { balance: 0n, registered: false });
+  // No storage_balance_of on the token: only the balance counts.
+  assert.deepEqual(await readUsdcBalance('http://rpc', F.usdc, 'alice.near', rpc({ ft_balance_of: '5', storage_balance_of: new Error('MethodNotFound') })), { balance: 5n, registered: true });
+  // Can't read the balance: the caller lets the transfer go ahead.
+  await assert.rejects(readUsdcBalance('http://rpc', F.usdc, 'alice.near', rpc({ ft_balance_of: new Error('UNKNOWN_ACCOUNT'), storage_balance_of: null })), /UNKNOWN_ACCOUNT/);
+
+  // What the page says, before any signature.
+  assert.equal(balanceProblem(held, '3000000', 'alice.near'), 'Your wallet holds 2.13 USDC; this plan needs 3.00 USDC. Add USDC or draft it again with a smaller budget.');
+  assert.equal(balanceProblem(held, '2130000', 'alice.near'), null);
+  assert.equal(balanceProblem({ balance: 5_000n, registered: true }, '2999000', 'alice.near'), 'Your wallet holds 0.005 USDC; this plan needs 2.999 USDC. Add USDC or draft it again with a smaller budget.');
+  assert.match(balanceProblem({ balance: 0n, registered: false }, '3000000', 'new.near') ?? '', /^Your account new\.near isn't registered with the USDC contract on NEAR, so it holds no USDC\./);
+});
+
+test('the raw texts a failed transfer or refund carries read in plain words', () => {
+  const plain: [string, string][] = [
+    ["Smart contract panicked: The account doesn't have enough balance", "your wallet doesn't hold enough USDC"],
+    ['Smart contract panicked: The account new.near is not registered', "your account isn't registered with the USDC contract, so it holds no USDC"],
+    ['Sender alice.near does not have enough balance 1000 for operation costing 2000', "your wallet doesn't hold enough NEAR to pay for the transaction"],
+    ['budget below the minimum of 500000', "the budget is below the contract's minimum of 0.50 USDC"],
+    ['alice.near already has 5 open tasks', 'your account already has 5 tasks open on the Rook contract, the most it allows; wait for one to close'],
+    ['need 1 to 8 caps, each > 0', "the plan's spending limits don't fit the contract's rules; draft the task again"],
+    ['contract is killed', 'the Rook contract is paused and takes no new tasks'],
+    ['{"ActionError":{"index":0,"kind":{"LackBalanceForState":{"account_id":"rook.near","amount":"1"}}}}', 'the Rook contract is short of NEAR for new tasks; try again later'],
+    ['Smart contract panicked: unknown task', 'the contract has no such task any more; its USDC was most likely refunded already'],
+    ['Smart contract panicked: subtask 2 has not returned its leftover', "part of this task still holds USDC, so the contract can't close it yet; try again in a few minutes"],
+  ];
+  for (const [raw, want] of plain) assert.equal(plainReason(raw), want, raw);
+  // Anything else as NEAR gave it, without the panic prefix.
+  assert.equal(plainReason('Smart contract panicked: something new'), 'something new');
+  assert.equal(plainReason('the contract is short of NEAR for new tasks; try again later'), 'the contract is short of NEAR for new tasks; try again later');
+});
+
+test('funding instructions that did not load say why in a sentence', () => {
+  // The orchestrator couldn't read the contract's settings (chain-gateway down, or NEAR RPC failing).
+  for (const m of ['fetch failed', 'GET http://127.0.0.1:7104/config -> 502', 'NEAR RPC query failed: TIMEOUT_ERROR']) {
+    assert.equal(fundingLoadReason(m), "It couldn't read the Rook contract's settings from NEAR just now.", m);
+  }
+  // Rook's own sentences stay, ending in a full stop.
+  assert.equal(fundingLoadReason("Rook's services aren't running. Start them with pnpm dev, then try again."), "Rook's services aren't running. Start them with pnpm dev, then try again.");
+  assert.equal(fundingLoadReason("This page couldn't reach Rook's web server"), "This page couldn't reach Rook's web server.");
 });
 
 test('wallet cancellations read as a choice', () => {

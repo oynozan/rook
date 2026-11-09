@@ -21,7 +21,8 @@ const plan = {
 
 // A planner double that streams like the real one, holding each line until the test releases it.
 let release: () => void = () => {};
-let mode: 'ok' | 'fail' = 'ok';
+let mode: 'ok' | 'fail' | 'not_a_task' = 'ok';
+const NOT_A_TASK = 'That reads like a reply, not a task: to start something new, say what you want done.';
 const lines = [
   { type: 'progress', stage: 'searching', subtasks: [{ index: 0, title: 'Holders' }] },
   { type: 'progress', stage: 'found', index: 0, title: 'Holders', agents: [{ handle: 'holderscope', name: 'Holderscope' }, { handle: 'tokenholders', name: 'Token Holders' }] },
@@ -35,7 +36,11 @@ before(async () => {
       res.writeHead(200, { 'content-type': 'application/x-ndjson' });
       for (const l of lines) res.write(JSON.stringify(l) + '\n');
       await new Promise<void>((ok) => (release = ok)); // the progress is out; the plan waits
-      res.write(JSON.stringify(mode === 'ok' ? { type: 'plan', plan } : { type: 'error', status: 502, error: 'planner LLM failed: NEAR AI 402' }) + '\n');
+      res.write(JSON.stringify(
+        mode === 'ok' ? { type: 'plan', plan }
+        : mode === 'fail' ? { type: 'error', status: 502, error: 'planner LLM failed: NEAR AI 402' }
+        : { type: 'error', status: 422, error: NOT_A_TASK },
+      ) + '\n');
       res.end();
       return undefined;
     },
@@ -86,7 +91,16 @@ test('an error line from the planner fails the task with its message', async () 
   await until(async () => (await eventsOf(t.id)).includes('"stage":"quoting"'));
   release();
   const s = await until(async () => { const s = await call(`${orch.url}/tasks/${t.id}`); return s.task.status === 'failed' && s; });
-  assert.match(s.task.error, /NEAR AI 402/);
+  assert.match(s.task.error, /^planner: planner LLM failed: NEAR AI 402/); // internal: the web app puts it in plain words
+});
+
+test("the planner's not-a-task sentence (422) is kept as is, for the user", async () => {
+  mode = 'not_a_task';
+  const t = await call(`${orch.url}/tasks`, { prompt: 'go ahead', budget_usdc: '1', wait: false });
+  await until(async () => (await eventsOf(t.id)).includes('"stage":"quoting"'));
+  release();
+  const s = await until(async () => { const s = await call(`${orch.url}/tasks/${t.id}`); return s.task.status === 'failed' && s; });
+  assert.equal(s.task.error, NOT_A_TASK);
 });
 
 test('without wait:false the request still waits for the plan, as the CLI expects', async () => {
