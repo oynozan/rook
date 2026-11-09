@@ -64,6 +64,8 @@ export type TaskSnapshot = {
   // Chain mode adds contract_id and contract_task_id once the human's funding is bound to the task.
   ledger: {
     spent_atomic: string; refunded_atomic: string; reserve_used_atomic: string;
+    /** The contract closed the task and refunded the funder (older orchestrators leave it out). */
+    closed?: boolean;
     contract_id?: string | null; contract_task_id?: string; subtasks?: LedgerSub[];
   } | null;
   final_result: { final_markdown: string; abandoned: string[] } | null;

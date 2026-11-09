@@ -267,6 +267,36 @@ const short = (s: string) => (s.length > 14 ? `${s.slice(0, 6)}…${s.slice(-4)}
 const LINK = 'underline decoration-ink/30 underline-offset-2 hover:decoration-ink';
 
 /** What backs a receipt: the agent's A2A task, the evaluator's verdict hash, and the transactions on NEAR. */
+/** What the run spent and refunded, and a receipt per paid hire. The refund shows once the contract closed the task. */
+function MoneyCard({ ledger, receipts, network, simNote }: { ledger: TaskSnapshot['ledger']; receipts: Receipt[]; network: Network; simNote: string }) {
+  return (
+    <div className="rook-in mt-6 rounded-2xl border border-ink/15 p-4" style={{ animationDelay: '500ms' }}>
+      {ledger && (
+        <p className="tabular-nums">
+          Spent {usdc(ledger.spent_atomic)} USDC, {ledger.closed === false
+            ? 'and the rest is on its way back: the refund lands once every payment still in flight has settled or expired'
+            : `refunded ${usdc(ledger.refunded_atomic)} USDC`}{simNote}.
+        </p>
+      )}
+      {receipts.length > 0 && (
+        <ol className="mt-3 border-t border-ink/10">
+          {receipts.map((r, n) => (
+            <li key={r.id} className="border-b border-ink/10 py-1.5 text-sm last:border-b-0">
+              <div className="grid grid-cols-[1.5rem_minmax(0,1fr)_auto_2.5rem] items-baseline gap-2">
+                <span className="font-mono text-ink/55">{n + 1}</span>
+                <span className="truncate font-mono">{r.agent_handle}</span>
+                <span className="font-mono tabular-nums">{usdc(r.amount_atomic)}</span>
+                <span className={r.verdict === 'fail' ? 'text-alert' : r.verdict === 'pass' ? '' : 'text-ink/65'}>{r.verdict === 'fail' ? 'Fail' : r.verdict === 'pass' ? 'Pass' : 'N/A'}</span>
+              </div>
+              <ReceiptProof r={r} network={network} />
+            </li>
+          ))}
+        </ol>
+      )}
+    </div>
+  );
+}
+
 function ReceiptProof({ r, network }: { r: Receipt; network: Network }) {
   const items = [
     r.a2a_task_id && <span key="a2a" title={r.a2a_task_id}>A2A task <span className="font-mono">{short(r.a2a_task_id)}</span></span>,
@@ -1056,23 +1086,13 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
           {final_result.abandoned.length > 0 && <p className="mt-1 text-alert">{final_result.abandoned.length} subtask{final_result.abandoned.length > 1 ? 's' : ''} couldn&apos;t be completed.</p>}
           <Report markdown={final_result.final_markdown} />
 
-          <div className="rook-in mt-6 rounded-2xl border border-ink/15 p-4" style={{ animationDelay: '500ms' }}>
-            {ledger && <p className="tabular-nums">Spent {usdc(ledger.spent_atomic)} USDC, refunded {usdc(ledger.refunded_atomic)} USDC{simNote}.</p>}
-            <ol className="mt-3 border-t border-ink/10">
-              {receipts.map((r, n) => (
-                <li key={r.id} className="border-b border-ink/10 py-1.5 text-sm last:border-b-0">
-                  <div className="grid grid-cols-[1.5rem_minmax(0,1fr)_auto_2.5rem] items-baseline gap-2">
-                    <span className="font-mono text-ink/55">{n + 1}</span>
-                    <span className="truncate font-mono">{r.agent_handle}</span>
-                    <span className="font-mono tabular-nums">{usdc(r.amount_atomic)}</span>
-                    <span className={r.verdict === 'fail' ? 'text-alert' : r.verdict === 'pass' ? '' : 'text-ink/65'}>{r.verdict === 'fail' ? 'Fail' : r.verdict === 'pass' ? 'Pass' : 'N/A'}</span>
-                  </div>
-                  <ReceiptProof r={r} network={network} />
-                </li>
-              ))}
-            </ol>
-          </div>
+          <MoneyCard ledger={ledger} receipts={receipts} network={network} simNote={simNote} />
         </RookMessage>
+      )}
+
+      {/* Stopped or failed without a report: still say where the money went, and what came back. */}
+      {!final_result && settled && started && (ledger || receipts.length > 0) && (
+        <RookMessage><MoneyCard ledger={ledger} receipts={receipts} network={network} simNote={simNote} /></RookMessage>
       )}
 
       {actError && <p role="alert" className="rounded-2xl border border-alert/40 bg-alert/10 p-4 text-alert">{actError}</p>}
