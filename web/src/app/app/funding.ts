@@ -243,6 +243,65 @@ export function readCloseOutcome(outcome: unknown, contractId: string, taskId: s
   return closed?.ok ? { kind: 'refunded', amount: closed.refund } : { kind: 'unknown' };
 }
 
+export type UsdcBalance = { balance: bigint; registered: boolean };
+
+/**
+ * What `account` holds of the USDC token (ft_balance_of), and whether the token knows the account at all
+ * (storage_balance_of is null for an account never registered), read from a NEAR RPC. Throws when it can't read.
+ */
+export async function readUsdcBalance(rpc: string, token: string, account: string, fetchImpl: typeof fetch = fetch): Promise<UsdcBalance> {
+  const view = async (method_name: string): Promise<unknown> => {
+    const r = await fetchImpl(rpc, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ jsonrpc: '2.0', id: 'rook-balance', method: 'query', params: {
+        request_type: 'call_function', finality: 'optimistic', account_id: token, method_name, args_base64: btoa(JSON.stringify({ account_id: account })),
+      } }),
+    });
+    const j = await r.json().catch(() => null);
+    const bytes = j?.result?.result;
+    if (!Array.isArray(bytes)) throw new Error(`NEAR RPC could not call ${method_name}: ${j?.error?.cause?.name ?? j?.result?.error ?? `HTTP ${r.status}`}`);
+    return JSON.parse(new TextDecoder().decode(Uint8Array.from(bytes)));
+  };
+  // A token that can't answer storage_balance_of says nothing about registration: only its balance counts then.
+  const [balance, storage] = await Promise.all([view('ft_balance_of'), view('storage_balance_of').catch(() => undefined)]);
+  if (typeof balance !== 'string' || !/^\d+$/.test(balance)) throw new Error('ft_balance_of returned no amount');
+  return { balance: BigInt(balance), registered: storage !== null };
+}
+
+/** Why the wallet can't send `amount_atomic`, said before it opens (the transfer would only fail), or null if it can. */
+export function balanceProblem(b: UsdcBalance, amount_atomic: string, account: string): string | null {
+  const need = BigInt(amount_atomic);
+  if (b.balance >= need) return null;
+  if (!b.registered) return `Your account ${account} isn't registered with the USDC contract on NEAR, so it holds no USDC. Add USDC to it, then fund this plan.`;
+  return `Your wallet holds ${usdc(b.balance)} USDC; this plan needs ${usdc(need)} USDC. Add USDC or draft it again with a smaller budget.`;
+}
+
+/**
+ * Why a transfer or a refund failed, in plain words where Rook knows the text: NEAR's, the USDC token's, and the Rook
+ * contract's own (contract/budget/src/lib.rs). Anything else as NEAR gave it. It ends a sentence after a colon.
+ */
+export function plainReason(reason: string): string {
+  const r = reason.replace(/^Smart contract panicked: /, '');
+  let m: RegExpMatchArray | null;
+  // The USDC token (NEP-141), and NEAR itself.
+  if (/The account doesn't have enough balance/.test(r)) return "your wallet doesn't hold enough USDC";
+  if (/The account \S+ is not registered/.test(r)) return "your account isn't registered with the USDC contract, so it holds no USDC";
+  if (/NotEnoughBalance|does not have enough balance/.test(r)) return "your wallet doesn't hold enough NEAR to pay for the transaction";
+  if (/Exceeded the prepaid gas/.test(r)) return 'the transaction ran out of gas';
+  // The Rook contract refusing a create_task (it logs why, and the token refunds).
+  if ((m = r.match(/^budget below the minimum of (\d+)/))) return `the budget is below the contract's minimum of ${usdc(m[1])} USDC`;
+  if ((m = r.match(/^\S+ already has (\d+) open tasks/))) return `your account already has ${m[1]} tasks open on the Rook contract, the most it allows; wait for one to close`;
+  if (/^contract is killed/.test(r)) return 'the Rook contract is paused and takes no new tasks';
+  if (/LackBalanceForState/.test(r)) return 'the Rook contract is short of NEAR for new tasks; try again later';
+  if (/^need 1 to \d+ caps|^caps add up to more than budget|^need reserve_bps/.test(r)) return "the plan's spending limits don't fit the contract's rules; draft the task again";
+  // The funder's close_task.
+  if (/^unknown task/.test(r)) return 'the contract has no such task any more; its USDC was most likely refunded already';
+  if (/^task is already closed/.test(r)) return 'the contract already closed this task';
+  if (/has not returned its leftover|has a transfer in flight|^task is closing/.test(r)) return "part of this task still holds USDC, so the contract can't close it yet; try again in a few minutes";
+  return r;
+}
+
 /** The final outcome of a transaction by hash, from a NEAR RPC. Retries while the node hasn't seen it yet. */
 export async function fetchTxOutcome(rpc: string, txHash: string, sender: string, fetchImpl: typeof fetch = fetch, tries = 5): Promise<unknown> {
   let last = 'no answer';

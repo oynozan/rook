@@ -11,8 +11,9 @@ import { approve, cancel, confirmFunding, draftTask, forgetTransfer, fundingRefu
 import { go } from './AppShell';
 import { Composer, type ComposerErrors } from './Composer';
 import {
-  closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingLoadReason, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
-  readCloseOutcome, readFundingOutcome, termsOf, txHashOf, typedUsdc, usdc, whoseTransfer, type CloseResult, type Funding, type FundingResult, type Terms,
+  balanceProblem, closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingLoadReason, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
+  moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, termsOf, txHashOf, typedUsdc, usdc, whoseTransfer,
+  type CloseResult, type Funding, type FundingResult, type Terms,
 } from './funding';
 import { explorerTx, NETWORK, rpcFor, type Network } from './network';
 import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary } from './orchestrator';
@@ -362,7 +363,7 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
 }) {
   const wallet = useWallet();
   const { network: modeNetwork } = useMode();
-  const [phase, setPhase] = useState<'idle' | 'wallet' | 'reading' | 'confirming'>('idle');
+  const [phase, setPhase] = useState<'idle' | 'checking' | 'wallet' | 'reading' | 'confirming'>('idle');
   const [error, setError] = useState<string | null>(null);
   // The error means Rook will never run this contract task for this task, so its USDC can only go back.
   const [refundable, setRefundable] = useState(false);
@@ -445,8 +446,8 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
       return setError("Rook can't tell what the transfer did. Paste its transaction hash from your wallet's history so Rook can read it. Until then Rook won't offer the transfer again, so nothing is sent twice.");
     }
     const why = result.kind === 'refunded'
-      ? `The Rook contract refused the transfer, so the USDC went back to your wallet: ${result.reason.replace(/\.?$/, '.')}`
-      : `The transfer failed on NEAR, so no USDC left your wallet: ${result.reason.replace(/\.?$/, '.')}`;
+      ? `The Rook contract refused the transfer, so the USDC went back to your wallet: ${plainReason(result.reason).replace(/\.?$/, '.')}`
+      : `The transfer failed on NEAR, so no USDC left your wallet: ${plainReason(result.reason).replace(/\.?$/, '.')}`;
     if (who === 'other') return setError(`${why} That was a different transaction, so Rook still can't tell what your transfer did.`);
     setPasted(null); setMayBeUnsent(false); setOwnTx(null);
     setError(why);
@@ -458,6 +459,15 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
     setError(null);
     setNotice(null);
     setRefundable(false);
+    // A wallet short of USDC is told so before the wallet opens: the transfer would only fail in the USDC contract. A
+    // balance NEAR can't show right now doesn't hold the transfer back; the token still refuses one it can't cover.
+    const account = wallet.account;
+    if (account) {
+      setPhase('checking');
+      const short = await readUsdcBalance(rpcFor(funding.network), funding.usdc, account)
+        .then((b) => balanceProblem(b, funding.amount_atomic, account), () => null);
+      if (short) { setPhase('idle'); return setError(short); }
+    }
     setPhase('wallet');
     let outcome: unknown;
     try {
@@ -469,7 +479,7 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
       // A wallet can fail, or close, after it broadcast the transfer: an error doesn't show that nothing went out.
       setPasted('');
       setMayBeUnsent(true);
-      setError(`${isWalletCancel(m) ? 'Your wallet reports the transfer was stopped' : "Your wallet reported an error, so Rook can't tell whether the transfer went out"}: ${m.replace(/\.?$/, '.')} If you approved it there, paste its transaction hash from your wallet's history so Rook can read it. If nothing was sent, choose “Nothing was sent” to try again.`);
+      setError(`${isWalletCancel(m) ? 'Your wallet reports the transfer was stopped' : "Your wallet reported an error, so Rook can't tell whether the transfer went out"}: ${plainReason(m).replace(/\.?$/, '.')} If you approved it there, paste its transaction hash from your wallet's history so Rook can read it. If nothing was sent, choose “Nothing was sent” to try again.`);
       return;
     }
     setPhase('reading');
@@ -516,7 +526,7 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
     // eslint-disable-next-line react-hooks/exhaustive-deps -- fires once per approval; fund reads the current state
   }, [autoStart, funding, done, pendingTx, phase, wallet.account]);
 
-  const busyLabel = { wallet: 'Confirm in your wallet…', reading: 'Reading the transaction…', confirming: 'Checking with Rook…' } as const;
+  const busyLabel = { checking: 'Checking your USDC balance…', wallet: 'Confirm in your wallet…', reading: 'Reading the transaction…', confirming: 'Checking with Rook…' } as const;
   const pasteForm = () => (
     <form className="mt-3 flex flex-wrap gap-2" onSubmit={(e) => { e.preventDefault(); void lookUpPasted(); }}>
       <label className="sr-only" htmlFor={`tx-${id}`}>Transaction hash</label>
@@ -666,7 +676,7 @@ function RefundButton({ id, contractId, taskId, network, onRefunded, stray = fal
       out = await wallet.sendTransaction(closeTaskTransaction(contractId, taskId));
     } catch (e) {
       setState('idle');
-      return setError(`The refund didn't go through: ${(e instanceof Error ? e.message : String(e)).replace(/\.?$/, '.')}`);
+      return setError(`The refund didn't go through: ${plainReason(e instanceof Error ? e.message : String(e)).replace(/\.?$/, '.')}`);
     }
     const hash = txHashOf(out);
     setTx(hash);
@@ -684,7 +694,7 @@ function RefundButton({ id, contractId, taskId, network, onRefunded, stray = fal
       return onRefunded({ amount: result.amount, tx: hash });
     }
     setState('idle');
-    setError(result.kind === 'refused' ? `The refund didn't go through: ${result.reason.replace(/\.?$/, '.')}`
+    setError(result.kind === 'refused' ? `The refund didn't go through: ${plainReason(result.reason).replace(/\.?$/, '.')}`
       : hash ? "Rook can't tell yet whether the refund went through. Check the transaction before you try again."
       : "Your wallet didn't say what happened, so Rook can't tell whether the refund went through. Check your wallet's history before you try again.");
   }

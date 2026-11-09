@@ -4,8 +4,8 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingLoadReason, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
-  readCloseOutcome, readFundingOutcome, termsOf, txHashOf, typedUsdc, usdc, whoseTransfer, untilFinal, type Funding,
+  balanceProblem, closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingLoadReason, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
+  moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, termsOf, txHashOf, typedUsdc, usdc, whoseTransfer, untilFinal, type Funding,
 } from './funding';
 
 const F: Funding = {
@@ -239,6 +239,53 @@ test('a task stopped before its funding was bound never ran, though the kill add
   assert.equal(moneyMoved(none, [{ type: 'hire_sent' }]), true);
   assert.equal(moneyMoved({ ledger: null, receipts: [{}] }, []), true);
   assert.equal(moneyMoved({ ledger: { spent_atomic: '0' }, receipts: [] }, []), true);
+});
+
+test("reads the wallet's USDC balance and registration from NEAR before the wallet opens", async () => {
+  const bodies: any[] = [];
+  const rpc = (answers: Record<string, unknown>) => (async (_url: string, init: RequestInit) => {
+    const body = JSON.parse(String(init.body));
+    bodies.push(body);
+    const a = answers[body.params.method_name];
+    if (a instanceof Error) return new Response(JSON.stringify({ error: { cause: { name: a.message } } }));
+    return new Response(JSON.stringify({ result: { result: [...new TextEncoder().encode(JSON.stringify(a))], logs: [] } }));
+  }) as unknown as typeof fetch;
+
+  const held = await readUsdcBalance('http://rpc', F.usdc, 'alice.near', rpc({ ft_balance_of: '2130000', storage_balance_of: { total: '1250000000000000000000', available: '0' } }));
+  assert.deepEqual(held, { balance: 2_130_000n, registered: true });
+  assert.deepEqual(bodies[0].params, {
+    request_type: 'call_function', finality: 'optimistic', account_id: F.usdc, method_name: 'ft_balance_of', args_base64: btoa('{"account_id":"alice.near"}'),
+  });
+  assert.deepEqual(await readUsdcBalance('http://rpc', F.usdc, 'new.near', rpc({ ft_balance_of: '0', storage_balance_of: null })), { balance: 0n, registered: false });
+  // No storage_balance_of on the token: only the balance counts.
+  assert.deepEqual(await readUsdcBalance('http://rpc', F.usdc, 'alice.near', rpc({ ft_balance_of: '5', storage_balance_of: new Error('MethodNotFound') })), { balance: 5n, registered: true });
+  // Can't read the balance: the caller lets the transfer go ahead.
+  await assert.rejects(readUsdcBalance('http://rpc', F.usdc, 'alice.near', rpc({ ft_balance_of: new Error('UNKNOWN_ACCOUNT'), storage_balance_of: null })), /UNKNOWN_ACCOUNT/);
+
+  // What the page says, before any signature.
+  assert.equal(balanceProblem(held, '3000000', 'alice.near'), 'Your wallet holds 2.13 USDC; this plan needs 3.00 USDC. Add USDC or draft it again with a smaller budget.');
+  assert.equal(balanceProblem(held, '2130000', 'alice.near'), null);
+  assert.equal(balanceProblem({ balance: 5_000n, registered: true }, '2999000', 'alice.near'), 'Your wallet holds 0.005 USDC; this plan needs 2.999 USDC. Add USDC or draft it again with a smaller budget.');
+  assert.match(balanceProblem({ balance: 0n, registered: false }, '3000000', 'new.near') ?? '', /^Your account new\.near isn't registered with the USDC contract on NEAR, so it holds no USDC\./);
+});
+
+test('the raw texts a failed transfer or refund carries read in plain words', () => {
+  const plain: [string, string][] = [
+    ["Smart contract panicked: The account doesn't have enough balance", "your wallet doesn't hold enough USDC"],
+    ['Smart contract panicked: The account new.near is not registered', "your account isn't registered with the USDC contract, so it holds no USDC"],
+    ['Sender alice.near does not have enough balance 1000 for operation costing 2000', "your wallet doesn't hold enough NEAR to pay for the transaction"],
+    ['budget below the minimum of 500000', "the budget is below the contract's minimum of 0.50 USDC"],
+    ['alice.near already has 5 open tasks', 'your account already has 5 tasks open on the Rook contract, the most it allows; wait for one to close'],
+    ['need 1 to 8 caps, each > 0', "the plan's spending limits don't fit the contract's rules; draft the task again"],
+    ['contract is killed', 'the Rook contract is paused and takes no new tasks'],
+    ['{"ActionError":{"index":0,"kind":{"LackBalanceForState":{"account_id":"rook.near","amount":"1"}}}}', 'the Rook contract is short of NEAR for new tasks; try again later'],
+    ['Smart contract panicked: unknown task', 'the contract has no such task any more; its USDC was most likely refunded already'],
+    ['Smart contract panicked: subtask 2 has not returned its leftover', "part of this task still holds USDC, so the contract can't close it yet; try again in a few minutes"],
+  ];
+  for (const [raw, want] of plain) assert.equal(plainReason(raw), want, raw);
+  // Anything else as NEAR gave it, without the panic prefix.
+  assert.equal(plainReason('Smart contract panicked: something new'), 'something new');
+  assert.equal(plainReason('the contract is short of NEAR for new tasks; try again later'), 'the contract is short of NEAR for new tasks; try again later');
 });
 
 test('funding instructions that did not load say why in a sentence', () => {
