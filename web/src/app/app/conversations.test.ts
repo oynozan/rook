@@ -113,9 +113,17 @@ test('amounts a message names as its budget, which the wallet check before draft
   assert.deepEqual(amountsNamed('Due diligence on the NEAR token, budget: 5 USDC'), [5_000_000n]);
   assert.deepEqual(amountsNamed('Research it with a budget of $2'), [2_000_000n]);
   assert.deepEqual(amountsNamed(sameTaskAt('1.50')), [1_500_000n]); // what a changed budget alone sends
-  // Numbers and money that aren't a budget: the check stays at the Budget field.
+  assert.deepEqual(amountsNamed('make it 10'), [10_000_000n]);
+  assert.deepEqual(amountsNamed('make it $12'), [12_000_000n]);
+  assert.deepEqual(amountsNamed('for 10 USDC'), [10_000_000n]);
+  assert.deepEqual(amountsNamed('budget: 25'), [25_000_000n]);
+  assert.deepEqual(amountsNamed('make it five USDC'), [5_000_000n]);
+  assert.deepEqual(amountsNamed('cut it to two dollars'), [2_000_000n]);
+  // Numbers and money that aren't a budget: the check stays at the Budget field. Numbers of two or more digits are never
+  // cut short ("10 items" once read as 1 USDC).
   for (const m of ['Top 10 holders of NEAR in 2026', 'List tokens under $1', 'Explain a 1 USD fee', 'Plan a marketing budget for 1 week',
-    'Make it 2 pages', 'Reduce the list to 5 items', 'A $3 stablecoin depeg: what happened?']) assert.deepEqual(amountsNamed(m), [], m);
+    'Make it 2 pages', 'Reduce the list to 5 items', 'A $3 stablecoin depeg: what happened?', 'Reduce the list to 10 items', 'Make it 20 pages',
+    'Plan a marketing budget of 10 weeks', 'make it 2.5 pages', 'raise it to 12k', 'make it two sentences']) assert.deepEqual(amountsNamed(m), [], m);
 });
 
 test('the placeholder says what a message does there', () => {

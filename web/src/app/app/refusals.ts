@@ -5,7 +5,7 @@ export type TaskAction = 'approve' | 'fund' | 'cancel' | 'stop';
 
 const NOW: Record<string, string> = {
   draft: 'is still being planned', planned: 'is waiting for your approval', approved: 'is already approved',
-  funded: 'is already running', running: 'is already running', aggregating: 'is already running', closing: 'is already running',
+  funded: 'is already running', running: 'is already running', aggregating: 'is already running', closing: 'has finished, and Rook is sending the unspent USDC back',
   closed: 'has already finished', cancelled: 'was cancelled', killed: 'was stopped', failed: 'has already failed',
 };
 const DONE: Record<TaskAction, string> = { approve: 'started', fund: 'funded', cancel: 'cancelled', stop: 'stopped' };

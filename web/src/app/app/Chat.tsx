@@ -1426,7 +1426,7 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
   const ids = conversation ? conversation.tasks.map((t) => t.id) : id ? [id] : [];
   const revised = conversation ? revisedPlan(conversation.tasks) : null;
   const thread: ComposerThread | null = id
-    ? { parent: conversation?.latest.id ?? id, current: conversation?.current ?? null, budget_atomic: conversation?.latest.budget_atomic }
+    ? { parent: conversation?.latest.id ?? id, root: conversation?.tasks[0]?.id ?? id, current: conversation?.current ?? null, budget_atomic: conversation?.latest.budget_atomic }
     : null;
   const onReady = useCallback((task: string) => setSending((s) => (s?.id === task ? null : s)), []);
 

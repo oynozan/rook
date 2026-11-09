@@ -3,7 +3,7 @@
 import { config, MAX_PROMPT_CHARS } from '../shared/config.ts';
 import { HttpError, bigintReplacer, call, serve, type Running } from '../shared/http.ts';
 import { AggregateRequest, PlanRequest, SelfDoRequest, type AgentSummary, type AggregateResult, type LlmCall, type Plan, type X402Config } from '../shared/types.ts';
-import { formatUsdc, namedBudgetProblem, namesAmount, share } from '../shared/money.ts';
+import { budgetBacked, formatUsdc, namedBudgetProblem, share } from '../shared/money.ts';
 import { applySelection, buildPlan, filterSearch, type QuoteResult } from './plan.ts';
 import { aggregate, draft, select, selfDo } from './prompts.ts';
 import { agentOf, isMerged } from './canned.ts';
@@ -30,10 +30,10 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
   if (!d.length) throw new HttpError(422, notATask || 'This does not read as a task Rook can plan: say what you want done.', { llm_calls: calls });
   // A total the message names ("make it 1 USDC") replaces the budget sent with it, within the same limits, refused
   // before the market is searched; the orchestrator checks it again. One the model read into a message that names no
-  // amount is its mistake: the plan is made at the budget sent.
-  const named = drafted !== undefined && namesAmount(req.prompt) ? drafted : undefined;
+  // such total is its mistake: the plan is made at the budget sent.
+  const named = drafted !== undefined && budgetBacked(req.prompt, drafted) ? drafted : undefined;
   const ignored = drafted !== undefined && named === undefined
-    ? [`the draft set a budget of ${formatUsdc(drafted)} USDC, but the message names no amount: planned at the budget sent`] : [];
+    ? [`the draft set a budget of ${formatUsdc(drafted)} USDC, but the message names no such budget: planned at the budget sent`] : [];
   const problem = named === undefined ? null : namedBudgetProblem(named, BigInt(req.min_budget_atomic ?? '0'), config.maxBudgetAtomic);
   if (problem) throw new HttpError(422, problem, { llm_calls: calls });
   const budget = named ?? sent;

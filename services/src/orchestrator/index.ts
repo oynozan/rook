@@ -3,7 +3,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { config, MAX_PROMPT_CHARS } from '../shared/config.ts';
 import { bigintReplacer, call, HttpError, serve, type Ctx, type Routes, type Running } from '../shared/http.ts';
-import { formatUsdc, namedBudgetProblem, namesAmount, parseUsdc } from '../shared/money.ts';
+import { budgetBacked, formatUsdc, namedBudgetProblem, parseUsdc } from '../shared/money.ts';
 import { CONVERSATION_MESSAGES, CONVERSATION_REPORT_CHARS, type AgentHistory, type Conversation, type Plan, type RookEvent, type X402Config } from '../shared/types.ts';
 import { attack } from './attack.ts';
 import { createChainLedger } from './chain-ledger.ts';
@@ -227,7 +227,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
           if (plan.budget.from_message) {
             // The total the message names ("make it 1 USDC", 5.1) is the task's budget, within the same limits as one sent.
             // Only a message that names an amount can set it: a model mistake never moves the money.
-            const problem = namesAmount(t.prompt) ? namedBudgetProblem(BigInt(plan.budget.budget_atomic), min, max) : BUDGET_NOT_NAMED;
+            const problem = budgetBacked(t.prompt, BigInt(plan.budget.budget_atomic)) ? namedBudgetProblem(BigInt(plan.budget.budget_atomic), min, max) : BUDGET_NOT_NAMED;
             if (problem) {
               t.error = problem;
               emit(t, 'error', { kind: 'planner', message: problem });
@@ -309,7 +309,10 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         const funding = await fundingInstructions(t, await contractCfg(), !!reprint);
         // Sent while the funding was being read; or the plan moved on meanwhile (replaced by a revision, or stopped).
         revising();
-        if (t.status !== (reprint ? 'approved' : 'planned')) throw new HttpError(409, `task is ${t.status}, approve needs planned`);
+        // A reprint whose transfer /funded bound meanwhile is funded already: no instructions for a second transfer.
+        if (t.status !== (reprint ? 'approved' : 'planned') || (reprint && chain.contractTaskOf(t.id) !== null)) {
+          throw new HttpError(409, `task is ${t.status}${reprint && t.status === 'approved' ? ' and already funded' : ''}, approve needs planned`);
+        }
         setStatus(t, 'approved');
         return { ...taskView(t), funding };
       }

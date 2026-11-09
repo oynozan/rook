@@ -20,7 +20,7 @@ function reserveLabel(budget: string) {
  * A conversation page: the task a message follows (`parent`), the one it acts on (`current`: a plan it revises, or work
  * it follows up on; null while the page doesn't know the conversation yet) and the budget to start from.
  */
-export type ComposerThread = { parent: string; current: TaskSummary | null; budget_atomic?: string };
+export type ComposerThread = { parent: string; root?: string; current: TaskSummary | null; budget_atomic?: string };
 
 /** Stays mounted through a conversation. Clears as soon as a message is sent, and gives the text back if the send fails. */
 export function Composer({ onSend, errors, sending, compact, thread }: {
@@ -34,14 +34,15 @@ export function Composer({ onSend, errors, sending, compact, thread }: {
   const [budget, setBudget] = useState('3.00');
   // A conversation's budget starts at its newest task's, and again after each message, unless the field holds one the
   // user typed and hasn't sent yet.
-  const parent = thread?.parent, startBudget = thread?.budget_atomic;
-  const lastStart = useRef<string | undefined>(undefined);
+  // Another conversation starts from its own budget, whatever was typed in the last one.
+  const parent = thread?.parent, root = thread?.root, startBudget = thread?.budget_atomic;
+  const lastStart = useRef<{ root?: string; start?: string }>({});
   useEffect(() => {
     if (!parent || !startBudget) return;
-    const was = lastStart.current;
-    lastStart.current = startBudget;
+    const was = lastStart.current.root === root ? lastStart.current.start : undefined;
+    lastStart.current = { root, start: startBudget };
     setBudget((field) => budgetField(field, was, startBudget));
-  }, [parent, startBudget]);
+  }, [parent, root, startBudget]);
   const current = thread?.current ?? null;
   const wallet = useWallet();
   const { mode, chain } = useMode();

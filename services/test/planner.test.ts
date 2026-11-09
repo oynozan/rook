@@ -359,9 +359,21 @@ test('the reply shape in the draft prompt carries no literal amount, nor any oth
 });
 
 test('a message names an amount when it holds a number or a share of the budget', async () => {
-  const { namesAmount } = await import('../src/shared/money.ts');
-  for (const m of ['make it 1 USDC', 'reduce the budget to 1.5', 'do it for $2', 'Halve it', 'double the budget', 'Top 10 holders']) assert.equal(namesAmount(m), true, m);
-  for (const m of ['Now translate it to Turkish', 'is it possible to reduce the budget?', 'go ahead', 'Same task, cheaper']) assert.equal(namesAmount(m), false, m);
+  const { budgetBacked, budgetAmounts } = await import('../src/shared/money.ts');
+  const u = (s: string) => BigInt(Math.round(Number(s) * 1e6));
+  // A total in a budget phrase backs exactly that total; a number elsewhere backs none.
+  for (const [m, total] of [['make it 1 USDC', '1'], ['reduce the budget to 1.5', '1.5'], ['do it for $2', '2'], ['make it five USDC', '5'],
+    ['cut it to two dollars', '2'], ['budget: 25', '25'], ['make it 10', '10'], ['make it 2,5', '2.5'], ['Same task with a budget of 1.50 USDC.', '1.5']] as const) {
+    assert.equal(budgetBacked(m, u(total)), true, m);
+  }
+  assert.equal(budgetBacked('make it 1 USDC', u('1.5')), false); // a total the message doesn't name
+  for (const m of ['Halve it', 'double the budget', 'make it 1 USDC less', 'cut it by 20%']) assert.equal(budgetBacked(m, u('7')), true, m);
+  for (const m of ['Top 10 holders of NEAR in 2026', 'Compare the 3 biggest DEXs', 'Reduce the list to 10 items', 'Make it 20 pages',
+    'Plan a marketing budget of 10 weeks', 'make it 2.5 pages', 'raise it to 12k', 'Now translate it to Turkish', 'is it possible to reduce the budget?',
+    'go ahead', 'Same task, cheaper']) {
+    assert.deepEqual(budgetAmounts(m), [], m);
+    assert.equal(budgetBacked(m, u('10')) || budgetBacked(m, u('1')) || budgetBacked(m, u('2')), false, m);
+  }
 });
 
 test('a total budget named in the message is planned at, within the limits; one out of range is refused before any search', async (t) => {
@@ -404,7 +416,7 @@ test('a total budget named in the message is planned at, within the limits; one 
   assert.equal(plans[1].budget.from_message, undefined);
   // A total the model read into a message with no amount in it is its mistake: planned at the budget sent, with a note.
   assert.deepEqual([plans[2].budget.budget_atomic, plans[2].budget.from_message], ['3000000', undefined]);
-  assert.equal(plans[2].notes[0], 'the draft set a budget of 1.50 USDC, but the message names no amount: planned at the budget sent');
+  assert.equal(plans[2].notes[0], 'the draft set a budget of 1.50 USDC, but the message names no such budget: planned at the budget sent');
   assert.deepEqual(errors, [
     [422, 'Your message asks for a budget of 60.00 USDC, but the most Rook takes is 50.00 USDC.'],
     [422, 'Your message asks for a budget of 0.05 USDC, but the smallest the Rook contract takes is 0.10 USDC.'],

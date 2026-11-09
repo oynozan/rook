@@ -106,7 +106,9 @@ export function problemLine(data: { kind?: string; message?: string; agent_handl
     case 'close': return problem('Sending the unspent USDC back hit a problem. Rook is still finishing the refund.');
     case 'unwind': return problem("Rook couldn't send all the unspent USDC back yet. It will try again.");
     case 'run': return problem("The run stopped because of a problem on Rook's side.");
-    case 'restore': return problem("Rook restarted and couldn't pick this task up again yet.");
+    case 'restore': return /left as it is/.test(message)
+      ? problem("Rook restarted and can't pick this task up again on its own. Its USDC stays on the Rook contract until Rook's operator sorts it out.")
+      : problem("Rook restarted and couldn't pick this task up again yet. It keeps trying on its own.");
     case 'restart': return problem('Rook restarted during this task, so the run stopped there.');
     case 'planner': return problem("Rook couldn't draft a plan for this task.");
     case 'no_plan': return problem(message);

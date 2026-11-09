@@ -109,14 +109,21 @@ export function outgoing(prompt: string, budget: string, current: TaskSummary | 
   return usdc ? sameTaskAt(usdc) : '';
 }
 
-const NUM = String.raw`(\d+(?:[.,]\d+)?)`;
-/** "$2", or a number no other unit follows: "2 USDC" and "2" are money, "1 week" and "2 pages" are not. */
-const AMOUNT = String.raw`(?:\$\s*${NUM}|${NUM}(?!\s*(?!usdc\b|usd\b|dollars?\b)[a-z]))`;
-const MONEY = String.raw`(?:\$\s*${NUM}|${NUM}\s*(?:usdc|usd|dollars?)\b)`;
+// The same budget phrases as the services' budgetAmounts (services/src/shared/money.ts).
+const WORD_NUMBERS: Record<string, string> = {
+  one: '1', two: '2', three: '3', four: '4', five: '5', six: '6', seven: '7', eight: '8', nine: '9', ten: '10',
+  eleven: '11', twelve: '12', fifteen: '15', twenty: '20', thirty: '30', forty: '40', fifty: '50',
+};
+// A whole number (never part of one: "12k", "10 items" and "2.5 pages" are not money), or a number word.
+const NUM = String.raw`(\d+(?:[.,]\d+)?(?![.,]?\d)|\b(?:${Object.keys(WORD_NUMBERS).join('|')})\b)`;
+const CURRENCY = String.raw`(?:usdc|usd|dollars?|bucks?)\b`;
+/** "$2", or a number no other unit follows: "2 USDC" and "2" are money, "1 week" and "20 pages" are not. */
+const AMOUNT = String.raw`(?:\$\s*${NUM}|${NUM}(?!\s*(?!${CURRENCY})[a-z]))`;
+const MONEY = String.raw`(?:\$\s*${NUM}|${NUM}\s*${CURRENCY})`;
 const NAMED = new RegExp([
   String.raw`\bbudget\b(?:\s+(?:of|to|is|at))?[\s:=]*${AMOUNT}`, // "budget 5 USDC", "budget: 5", "a budget of $2", "the budget to 1.5"
-  String.raw`\bmake\s+it\s+${AMOUNT}`, // "make it 1 USDC"
-  String.raw`\b(?:reduce|lower|cut|raise|increase)\b[^\d\n]{0,30}?\bto\s+${AMOUNT}`, // "reduce it to 1"
+  String.raw`\bmake\s+it\s+${AMOUNT}`, // "make it 1 USDC", "make it five USDC"
+  String.raw`\b(?:reduce|lower|cut|raise|increase|drop|bring)\b[^\d\n]{0,30}?\bto\s+${AMOUNT}`, // "cut it to two dollars"
   String.raw`\bfor\s+${MONEY}`, // "do it for 2 USDC", "for $1.5"
 ].join('|'), 'gi');
 
@@ -130,7 +137,8 @@ const NAMED = new RegExp([
 export function amountsNamed(prompt: string): bigint[] {
   const out: bigint[] = [];
   for (const m of prompt.matchAll(NAMED)) {
-    const b = parseBudget(m.slice(1).find((g) => g !== undefined) ?? '');
+    const raw = m.slice(1).find((g) => g !== undefined) ?? '';
+    const b = parseBudget(WORD_NUMBERS[raw.toLowerCase()] ?? raw);
     if (b.ok) out.push(b.atomic);
   }
   return out;
