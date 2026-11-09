@@ -2,13 +2,14 @@
 // sub-accounts of the admin), the budget contract, its USDC registration, the two role keys, and the env file
 // `pnpm live` reads. Every step checks the chain first and skips what is already done. contract/README.md, "Mainnet".
 //
-//   pnpm --filter @rook/services exec tsx scripts/deploy.ts [--network mainnet] [--dry] [--upgrade]
+//   pnpm --filter @rook/services exec tsx scripts/deploy.ts [--network mainnet] [--dry] [--upgrade] [--rotate-keys]
+//     [--orch-allowance 1] [--signer-allowance 0.25]
 //
 // Admin key: ROOK_ADMIN_KEY, or ADMIN_WALLET_PRIVATE_KEY in the repo's .env (read here only, never by a service).
 // New keys go to ~/.rook/accounts/<network>/<account>.json (written before the transaction that uses them), the
 // env file to ~/.rook/<network>.env. Nothing is written inside the repo.
 import { createHash, randomBytes } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { KeyPair, actions, baseEncode, type KeyPairString } from 'near-api-js';
@@ -130,14 +131,30 @@ for (const id of [CONTRACT, ADMIN]) {
 }
 
 // 4. Role keys: function-call keys limited to this contract and these methods. The full-access keys stay in ~/.rook.
+// Every call burns gas from its key's allowance (the orchestrator's about 0.013 NEAR per task on mainnet), and a key that
+// runs dry stops every contract call. --rotate-keys swaps in a fresh key: one transaction adds it and deletes the old.
+const ROTATE = process.argv.includes('--rotate-keys');
+const ALLOWANCE: Record<string, bigint> = { [ORCH]: near(arg('orch-allowance', '1')), [SIGNER]: near(arg('signer-allowance', '0.25')) };
 const roleKeys: Record<string, KeyPair> = {};
-for (const [id, methods, allowance] of [[ORCH, ORCH_METHODS, near('0.25')], [SIGNER, SIGNER_METHODS, near('0.1')]] as const) {
+for (const [id, methods] of [[ORCH, ORCH_METHODS], [SIGNER, SIGNER_METHODS]] as const) {
+  const allowance = ALLOWANCE[id];
   let k = loadKey(id, 'function-call');
-  const onChain = k && (await keyList(id)).some((x) => x.public_key === k!.getPublicKey().toString());
-  if (k && onChain) { console.log(`  ${id} function-call key ${k.getPublicKey()} on chain`); roleKeys[id] = k; continue; }
-  if (!k) k = DRY ? KeyPair.fromRandom('ed25519') : newKey(id, 'function-call', { receiver_id: CONTRACT, methods: [...methods] });
-  await send(`add ${id} key for ${methods.join(', ')} (allowance ${fmt(allowance)} NEAR)`, id, fullKey(id), id,
-    [actions.addFunctionCallAccessKey(k.getPublicKey(), CONTRACT, [...methods], allowance)]);
+  const onChain = k ? (await keyList(id)).find((x) => x.public_key === k!.getPublicKey().toString()) : undefined;
+  if (k && onChain && !ROTATE) {
+    const left = onChain.access_key.permission?.FunctionCall?.allowance;
+    const low = left != null && BigInt(left) < near('0.05');
+    console.log(`  ${id} function-call key ${k.getPublicKey()} on chain, allowance left ${left == null ? 'unlimited' : `${fmt(BigInt(left))} NEAR`}${low ? ': LOW, run with --rotate-keys' : ''}`);
+    roleKeys[id] = k;
+    continue;
+  }
+  const old = k && onChain ? k.getPublicKey() : null;
+  if (old && !DRY) {
+    const f = keyFile(id, 'function-call');
+    renameSync(f, f.replace(/\.json$/, `.retired-${old.toString().slice(8, 16)}.json`)); // kept until the swap has landed
+  }
+  if (!k || old) k = DRY ? KeyPair.fromRandom('ed25519') : newKey(id, 'function-call', { receiver_id: CONTRACT, methods: [...methods] });
+  await send(`${old ? `replace ${id} key ${old} with` : `add ${id}`} a key for ${methods.join(', ')} (allowance ${fmt(allowance)} NEAR)`, id, fullKey(id), id,
+    [actions.addFunctionCallAccessKey(k.getPublicKey(), CONTRACT, [...methods], allowance), ...(old ? [actions.deleteKey(old)] : [])]);
   roleKeys[id] = k;
 }
 

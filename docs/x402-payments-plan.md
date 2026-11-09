@@ -197,6 +197,9 @@ Rook runs on NEAR mainnet. Everything below can be checked on nearblocks.io.
 | Its receipt (verdict pass) | `Fo9zWrdfTyeTtdam16CL7J3wnap8HnwUkg6dXYYnEPXp` |
 | Task 8: subtask 2 paid 0.15 USDC | `Fw6J9Ns4v3P8yQvNzYtHJ81ZWhyynmP52jdiUEAijAiZ` |
 | Its receipt (verdict pass) | `iUDogHawiipKBi7GgxNNXF63w4hoB7X7mq3HvmKNW23` |
+| Role keys rotated after 9 tasks had used 0.12 of the orchestrator key's 0.25 NEAR allowance: new orchestrator key with 1 NEAR | `BR7DBFEvyk5AHCfaP3xUztf5sq2gBqi4TcvNi3L7WPFF` |
+| New signer key with 0.25 NEAR | `7w5uJKrcr2LpD28FfSMuqqC8hCM6Fxxt2CkXqkykrxdn` |
+| 0.2 NEAR to `orch.oynozan.near` for gas | `8QveY1qJXXSimViBEP21UH1RTqaopn6J3UK2FV8WEcvR` |
 
 | Contract task | Rook task | Hires | Paid | Refunded | Outcome |
 | --- | --- | --- | --- | --- | --- |
