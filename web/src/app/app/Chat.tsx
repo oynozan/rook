@@ -993,10 +993,9 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   const settled = !!status && TERMINAL.has(status) && caughtUp;
   useEffect(() => { onGrow(); }, [shown, status, settled, onGrow]);
 
-  // Keep the sidebar's status honest when the run moves on without an action from this page.
-  useEffect(() => {
-    if (status && known && status !== known && (status === 'planned' || status === 'running' || TERMINAL.has(status))) router.refresh();
-  }, [status, known, router]);
+  // Keep the sidebar's status honest when the run moves on without an action from this page: every step, so it never
+  // says "Needs funding" while the funded run is starting.
+  useEffect(() => { if (status && known && status !== known) router.refresh(); }, [status, known, router]);
   // The server has no session for this page (another tab signed out, or it lapsed): render signed out, with Connect.
   useEffect(() => { if (problem === 'signin' && wallet.account) router.refresh(); }, [problem, wallet.account, router]);
 
