@@ -128,15 +128,51 @@ Each step ends with something that runs. Steps marked **human yes** spend real m
 ## 6. Costs
 
 - USDC: only real hires, a few USDC in total (steps 7 to 10).
-- NEAR per subtask: sub-account creation and storage (about 0.002 NEAR for a minimal account), USDC storage deposit (0.00125 NEAR), gas for the return transaction, and the contract's own calls. Estimate 0.01 NEAR per subtask until step 2 measures it; most is refunded only if the sub-accounts are deleted, which the contract does not do.
+- NEAR per subtask, measured on mainnet (section 8): the contract advances 0.06 NEAR to the sub-account plus the 0.00125 NEAR USDC storage deposit. A return `ft_transfer_call` at 50 Tgas needs 0.0509 NEAR up front (the runtime prices prepaid gas pessimistically and refunds the unused part), so the first value, 0.01, failed with `NotEnoughBalance`. Once a subtask is Returned the signer sends `storage_unregister` and `DeleteAccount` with the contract as beneficiary, so almost all of it comes back (task 0's second sub-account returned 0.06 of 0.06125).
 - NEAR AI: unchanged from phase 1.
 
 ## 7. Risks specific to this phase
 
 | Risk | Mitigation |
 | --- | --- |
-| A named sub-account is refused as an x402 payer | Step 7 tests it with 0.10 USDC before anything else depends on it. Fallback: implicit (64-hex) accounts created by `fund_subtask` transferring NEAR to the implicit id, which keeps per-subtask isolation |
+| A named sub-account is refused as an x402 payer | Settled on mainnet 2026-11-09: `t0-1.rook.oynozan.near` paid `web-research` 0.50 USDC through the marketplace facilitator (section 8) |
 | Unpaid authorization still settles later | The signer never signs a second payment for a subtask until the first one's `blockHeightTtl` has passed or the marketplace reports an unpaid terminal state |
 | Indexer lag hides the payment transaction | Receipts are written with `payment_tx: null` first and filled when found; the balance drop (`ft_balance_of`) is the immediate signal |
 | Orchestrator function-call key runs out of allowance | Allowance with headroom; `chain-gateway` exposes the remaining allowance and the CLI warns under 20% |
 | Leaked sub-account key | Loss bounded by one cap; keys deleted after the leftover returns |
+
+## 8. Mainnet record (2026-11-09)
+
+Rook runs on NEAR mainnet. Everything below can be checked on nearblocks.io.
+
+**Accounts.** All are sub-accounts of `oynozan.near`, created by `services/scripts/deploy.ts`. Their keys are in `~/.rook/accounts/mainnet/` and `~/.rook/mainnet.env`, outside the repo.
+
+| Account | Role | Created with |
+| --- | --- | --- |
+| `rook.oynozan.near` | budget contract (owner `oynozan.near`) | 3.04 NEAR, of which about 2.72 is the code stake |
+| `orch.oynozan.near` | orchestrator: function-call key for `fund_subtask, top_up, record_receipt, close_task, mark_empty`, 0.25 NEAR allowance | 0.3 NEAR |
+| `signer.oynozan.near` | signer: function-call key for `register_subtask_key`, 0.1 NEAR allowance | 0.15 NEAR |
+
+**Transactions.**
+
+| What | Transaction |
+| --- | --- |
+| Create the contract account | `DJhUs7nbRMQ7ufR8F84wbkM4hT9ChqUJgjEtYLqCkRw4` |
+| Deploy and init | `3bLBu5oXJzVvmEmBrDjTKF6PPHs8JgerrUPhKDPFFaZf` |
+| Redeploy built with `--cfg near` (errors had no message, see below) | `CzMKik7VkVRe1a3N23ppnguhcR99KwMSYBxgAXvds3tv` |
+| Redeploy with 0.06 NEAR per sub-account | `G8xEA46mTBmyF1oBPSJZckNpetcF4RSzDeDXgu3wG1HY` |
+| Swap 1.3 NEAR to 4.53 USDC on Ref Finance (pool 4512), for the test funder | `GhfaGbKvao7SHxjSoFaCSJdix9QpVNrDjsZ9KQUJ1mJy` |
+| Task 0 funded by `oynozan.near`: 1.50 USDC, caps 0.30 and 0.50, reserve 0.30 | `DFkg59zhnitZR2jxfyzKyWfe1MMNJr1x5VZbsrXmPYEf` |
+| **First x402 payment**: `t0-1.rook.oynozan.near` paid `web-research` 0.50 USDC (cap 0.30 plus a 0.20 top-up from the reserve) | `GTw5hCY4U43TExFNgr4NBkUG6s8NtFUmmcoS6sXzoZAP` |
+| Its receipt on the contract (verdict pass, evaluation hash `f0ac5fc4…`) | `CFmXWsYdspCTdP7k8L2PEtoPQnu6qHuG2pcMDEurDVWA` |
+| Delete the emptied `t0-1` sub-account, NEAR back to the contract | `BbA95XKB1Eb2mwABLy3nxroadt1rLhEMjDvTbfLsJ6wq` |
+| Task 1 funded by `oynozan.near`: 1.50 USDC, one cap of 0.30 | `AhL3eih7BRF7PMRss4a8B7CqFvdZy1onj4YwwMus2aZL` |
+
+Task 0 ended with 0.50 USDC paid to the agent and 1.00 USDC refunded to the funder; `ledger_check` held.
+
+**What broke, and the fixes.**
+
+1. Every refusal read "WebAssembly trap: An `unreachable` opcode was executed". near-sdk 5.30 sends `env::panic_str` to the host only when the crate is built with `--cfg near` (cargo-near sets it); without it, a panic is a bare `unreachable`. The build now passes `--cfg near`, and the wasm imports `panic_utf8`.
+2. The return from a sub-account failed with `NotEnoughBalance`: 0.01 NEAR could not cover the 0.0509 NEAR up-front cost of a 50 Tgas `ft_transfer_call`. `SUBACCOUNT_NEAR` is now 0.06 NEAR, and the signer's `/reclaim` deletes each finished sub-account with the contract as beneficiary, so the NEAR comes back. The stuck sub-account `t0-2` was rescued with 0.05 NEAR from `oynozan.near`, then returned 0.50 USDC and was deleted.
+3. Agents ask for payment windows longer than one hour (`maxTimeoutSeconds` is the agent's SLA plus 600 s, up to 87,000 s), and Rook refused anything over 3,600 s. The limit is now 90,000 s. A long window does not block a subtask: a terminal unpaid hire clears at once, and the return uses a newer nonce of the sub-account's key, which voids any unused delegate.
+4. The planner searched the market only with topic words, which matched few agents. Its first search term is now the general skill agents advertise (for example "web research").
