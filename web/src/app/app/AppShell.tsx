@@ -7,6 +7,7 @@ import { useEffect, useRef, useState, type MouseEvent, type ReactNode, type Ref 
 import { Mark } from '@/components/Navbar';
 import { useSmoothScroll } from '@/components/SmoothScroll';
 import { ThemeToggle } from '@/components/ui/theme-toggle';
+import { conversations } from './conversations';
 import { useMode } from './mode';
 import type { TaskSummary } from './orchestrator';
 import { useEase } from './useEase';
@@ -64,30 +65,31 @@ function PanelToggle({ label, onClick }: { label: string; onClick: () => void })
   );
 }
 
+/** One entry per conversation: its first request, and the state of the task a new message would act on. Links to its newest task. */
 function TaskList({ tasks, onNavigate }: { tasks: TaskSummary[] | null; onNavigate: () => void }) {
   const pathname = usePathname();
   const { chain } = useMode(); // chain mode: an approved task waits for the owner's funding transfer
   const label = (s: string) => (chain && s === 'approved' ? 'Needs funding' : STATUS[s] ?? s);
   if (tasks === null) return <p className="px-3 text-sm text-ink/65">Rook&apos;s services are unreachable right now. Your tasks will be back here as soon as they are.</p>;
   if (!tasks.length) return <p className="px-3 text-sm text-ink/65">Tasks you draft will appear here.</p>;
-  const recent = [...tasks].sort((a, b) => b.created_at.localeCompare(a.created_at));
   return (
     <ul>
-      {recent.map((t) => {
-        const href = `/app/${t.id}`;
-        const current = pathname === href;
+      {conversations(tasks).map((c) => {
+        const href = `/app/${c.latest.id}`;
+        const current = c.tasks.some((t) => pathname === `/app/${t.id}`); // any of its tasks' pages shows it
+        const status = c.current.status;
         return (
-          <li key={t.id}>
+          <li key={c.id}>
             <a
               href={href}
               aria-current={current ? 'page' : undefined}
               onClick={(e) => { go(href, e); onNavigate(); }}
               className={`block rounded-lg px-3 py-2 transition-colors motion-reduce:transition-none ${current ? 'bg-ink/10' : 'hover:bg-ink/5'}`}
             >
-              <span className="block truncate" title={t.prompt}>{t.prompt}</span>
-              <span className={`mt-0.5 flex items-center gap-1.5 text-sm ${ACTIVE.has(t.status) ? 'text-accent-ink' : 'text-ink/65'}`}>
-                {ACTIVE.has(t.status) && <span className="size-2 shrink-0 bg-accent" aria-hidden="true" />}
-                {label(t.status)}
+              <span className="block truncate" title={c.title}>{c.title}</span>
+              <span className={`mt-0.5 flex items-center gap-1.5 text-sm ${ACTIVE.has(status) ? 'text-accent-ink' : 'text-ink/65'}`}>
+                {ACTIVE.has(status) && <span className="size-2 shrink-0 bg-accent" aria-hidden="true" />}
+                {label(status)}
               </span>
             </a>
           </li>
@@ -130,7 +132,7 @@ function ComposeIcon({ className }: { className: string }) {
 function SidebarContent({ tasks, rail = false, toggleLabel = 'Close sidebar', onToggle, onNavigate, onExpand, avatarRef }: SidebarProps) {
   const wallet = useWallet();
   const fade = `transition-opacity ${GLIDE} ${rail ? 'opacity-0' : ''}`;
-  const busy = tasks?.some((t) => ACTIVE.has(t.status));
+  const busy = !!tasks && conversations(tasks).some((c) => ACTIVE.has(c.current.status));
   return (
     <>
       <div className="relative flex h-17 shrink-0 items-center pl-5.5">

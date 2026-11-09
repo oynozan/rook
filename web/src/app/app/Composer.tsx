@@ -2,8 +2,10 @@
 
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
-import { checkDraft, parseBudget } from './draft';
+import { outgoing, placeholderFor, waitReason } from './conversations';
+import { checkDraft, formatUsdc, parseBudget } from './draft';
 import { useMode } from './mode';
+import type { TaskSummary } from './orchestrator';
 import { useWallet } from './wallet';
 
 export type ComposerErrors = { prompt?: string; budget?: string; message?: string };
@@ -14,15 +16,26 @@ function reserveLabel(budget: string) {
   return b.ok ? `at least ${(Number(b.atomic) / 1e6 * 0.2).toFixed(2)} held for re-hires` : 'at least 20% held for re-hires';
 }
 
-/** Stays mounted through a conversation. Clears as soon as a task is sent, and gives the text back if the send fails. */
-export function Composer({ onSend, errors, sending, compact }: {
+/**
+ * A conversation page: the task a message follows (`parent`), the one it acts on (`current`: a plan it revises, or work
+ * it follows up on; null while the page doesn't know the conversation yet) and the budget to start from.
+ */
+export type ComposerThread = { parent: string; current: TaskSummary | null; budget_atomic?: string };
+
+/** Stays mounted through a conversation. Clears as soon as a message is sent, and gives the text back if the send fails. */
+export function Composer({ onSend, errors, sending, compact, thread }: {
   onSend: (prompt: string, budget: string) => Promise<boolean>;
   errors: ComposerErrors | null;
   sending: boolean;
-  compact: boolean; // inside a conversation: replies aren't supported yet, so sending starts a new task
+  compact: boolean; // inside a conversation, or sending its first message
+  thread: ComposerThread | null; // null: the message starts a new conversation
 }) {
   const [prompt, setPrompt] = useState('');
   const [budget, setBudget] = useState('3.00');
+  // A conversation's budget starts at its newest task's, and again after each message.
+  const parent = thread?.parent, startBudget = thread?.budget_atomic;
+  useEffect(() => { if (parent && startBudget) setBudget(formatUsdc(startBudget)); }, [parent, startBudget]);
+  const current = thread?.current ?? null;
   const wallet = useWallet();
   const { mode } = useMode();
   const locked = !wallet.account;
@@ -41,9 +54,12 @@ export function Composer({ onSend, errors, sending, compact }: {
   async function submit() {
     if (sending) return;
     if (locked) return setFound({ message: 'Connect your NEAR wallet to send this task.' }); // the text stays
-    // Checked here first, so a task that can't be sent never shows in the thread. The action checks again.
-    const check = checkDraft({ prompt, budget }, mode);
-    if (!check.ok) return setFound({ prompt: check.prompt, budget: check.budget });
+    const wait = current && waitReason(current.status);
+    if (wait) return setFound({ message: wait }); // the orchestrator refuses it too
+    // Checked here first, so a task that can't be sent never shows in the thread. The action checks again. In a
+    // conversation a changed budget alone asks for the same task at that budget.
+    const check = checkDraft({ prompt: thread ? outgoing(prompt, budget, current) : prompt, budget }, mode);
+    if (!check.ok) return setFound({ prompt: check.prompt && thread && !prompt.trim() ? 'Type a message, or change the budget.' : check.prompt, budget: check.budget });
     setFound(null);
     // Phones: put the keyboard away, or it covers the plan this is about to bring up.
     if (window.matchMedia('(max-width: 639px)').matches) (document.activeElement as HTMLElement | null)?.blur();
@@ -51,7 +67,7 @@ export function Composer({ onSend, errors, sending, compact }: {
     // If the send fails, the text comes back, unless something new has been typed meanwhile.
     const sent = prompt;
     setPrompt('');
-    if (!(await onSend(sent, check.usdc).catch(() => false))) setPrompt((now) => now || sent);
+    if (!(await onSend(check.prompt, check.usdc).catch(() => false))) setPrompt((now) => now || sent);
   }
 
   return (
@@ -77,7 +93,7 @@ export function Composer({ onSend, errors, sending, compact }: {
             void submit();
           }}
           rows={2}
-          placeholder={compact ? 'Start a new task' : 'Due diligence on the NEAR token'}
+          placeholder={thread ? placeholderFor(current, budget) : compact ? 'Start a new task' : 'Due diligence on the NEAR token'}
           className={`field-sizing-content block max-h-64 w-full ${compact ? 'min-h-11' : 'min-h-11 sm:min-h-20'} resize-none overflow-y-auto bg-transparent px-3 pt-2.5 pb-2 sm:pt-2 ${compact ? 'text-base sm:text-lg' : 'text-base sm:text-xl md:text-2xl'} ${folded ? 'max-sm:pr-12' : ''} leading-snug outline-none placeholder:text-ink/55`}
         />
 
@@ -102,7 +118,7 @@ export function Composer({ onSend, errors, sending, compact }: {
         </div>
         <button
             type="submit"
-            aria-label="Send task"
+            aria-label={thread ? 'Send message' : 'Send task'}
             disabled={sending}
             aria-disabled={locked || undefined} // still pressable: it says to connect first (a tooltip never shows on a phone)
             title={locked ? 'Connect your wallet first' : undefined}

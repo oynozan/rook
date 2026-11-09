@@ -9,7 +9,9 @@ import { AiStatus } from '@/components/ui/ai-status';
 import { WebSearch, type WebSource } from '@/components/ui/web-search';
 import { approve, cancel, confirmFunding, draftTask, forgetTransfer, fundingRefunded, rememberTransfer, stop, type ActResult } from './actions';
 import { go } from './AppShell';
-import { Composer, type ComposerErrors } from './Composer';
+import { Composer, type ComposerErrors, type ComposerThread } from './Composer';
+import { conversationOf } from './conversations';
+import { parseBudget } from './draft';
 import { alertLine, deliveredParts, problemLine, skipReason } from './feed';
 import {
   balanceProblem, closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingLoadReason, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
@@ -1029,6 +1031,8 @@ function Report({ markdown }: { markdown: string }) {
 
 /** A server action call that never got an answer: the network dropped, or the web server was restarting. */
 const UNREACHABLE = "This page couldn't reach Rook. Check your connection and try again.";
+/** A plan Rook cancelled because a message below it revised it. */
+const REPLACED = 'Replaced by the revised plan below.';
 
 function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; loaded: Loaded; tasks: TaskSummary[] | null; onGrow: () => void; fresh: boolean; onRevealed: (id: string) => void }) {
   const { snap, events, problem, refetch } = loaded;
@@ -1159,13 +1163,13 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
           {free ? (
             <p>
               Here&apos;s the plan. {allSelfDoWhy(plan.subtasks.map((s) => s.self_do_reason))}{' '}
-              Nothing is hired, so nothing is paid and nothing leaves your wallet.{task.status === 'cancelled' && ' You cancelled it.'}
+              Nothing is hired, so nothing is paid and nothing leaves your wallet.{task.status === 'cancelled' && (task.replaced_by ? ` ${REPLACED}` : ' You cancelled it.')}
             </p>
           ) : (
             <p>
               Here&apos;s the plan. The caps add up to <span className="font-medium">{usdc(plan.budget.allocated_atomic)} USDC</span>
               {BigInt(plan.budget.reserve_atomic || 0) > 0n && <>, and up to {usdc(plan.budget.reserve_atomic)} USDC more can come from the reserve when a subtask needs more than its cap</>}.{' '}
-              {started ? 'You approved it.' : task.status === 'cancelled' ? 'You cancelled it, so nothing was spent.' : task.status === 'approved' ? 'You approved it. Nothing has been spent yet.' : task.status !== 'killed' ? 'Nothing has been spent.'
+              {started ? 'You approved it.' : task.status === 'cancelled' ? (task.replaced_by ? REPLACED : 'You cancelled it, so nothing was spent.') : task.status === 'approved' ? 'You approved it. Nothing has been spent yet.' : task.status !== 'killed' ? 'Nothing has been spent.'
                 : 'You stopped it before Rook started the run, so no agent was paid.'}
             </p>
           )}
@@ -1257,13 +1261,45 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
 
 // ---- the page's one conversation surface ----
 
+type ThreadProps = Omit<Parameters<typeof Thread>[0], 'loaded'>;
+
+/**
+ * One task of the conversation, loaded and followed on its own. It tells the page what it learns (`onSummary`: status,
+ * budget, parent), and when it has loaded (`onReady`). `hidden`: a message just sent still shows as sent until then.
+ */
+function TaskThread({ account, hidden, onReady, onSummary, ...props }: ThreadProps & {
+  account: string | null; hidden: boolean; onReady: (id: string) => void; onSummary: (id: string, t: TaskSummary | null) => void;
+}) {
+  const { id } = props;
+  const loaded = useTask(id, account);
+  const { snap, problem } = loaded;
+  useEffect(() => { if (snap || problem) onReady(id); }, [snap, problem, id, onReady]);
+  const t = snap?.task;
+  const [status, prompt, created, parent, budget] = [t?.status, t?.prompt, t?.created_at, t?.parent_id ?? null, t?.budget_atomic];
+  useEffect(() => {
+    if (status && prompt !== undefined && created) onSummary(id, { id, status, prompt, created_at: created, parent_id: parent, budget_atomic: budget });
+  }, [id, status, prompt, created, parent, budget, onSummary]);
+  useEffect(() => () => onSummary(id, null), [id, onSummary]);
+  return hidden ? null : <Thread {...props} loaded={loaded} />;
+}
+
+/**
+ * The sidebar's list, with what this page knows sooner: tasks it sent that the list doesn't have yet, and the live state
+ * of the tasks it shows.
+ */
+function withKnown(tasks: TaskSummary[] | null, sent: TaskSummary[], live: Record<string, TaskSummary>): TaskSummary[] {
+  const merged = new Map(sent.map((t) => [t.id, t]));
+  for (const t of tasks ?? []) merged.set(t.id, t);
+  for (const t of Object.values(live)) merged.set(t.id, { ...merged.get(t.id), ...t });
+  return [...merged.values()];
+}
+
 /** Lives in the layout, so going from /app to /app/{id} changes what it shows without remounting anything. */
 export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
   const pathname = usePathname();
   const wallet = useWallet();
   const parts = pathname.split('/').filter(Boolean); // ['app', id?]
   const id = parts[1] ? decodeURIComponent(parts[1]) : null;
-  const loaded = useTask(id, wallet.account);
   const [sending, setSending] = useState<{ prompt: string; budget: string; id?: string } | null>(null);
   const [errors, setErrors] = useState<ComposerErrors | null>(null);
   const scroller = useRef<HTMLDivElement>(null);
@@ -1271,18 +1307,42 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
   const justDrafted = useRef(new Set<string>());
   const onRevealed = useCallback((task: string) => { justDrafted.current.delete(task); }, []);
 
+  // The conversation this page shows: every task of the one `id` is in, oldest first. Until the list has the task (just
+  // sent, or the services were unreachable), the task alone, and whatever its own snapshot says it follows.
+  const [sent, setSent] = useState<TaskSummary[]>([]);
+  const [live, setLive] = useState<Record<string, TaskSummary>>({});
+  const onSummary = useCallback((task: string, t: TaskSummary | null) => setLive((k) => {
+    if (t) return JSON.stringify(k[task]) === JSON.stringify(t) ? k : { ...k, [task]: t };
+    if (!(task in k)) return k;
+    const { [task]: _gone, ...rest } = k;
+    return rest;
+  }), []);
+  const conversation = id ? conversationOf(withKnown(tasks, sent, live), id) : null;
+  const ids = conversation ? conversation.tasks.map((t) => t.id) : id ? [id] : [];
+  const thread: ComposerThread | null = id
+    ? { parent: conversation?.latest.id ?? id, current: conversation?.current ?? null, budget_atomic: conversation?.latest.budget_atomic }
+    : null;
+  const onReady = useCallback((task: string) => setSending((s) => (s?.id === task ? null : s)), []);
+
   const home = !id && !sending;
   const lenis = useSmoothScroll(scroller, !home);
 
   async function send(prompt: string, budget: string) {
     setErrors(null);
     setSending({ prompt: prompt.trim(), budget });
+    const parent_id = thread?.parent;
     // Returns as soon as the task exists; the plan then streams in on the task's page. The call itself can fail (the
     // network, or the web server restarting): then the composer gets its text back and says so.
-    const out = await draftTask({ prompt, budget }).catch(() => ({ kind: 'error' as const, message: UNREACHABLE }));
+    const out = await draftTask({ prompt, budget, parent_id }).catch(() => ({ kind: 'error' as const, message: UNREACHABLE }));
     if (out.kind === 'planned') {
-      // Keep showing this message until the task has loaded, so the thread takes over with no gap.
+      // Keep showing this message until the task has loaded, so the thread takes over with no gap. The conversation
+      // counts it at once, so the tasks above it stay on the page.
       justDrafted.current.add(out.id);
+      const b = parseBudget(budget);
+      setSent((s) => [...s, {
+        id: out.id, status: 'draft', prompt: prompt.trim(), created_at: new Date().toISOString(), parent_id: parent_id ?? null,
+        ...(b.ok ? { budget_atomic: b.atomic.toString() } : {}),
+      }]);
       setSending((s) => s && { ...s, id: out.id });
       go(`/app/${out.id}`);
       return true;
@@ -1292,9 +1352,6 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
     return false;
   }
 
-  useEffect(() => {
-    if (sending?.id && sending.id === id && (loaded.snap?.task.id === id || loaded.problem)) setSending(null);
-  }, [sending, id, loaded.snap, loaded.problem]);
   useEffect(() => { setErrors(null); }, [id]); // a failed send's errors are about that send, not the next page
 
   // Follow the conversation as it grows, until the reader scrolls up. Only their input can stop it: a smooth scroll on
@@ -1346,20 +1403,25 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
             className="min-h-0 flex-1 overflow-y-auto mask-[linear-gradient(to_bottom,transparent,#000_12px,#000_calc(100%-12px),transparent)] sm:mask-[linear-gradient(to_bottom,transparent,#000_48px,#000_calc(100%-12px),transparent)]"
           >
             <div className="mx-auto w-full max-w-208 space-y-6 px-4 pt-3 pb-6 sm:px-5 sm:pt-16 sm:pb-8 md:px-8">
-              <h1 className="sr-only">{sending?.prompt ?? loaded.snap?.task.prompt ?? 'Task'}</h1>
-              {sending ? (
+              <h1 className="sr-only">{conversation?.title ?? sending?.prompt ?? 'Task'}</h1>
+              {/* Every task of the conversation, oldest first, each with its own plan, run and report. */}
+              {ids.map((task) => (
+                <TaskThread key={`${task}:${wallet.account}`} id={task} account={wallet.account} hidden={sending?.id === task} onReady={onReady} onSummary={onSummary}
+                  tasks={tasks} onGrow={follow} fresh={justDrafted.current.has(task)} onRevealed={onRevealed} />
+              ))}
+              {sending && (
                 <>
                   <UserMessage animate prompt={sending.prompt} budget={typedUsdc(sending.budget)} />
                   <RookMessage><AgentSearch plan={null} animate={false} onGrow={follow} /></RookMessage>
                 </>
-              ) : id && <Thread key={`${id}:${wallet.account}`} id={id} loaded={loaded} tasks={tasks} onGrow={follow} fresh={justDrafted.current.has(id)} onRevealed={onRevealed} />}
+              )}
             </div>
           </div>
         )}
 
         {/* Glides between the centre of the home screen and the bottom of a conversation. */}
         <motion.div layout="position" transition={ease} className={`mx-auto w-full max-w-208 md:px-8 px-2.5 pb-2.5 sm:px-5 ${home ? 'sm:mt-8 sm:pb-16' : 'sm:pb-5'}`}>
-          <Composer onSend={send} errors={errors} sending={!!sending} compact={!home} />
+          <Composer onSend={send} errors={errors} sending={!!sending} compact={!home} thread={thread} />
         </motion.div>
       </div>
     </div>
