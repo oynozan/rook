@@ -11,7 +11,7 @@ import { createLedger, type Ledger } from './ledger.ts';
 import { kill, restoreTask, runTask, SHUTDOWN } from './runner.ts';
 import { openStore } from './db.ts';
 import {
-  ancestors, emit, fromDoc, isFree, isTerminal, newTask, openPlan, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task,
+  ancestors, emit, fromDoc, headOf, isFree, isTerminal, newTask, openPlan, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task,
 } from './store.ts';
 
 const CreateBody = z.object({
@@ -178,13 +178,15 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       // A message in a conversation follows its newest task. Checked after the last await, so two messages sent at once
       // cannot both follow the same task.
       const parent = b.parent_id === undefined ? null : owned(b.parent_id, b.owner);
+      const chain = parent ? ancestors(parent, tasks) : [];
       if (parent) {
         if (parent.owner !== (b.owner ?? null)) throw new HttpError(409, `task ${parent.id} has another owner: a follow-up keeps its owner`);
-        if (parent.status === 'draft') throw new HttpError(409, 'Wait for the plan to be ready before sending more.');
-        if (parent.status !== 'planned' && !isTerminal(parent.status)) throw new HttpError(409, 'Wait for this run to finish, or stop it, before sending more.');
+        // What the message acts on: the parent, or the task above replies that never got a plan (a run under way, say).
+        const head = headOf(chain)!;
+        if (head.status === 'draft') throw new HttpError(409, 'Wait for the plan to be ready before sending more.');
+        if (head.status !== 'planned' && !isTerminal(head.status)) throw new HttpError(409, 'Wait for this run to finish, or stop it, before sending more.');
         if ([...tasks.values()].some((x) => x.parent_id === parent.id)) throw new HttpError(409, 'This conversation has a newer message: reload the page and send from there.');
       }
-      const chain = parent ? ancestors(parent, tasks) : [];
       const revises = openPlan(chain);
       const conversation = parent ? conversationFor(chain, revises) : undefined;
       const t = newTask(b.prompt, budget, b.reserve_share ?? 0.2, b.owner ?? null, parent?.id ?? null);
@@ -244,11 +246,12 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       };
     },
 
-    // An owner sees only their own tasks; a caller naming no owner (the CLI) sees every task.
+    // An owner sees only their own tasks; a caller naming no owner (the CLI) sees every task. `has_plan`: it got a plan
+    // with something to run, which tells a failed run from a failed reply in a conversation.
     'GET /tasks': ({ query }) => ({
       tasks: [...tasks.values()]
         .filter((t) => !query.has('owner') || t.owner === query.get('owner'))
-        .map(({ id, status, prompt, budget_atomic, created_at, parent_id }) => ({ id, status, prompt, budget_atomic, created_at, parent_id })),
+        .map(({ id, status, prompt, budget_atomic, created_at, parent_id, subtasks }) => ({ id, status, prompt, budget_atomic, created_at, parent_id, has_plan: subtasks.length > 0 })),
     }),
 
     'GET /tasks/:id': ({ params, query }) => snapshot(owned(params.id, query.get('owner')), ledger),

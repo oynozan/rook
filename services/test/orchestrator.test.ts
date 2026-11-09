@@ -381,7 +381,7 @@ test('a follow-up on a finished task gives the planner the earlier messages and 
   assert.equal((await snap(first.task.id)).task.status, 'closed'); // a finished task stays as it was
   const rows = (await call(`${orch.url}/tasks`)).tasks;
   assert.deepEqual(rows.find((x: any) => x.id === follow.id),
-    { id: follow.id, status: 'planned', prompt: 'Now translate it to Turkish', budget_atomic: '2000000', created_at: follow.created_at, parent_id: first.task.id });
+    { id: follow.id, status: 'planned', prompt: 'Now translate it to Turkish', budget_atomic: '2000000', created_at: follow.created_at, parent_id: first.task.id, has_plan: true });
   assert.equal(rows.find((x: any) => x.id === first.task.id).parent_id, null);
 
   await call(`${orch.url}/tasks/${follow.id}/approve`, {});
@@ -435,6 +435,42 @@ test('a revision replaces the plan it changes once its own plan is ready; a repl
   const ran = await ended(runs.id);
   assert.deepEqual([ran.task.status, ran.task.replaced_by], ['closed', null]);
   await call(`${orch.url}/tasks/${late.id}/cancel`, {});
+});
+
+test('a failed reply under a plan never hides it: once that plan runs, a message waits for the run, then follows up on it', async () => {
+  const send = (prompt: string, parent_id: string) => call(`${orch.url}/tasks`, { prompt, budget_usdc: '1', owner: 'dan.near', parent_id });
+  const refused = (e: any) => e.status === 409 && e.message === 'Wait for this run to finish, or stop it, before sending more.';
+
+  // [running, failed reply]: "go ahead" fails as not a task, then the plan above runs from its button.
+  plan = { subtasks: [sub('s1', 'Hang', '200000', [cand('hang', '100000', 60)])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] };
+  const hang = await call(`${orch.url}/tasks`, { prompt: 'Holders', budget_usdc: '1', owner: 'dan.near' });
+  const reply = await send('go ahead', hang.id);
+  assert.equal(reply.status, 'failed');
+  await call(`${orch.url}/tasks/${hang.id}/approve`, { owner: 'dan.near' });
+  await until(async () => (await snap(hang.id)).task.status === 'running');
+  const asked = planRequests.length;
+  await assert.rejects(send('More', reply.id), refused);
+  assert.equal(planRequests.length, asked); // never planned as if the run had ended, so no second run beside it
+  // The list tells a failed run from a failed reply.
+  assert.deepEqual((await call(`${orch.url}/tasks?owner=dan.near`)).tasks.map((x: any) => [x.id, x.status, x.has_plan]),
+    [[hang.id, 'running', true], [reply.id, 'failed', false]]);
+  await call(`${orch.url}/tasks/${hang.id}/kill`, { owner: 'dan.near' });
+  plan = holdersPlan();
+  const afterKill = await send('Try it again', reply.id);
+  assert.equal(afterKill.status, 'planned');
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Holders', 'go ahead'], revising: false });
+  await call(`${orch.url}/tasks/${afterKill.id}/cancel`, {});
+
+  // [closed, failed reply]: the next message follows up on the finished run, with its report.
+  const first = await call(`${orch.url}/tasks`, { prompt: 'Due diligence', budget_usdc: '1', owner: 'dan.near' });
+  const again = await send('go ahead', first.id);
+  await call(`${orch.url}/tasks/${first.id}/approve`, { owner: 'dan.near' });
+  const done = await ended(first.id);
+  assert.equal(done.task.status, 'closed', done.task.error);
+  const follow = await send('Now translate it to Turkish', again.id);
+  assert.deepEqual([follow.status, follow.parent_id], ['planned', again.id]);
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Due diligence', 'go ahead'], revising: false, report: done.final_result.final_markdown.trim() });
+  await call(`${orch.url}/tasks/${follow.id}/cancel`, {});
 });
 
 test('a message is refused while the task it follows is planning or running, after a newer message, and for another owner', async () => {
