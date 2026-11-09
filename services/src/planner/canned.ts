@@ -84,8 +84,8 @@ type AggIn = z.infer<typeof AggregateRequest>;
 /** A subtask is merged only when it passed and has text; everything else is a gap. */
 export const isMerged = (s: AggIn['subtasks'][number]) => s.status === 'passed' && !!s.deliverable_text;
 export const agentOf = (s: AggIn['subtasks'][number]) => s.agent_handle ?? 'rook (self-do)';
-/** Who wrote a part, in the report's words: the agent's handle, or Rook for its own work ('rook:self-do' is internal). */
 const SELF_DO_SOURCE = 'Rook (its own model)';
+/** Who wrote a part, in the report's words: the agent's handle, or Rook for its own work ('rook:self-do' is internal). */
 export const sourceOf = (s: AggIn['subtasks'][number]) => (!s.agent_handle || s.agent_handle === 'rook:self-do' ? SELF_DO_SOURCE : s.agent_handle);
 
 export function cannedAggregate(req: AggIn): string {
