@@ -159,6 +159,14 @@ export function fundingMismatch(c: Extract<FundingResult, { kind: 'created' }>, 
 }
 
 /**
+ * Whose transfer a looked-up hash is. 'own': the one this page waits on (its wallet returned that hash). 'other': any
+ * other hash while it waits, which never stands in for that transfer (it would be forgotten, and a second one offered).
+ * 'unsure': the page knows no hash of its own (the wallet errored or returned none), so a paste is all it has.
+ */
+export const whoseTransfer = (tx: string, pending: string | null): 'own' | 'other' | 'unsure' =>
+  !pending ? 'unsure' : tx === pending ? 'own' : 'other';
+
+/**
  * What a failed confirm means for the USDC in the contract task. 'refund': Rook will never run this contract task for
  * this task (it doesn't match the plan, or the task was stopped). 'refetch': the task moved on, or another confirm is
  * binding it or has bound it, so the page catches up rather than offer a refund that could cut a starting run short.

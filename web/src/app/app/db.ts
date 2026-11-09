@@ -97,7 +97,7 @@ export type FundingSent = { contract_task_id: string | null; tx_hash: string | n
 /**
  * Remembers a transfer: by its hash as soon as the wallet returns one, then with the contract task it created once read.
  * A record that names a contract task is never pointed at another (false, nothing changes), and an unread hash is
- * replaced only by a record that names its contract task. A refunded record starts over.
+ * completed only by that same hash with its contract task. A refunded record starts over.
  */
 export function recordFundingSent(task_id: string, account: string, f: { contract_task_id: string | null; tx_hash: string | null }): boolean {
   const was = fundingSent(task_id, account);
@@ -106,9 +106,12 @@ export function recordFundingSent(task_id: string, account: string, f: { contrac
     // The same contract task, or its own hash again, changes nothing; anything else is refused.
     return f.contract_task_id === live.contract_task_id || (f.contract_task_id === null && f.tx_hash === live.tx_hash);
   }
-  if (live && f.contract_task_id === null) return f.tx_hash === live.tx_hash;
+  // Another transaction's contract task (a pasted hash, say) never replaces an unread transfer: that transfer would be
+  // forgotten, and once Rook turned the other contract task down, the page would offer a second one.
+  if (live && f.tx_hash !== live.tx_hash) return false;
+  if (live && f.contract_task_id === null) return true;
   db().prepare('INSERT OR REPLACE INTO funding (task_id, account, tx_hash, contract_task_id, at) VALUES (?, ?, ?, ?, ?)')
-    .run(task_id, account, f.tx_hash ?? live?.tx_hash ?? null, f.contract_task_id, Date.now());
+    .run(task_id, account, f.tx_hash, f.contract_task_id, Date.now());
   return true;
 }
 

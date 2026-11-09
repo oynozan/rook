@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
-  readCloseOutcome, readFundingOutcome, termsOf, txHashOf, untilFinal, type Funding,
+  readCloseOutcome, readFundingOutcome, termsOf, txHashOf, whoseTransfer, untilFinal, type Funding,
 } from './funding';
 
 const F: Funding = {
@@ -74,6 +74,12 @@ test('a contract task is this plan\'s funding only with its budget, reserve, cap
   assert.match(fundingMismatch({ ...created, reserve: '0' }, want, 'ops.near') ?? '', /reserve is 0\.00 USDC/);
   assert.match(fundingMismatch({ ...created, caps: ['800000', '1000000'] }, want, 'ops.near') ?? '', /caps are 0\.80 USDC, 1\.00 USDC/);
   assert.match(fundingMismatch({ ...created, caps: null, funder: null }, want, 'ops.near') ?? '', /unnamed account.*caps are missing/);
+});
+
+test('while the page waits on its own transfer, no other pasted hash stands in for it', () => {
+  assert.equal(whoseTransfer('H1', 'H1'), 'own');
+  assert.equal(whoseTransfer('H2', 'H1'), 'other'); // its contract task may match the plan, but H1 would be forgotten
+  assert.equal(whoseTransfer('H2', null), 'unsure'); // the wallet errored or returned no hash: the paste is all there is
 });
 
 test('a failed confirm offers the refund only when Rook will never run that contract task', () => {

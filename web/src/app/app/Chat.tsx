@@ -12,7 +12,7 @@ import { go } from './AppShell';
 import { Composer, type ComposerErrors } from './Composer';
 import {
   closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
-  readCloseOutcome, readFundingOutcome, termsOf, txHashOf, type CloseResult, type Funding, type FundingResult, type Terms,
+  readCloseOutcome, readFundingOutcome, termsOf, txHashOf, whoseTransfer, type CloseResult, type Funding, type FundingResult, type Terms,
 } from './funding';
 import { explorerTx, NETWORK, rpcFor, type Network } from './network';
 import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary } from './orchestrator';
@@ -359,19 +359,26 @@ function FundingStep({ id, plan, budget, funding, sent, contractId, onConfirmed,
   const lookUp = (tx: string) => lookUpFunding(network, tx, wallet.account ?? '', contract ?? '');
 
   /**
-   * What a transfer did, once read. `own`: it is the transfer this page is waiting on (or no hash was known), not just any
-   * pasted hash, so a transfer that moved nothing ends the wait. `start`: confirm a match at once (the owner just acted).
+   * What a transfer did, once read. `who` (whoseTransfer): only the transfer this page waits on, or a paste when it knows
+   * none, ends the wait. `start`: confirm a match at once (the owner just acted).
    */
-  async function settle(result: FundingResult, tx: string | null, own: boolean, start: boolean) {
+  async function settle(result: FundingResult, tx: string | null, who: 'own' | 'other' | 'unsure', start: boolean) {
     if (result.kind === 'created') {
+      if (who === 'other') {
+        setPhase('idle');
+        return setError(`That transaction created contract task ${result.task_id}, but it isn't the transfer your wallet sent for this task (linked above), so Rook won't use it here. Look that one up instead.`);
+      }
       const bad = fundingMismatch(result, want, wallet.account ?? '');
       if (bad) {
         setPhase('idle');
-        const mine = !!wallet.account && result.funder === wallet.account && own;
+        const mine = !!wallet.account && result.funder === wallet.account; // 'other' hashes never get here
         if (mine) setStray({ task_id: result.task_id, tx });
         return setError(`That transaction created contract task ${result.task_id}, but not for this plan: ${bad}. Rook won't use it for this task.${mine ? ' Take its USDC back to your wallet, then fund the plan again.' : ''}`);
       }
-      setPasted(null); setMayBeUnsent(false); setOwnTx(null);
+      // A paste while this page knows no transfer of its own keeps the paste form behind the confirm: if Rook turns the
+      // contract task down as another task's, the form comes back, not a second transfer.
+      if (who === 'own') { setPasted(null); setMayBeUnsent(false); }
+      setOwnTx(null);
       setMade({ contract_task_id: result.task_id, tx_hash: tx });
       if (start) return confirm(result.task_id, tx);
       setPhase('idle');
@@ -386,7 +393,7 @@ function FundingStep({ id, plan, budget, funding, sent, contractId, onConfirmed,
     const why = result.kind === 'refunded'
       ? `The Rook contract refused the transfer, so the USDC went back to your wallet: ${result.reason.replace(/\.?$/, '.')}`
       : `The transfer failed on NEAR, so no USDC left your wallet: ${result.reason.replace(/\.?$/, '.')}`;
-    if (!own) return setError(`${why} That was a different transaction, so Rook still can't tell what your transfer did.`);
+    if (who === 'other') return setError(`${why} That was a different transaction, so Rook still can't tell what your transfer did.`);
     setPasted(null); setMayBeUnsent(false); setOwnTx(null);
     setError(why);
     if (tx) { await forgetTransfer(id, tx).catch(() => null); onChanged(); }
@@ -421,7 +428,7 @@ function FundingStep({ id, plan, budget, funding, sent, contractId, onConfirmed,
       await rememberTransfer(id, { tx_hash: tx }).catch(() => null);
     }
     const first = readFundingOutcome(outcome, funding.contract_id);
-    await settle(first.kind === 'unknown' && tx ? await lookUp(tx) : first, tx, true, true);
+    await settle(first.kind === 'unknown' && tx ? await lookUp(tx) : first, tx, 'own', true);
   }
 
   async function lookUpPasted() {
@@ -429,7 +436,7 @@ function FundingStep({ id, plan, budget, funding, sent, contractId, onConfirmed,
     if (!TX_HASH.test(tx)) return setError("That isn't a NEAR transaction hash.");
     setError(null);
     setPhase('reading');
-    await settle(await lookUp(tx), tx, !pendingTx || tx === pendingTx, true);
+    await settle(await lookUp(tx), tx, whoseTransfer(tx, pendingTx), true);
   }
 
   // A transfer remembered only by its hash (the page closed or reloaded while reading it): read it once, so the page can
@@ -440,7 +447,7 @@ function FundingStep({ id, plan, budget, funding, sent, contractId, onConfirmed,
     autoRead.current = unreadTx;
     setOwnTx(unreadTx);
     setPhase('reading');
-    void lookUp(unreadTx).then((r) => settle(r, unreadTx, true, false));
+    void lookUp(unreadTx).then((r) => settle(r, unreadTx, 'own', false));
     // eslint-disable-next-line react-hooks/exhaustive-deps -- once per remembered hash; settle reads the current state
   }, [unreadTx, contract, wallet.account, phase]);
 

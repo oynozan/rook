@@ -68,7 +68,11 @@ test('a transfer is remembered by its hash first, and never pointed at another c
   assert.equal(recordFundingSent('t3', 'ops.near', { contract_task_id: null, tx_hash: 'H1' }), true);
   assert.deepEqual(fundingSent('t3', 'ops.near'), known(null, 'H1'));
   assert.equal(recordFundingSent('t3', 'ops.near', { contract_task_id: null, tx_hash: 'H2' }), false); // a second unread hash
-  assert.equal(recordFundingSent('t3', 'ops.near', { contract_task_id: '1b', tx_hash: null }), true); // read: its contract task
+  // Another transaction's contract task (a pasted hash), or one with no hash at all, never stands in for the unread one.
+  assert.equal(recordFundingSent('t3', 'ops.near', { contract_task_id: '1z', tx_hash: 'H2' }), false);
+  assert.equal(recordFundingSent('t3', 'ops.near', { contract_task_id: '1z', tx_hash: null }), false);
+  assert.deepEqual(fundingSent('t3', 'ops.near'), known(null, 'H1'));
+  assert.equal(recordFundingSent('t3', 'ops.near', { contract_task_id: '1b', tx_hash: 'H1' }), true); // read: its contract task
   assert.deepEqual(fundingSent('t3', 'ops.near'), known('1b', 'H1'));
   assert.equal(recordFundingSent('t3', 'ops.near', { contract_task_id: '1b', tx_hash: 'H1' }), true);
   assert.equal(recordFundingSent('t3', 'ops.near', { contract_task_id: null, tx_hash: 'H1' }), true);
