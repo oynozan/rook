@@ -2,7 +2,7 @@
 
 Rook takes one task and a USDC budget, splits it into checkable subtasks, hires NEAR Agent Market agents for them over A2A and x402, checks every deliverable against criteria written before hiring, and re-hires from a limited reserve when a check fails. Spending limits are enforced by a NEAR budget contract and one capped sub-account per subtask, not by a prompt.
 
-**Status, 2026-11-09.** Planning runs for real: NEAR AI models plan against the live Agent Market with real agents and real 402 prices. Paying agents is built and tested offline only: the budget contract, the signer, the chain gateway and browser funding have not run on any network yet. Deploying, funding and every mainnet hire need the owner's yes (see [Running for real](#running-for-real-pnpm-live)). Simulation is an explicit, labelled mode for development and for screeners, never the default for real use.
+**Status, 2026-11-09.** Rook runs on NEAR mainnet. The budget contract is `rook.oynozan.near`. Its first real task hired the Agent Market agent `web-research` and paid it 0.50 USDC over x402 from a per-subtask sub-account ([payment transaction](https://nearblocks.io/txns/GTw5hCY4U43TExFNgr4NBkUG6s8NtFUmmcoS6sXzoZAP)). The evaluator passed its work, the receipt went on chain, and the contract refunded the unspent 1.00 USDC to the funder. Every transaction is listed in [docs/x402-payments-plan.md](docs/x402-payments-plan.md), section 8. Any NEAR account can fund its own task. Simulation is an explicit, labelled mode for development and for screeners, never the default for real use.
 
 ## Quick start: simulation, no keys, no network
 
@@ -58,14 +58,14 @@ pnpm web                        # http://localhost:7110 (landing page), http://l
 
 Other useful setups: `ROOK_LLM=near pnpm dev` (real planner and evaluator against the simulator, about 0.10 USD of NEAR AI credit per run; put `NEARAI_API_KEY=...` in `.env` at the repo root) and `ROOK_MARKET=live ROOK_LLM=near pnpm dev` (real agents and prices for planning; approving is refused because the ledger is simulated). Each process stops calling the LLM after `ROOK_LLM_MAX_USD` (default 1) in any 24 h, and logs when it trips.
 
-Other test suites, all offline: `cd contract; cargo test -p rook-budget` (64 tests; on Windows set `AWS_LC_SYS_PREBUILT_NASM=1`) and `cd web; npx tsx --test src/app/app/*.test.ts` (23 tests: NEP-413 sign-in, the funding-outcome parser, the sign-in store).
+Other test suites, all offline: `cd contract; cargo test -p rook-budget` (77 tests; on Windows set `AWS_LC_SYS_PREBUILT_NASM=1`) and `cd web; npx tsx --test src/app/app/*.test.ts` (25 tests: NEP-413 sign-in, the funding-outcome parser and transactions, the sign-in store).
 
 ## Running for real (`pnpm live`)
 
-Nothing in this section has run on a network yet. Each numbered step marked **owner** sends a real transaction or spends money, so it waits for the owner's explicit yes.
+This runs on mainnet today (`rook.oynozan.near`, section 8 of the payments plan). Steps marked **owner** send real transactions.
 
-1. **Owner:** deploy the budget contract and create the role accounts and their function-call keys: [contract/README.md](contract/README.md), "Testnet deploy runbook" first, then "Mainnet variant". Deploy the `wasm-opt -Oz` output, `rook_budget.opt.wasm` (about 266 KB, 2.66 NEAR of storage; the runbook has the command). Pre-fund the contract with NEAR for sub-accounts (the runbook measures it; about 0.016 NEAR per subtask).
-2. Set the environment in the shell that runs the services. Role keys are never read from a `.env` file; keep them out of the repo.
+1. **Owner:** build the contract (with `--cfg near`, see [contract/README.md](contract/README.md)), then run `pnpm --filter @rook/services exec tsx scripts/deploy.ts --network mainnet` with the admin account's key in `ROOK_ADMIN_KEY` (or `ADMIN_WALLET_PRIVATE_KEY` in the repo's `.env`, which no service reads). It creates `rook.`, `orch.` and `signer.` sub-accounts of the admin, deploys and initialises the contract, registers it on USDC, adds the two function-call role keys, and writes `~/.rook/mainnet.env` with everything below. It skips each step that is already done; `--dry` prints the plan, `--upgrade` deploys new code over existing state. Keep the contract funded with NEAR: about 0.066 per subtask in flight, nearly all of which comes back when the finished sub-account is deleted.
+2. `pnpm live` reads `~/.rook/mainnet.env` (or the file in `ROOK_ENV_FILE`), the only file role keys are read from. To set the environment by hand instead, keep the keys out of the repo:
 
    ```sh
    export ROOK_MARKET=live ROOK_LEDGER=chain ROOK_LLM=near NEAR_NETWORK=mainnet
@@ -83,10 +83,10 @@ Nothing in this section has run on a network yet. Each numbered step marked **ow
    pnpm live
    ```
 
-   `pnpm live` checks all of these before starting anything and lists every one that is missing or wrong. Run `pnpm web` and `pnpm rook` with the same `ROOK_SERVICE_TOKEN`: with it set, the orchestrator answers 401 to any caller without it.
-3. **Owner:** approve a plan and fund it: one USDC `ft_transfer_call` from your wallet to the contract, carrying the approved caps (`msg` = `{"create_task":{"reserve_bps":2000,"caps":[...]}}`). The web app sends it from the wallet; `pnpm rook approve <id>` prints the near-cli-rs command, and `pnpm rook funded <id> <contract_task_id>` binds it. Today the contract accepts funding only from its owner account, so in the web app only that account's wallet can fund; a task drafted by a signed-in account binds only a contract task that account funded.
+   `pnpm live` checks all of these before starting anything and lists every one that is missing or wrong. Run `pnpm web` and `pnpm rook` with the same `ROOK_SERVICE_TOKEN`: with it set, the orchestrator answers 401 to any caller without it. The web app reads it from `web/.env.local` (with `NEXT_PUBLIC_NEAR_NETWORK=mainnet`); the CLI from `ROOK_ENV_FILE=~/.rook/mainnet.env`.
+3. **Any user:** approve a plan and fund it with one click: one USDC `ft_transfer_call` from your own wallet to the contract, carrying the approved caps (`msg` = `{"create_task":{"reserve_bps":2000,"caps":[...]}}`). The sender becomes the task's funder: only it gets refunds, and it can stop (`kill_task`) and close its own task. The contract takes at least 1 USDC per task and at most 5 open tasks per funder (the owner can change both with `set_limits`). `pnpm rook approve <id>` prints the near-cli-rs command and `pnpm rook funded <id> <contract_task_id>` binds it; a task drafted by a signed-in account binds only a contract task that account funded.
 4. Rook checks the contract task's budget, reserve and caps against the plan, then per subtask: registers a fresh key, funds the sub-account with exactly its cap, signs the x402 payment from it, records a receipt on the contract, returns the leftover (or marks an emptied sub-account returned with `mark_empty`) and closes the task, which refunds the rest to the funder.
-5. `pnpm rook kill <id>` (or Stop in the app) makes the signer refuse every further payment and prints the owner's `kill_task` command for the contract. Rook then brings the money back itself: it waits until each payment already out can no longer settle (the agent accepted CancelTask, or the authorization expired), returns every sub-account, and closes the task so the contract refunds the funder. Each step is an event on the task.
+5. `pnpm rook kill <id>` (or Stop in the app) makes the signer refuse every further payment and prints the funder's `kill_task` command for the contract. Rook then brings the money back itself: it waits until each payment already out can no longer settle (the agent accepted CancelTask, or the authorization expired), returns every sub-account, and closes the task so the contract refunds the funder. Each step is an event on the task.
 6. If the services stop mid-run, the next start rebuilds each funded task from the contract and the sub-accounts' balances, polls hires whose payment was out by their A2A task id, and carries on; a killed or failed task with money still on chain is unwound. Nothing is signed twice.
 
 Spending is bounded per task by `ROOK_MAX_BUDGET_USDC` (default 50) and by the caps in the owner's own funding transfer.

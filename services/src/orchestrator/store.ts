@@ -83,6 +83,8 @@ export function newTask(prompt: string, budget_atomic: bigint, reserve_share: nu
 
 export function setPlan(t: Task, plan: Plan) {
   t.plan = plan;
+  // The plan's reserve (the budget its caps leave, at most 90%) is what the funder approves and the ledger keeps.
+  if (Number.isInteger(plan.budget.reserve_bps)) t.reserve_share = plan.budget.reserve_bps! / 10_000;
   t.subtasks = plan.subtasks.map((s, i) => ({
     ...s, n: i + 1, status: 'pending', final_outcome: null, rehire_count: 0, tried: [], hires: [], evaluations: [], accepted: null,
   }));

@@ -56,11 +56,13 @@ export type PlanInput = {
   history?: Record<string, AgentHistory>; // Rook's own verdicts by handle; without it, the market's record alone
 };
 
+/** The contract's ceiling on the reserve, in basis points of the budget (contract/budget/src/lib.rs MAX_RESERVE_BPS). */
+export const MAX_RESERVE_BPS = 9_000;
+
 export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
   const notes: string[] = [];
   const dropped: Plan['dropped'] = [];
-  const reserve = share(input.budget_atomic, input.reserve_share);
-  const allocatable = input.budget_atomic - reserve;
+  const allocatable = input.budget_atomic - share(input.budget_atomic, input.reserve_share);
 
   // Steps 4 to 7, in priority order. `draftIdx` keeps the draft position for cross-check rewriting.
   type Kept = { draftIdx: number; d: DraftSubtask; candidates: Candidate[]; cap: bigint; self_do: boolean };
@@ -90,12 +92,23 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
       return;
     }
     allocated += cap;
-    // A fallback priced above cap + the whole reserve can never be paid; listing it would only stretch the deadline.
-    // Any rank can be dropped (the order is not by price) except the first, whose price the cap always covers.
-    const payable = candidates.filter((c) => BigInt(c.price_atomic) <= cap + reserve);
-    for (const c of candidates) if (!payable.includes(c)) notes.push(`"${d.title}": candidate ${c.handle} dropped, price ${c.price_atomic} exceeds cap + reserve`);
-    kept.push({ draftIdx, d, candidates: payable, cap, self_do: false });
+    kept.push({ draftIdx, d, candidates, cap, self_do: false });
   });
+
+  // Whatever the caps leave of the budget becomes the reserve for re-hires and top-ups, up to the contract's 90%: the
+  // user's budget is what Rook may spend, so it must not sit idle while a subtask is abandoned for want of a top-up
+  // (seen on mainnet: 0.90 USDC unallocated, a 0.50 re-hire refused). Whole percents, so the numbers read cleanly.
+  const idle = input.budget_atomic - allocated;
+  const reserve_bps = input.budget_atomic > 0n ? Math.min(MAX_RESERVE_BPS, Math.floor(Number((idle * 10_000n) / input.budget_atomic) / 100) * 100) : 0;
+  const reserve = (input.budget_atomic * BigInt(reserve_bps)) / 10_000n;
+  // A fallback priced above cap + the whole reserve can never be paid; listing it would only stretch the deadline.
+  // Any rank can be dropped (the order is not by price) except the first, whose price the cap always covers.
+  for (const k of kept) {
+    if (k.self_do) continue;
+    const payable = k.candidates.filter((c) => BigInt(c.price_atomic) <= k.cap + reserve);
+    for (const c of k.candidates) if (!payable.includes(c)) notes.push(`"${k.d.title}": candidate ${c.handle} dropped, price ${c.price_atomic} exceeds cap + reserve`);
+    k.candidates = payable;
+  }
 
   // Step 9 ids: draft id (s<draftIdx+1>) -> final id, for cross-check references.
   const finalId = new Map(kept.map((k, i) => [`s${k.draftIdx + 1}`, `s${i + 1}`]));
@@ -121,7 +134,8 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
     budget: {
       budget_atomic: input.budget_atomic.toString(),
       reserve_atomic: reserve.toString(),
-      allocatable_atomic: allocatable.toString(),
+      reserve_bps,
+      allocatable_atomic: (input.budget_atomic - reserve).toString(),
       allocated_atomic: allocated.toString(),
     },
     notes,
@@ -203,6 +217,8 @@ function validateCriteria(id: string, pos: number, raw: DraftSubtask['criteria']
         const { min, max } = c.spec;
         if ([min, max].some((b) => b !== undefined && !Number.isFinite(b))) return remove('non-finite bound');
         if (min !== undefined && max !== undefined && min > max) return remove('min is above max');
+        // A date ("2026-10-15") or an id is not one number: the check would fail honest work (seen on mainnet).
+        if (/\b(dates?|dated|year|version|ids?|phone)\b/i.test(c.spec.label)) return remove(`"${c.spec.label}" is a date or id, not a quantity`);
         break;
       }
       case 'cross_check': {
