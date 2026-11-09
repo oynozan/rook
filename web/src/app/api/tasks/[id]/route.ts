@@ -1,3 +1,4 @@
+import { fundingSent } from '@/app/app/db';
 import { currentAccount } from '@/app/app/session';
 import { getTask, OrchestratorDown } from '@/app/app/orchestrator';
 
@@ -7,8 +8,10 @@ export async function GET(_: Request, { params }: { params: Promise<{ id: string
   const account = await currentAccount();
   if (!account) return Response.json({ error: 'not signed in' }, { status: 401 });
   try {
-    const snap = await getTask(id);
+    const snap = await getTask(id, account);
     if (snap.task.owner !== account) return Response.json({ error: `no task ${id}` }, { status: 404 });
+    // A funding transfer already sent from this account's wallet, so the page offers "confirm" rather than a second transfer.
+    snap.funding_sent = snap.task.status === 'approved' ? fundingSent(id, account) : null;
     return Response.json(snap, { headers: { 'cache-control': 'no-store' } });
   } catch (e) {
     if (e instanceof OrchestratorDown) return Response.json({ error: 'services are not running' }, { status: 503 });

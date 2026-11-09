@@ -1,6 +1,6 @@
 'use client';
 
-import type { NearConnector, SignedMessage, SignMessageParams } from '@hot-labs/near-connect';
+import type { ConnectorAction, NearConnector, SignedMessage, SignMessageParams } from '@hot-labs/near-connect';
 import { useRouter } from 'next/navigation';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { NETWORK } from './network';
@@ -14,7 +14,12 @@ export type Wallet = {
   error: string | null;
   connect: () => Promise<void>;
   disconnect: () => Promise<void>;
+  /** Signs and sends one transaction as the signed-in account, and returns the wallet's outcome (some wallets return none). */
+  sendTransaction: (tx: { receiverId: string; actions: ConnectorAction[] }) => Promise<unknown>;
 };
+
+/** The wallet is connected as a different account than the one signed in to Rook. */
+export class WalletAccountMismatch extends Error {}
 
 export const WalletContext = createContext<Wallet | null>(null);
 
@@ -123,6 +128,21 @@ export function WalletProvider({ children }: { children: ReactNode }) {
         // The wallet may already be gone. Either way, the session ends.
       }
       await endSession();
+    },
+    async sendTransaction(tx) {
+      if (!account) throw new Error('Sign in with your NEAR wallet first.');
+      const c = await getConnector();
+      // Signed in on an earlier visit, the wallet may not be connected in this browser any more: connect it first.
+      let connected = await c.getConnectedWallet().catch(() => null);
+      if (!connected?.accounts[0]) {
+        await c.connect();
+        connected = await c.getConnectedWallet();
+      }
+      const signer = connected.accounts[0]?.accountId;
+      if (signer !== account) {
+        throw new WalletAccountMismatch(`Your wallet is connected as ${signer ?? 'no account'}, but you're signed in to Rook as ${account}. Switch to ${account} in your wallet and try again.`);
+      }
+      return connected.wallet.signAndSendTransaction({ ...tx, network: NETWORK, signerId: account });
     },
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [account, checking, connecting, error]);
