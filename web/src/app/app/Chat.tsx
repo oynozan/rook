@@ -12,7 +12,7 @@ import { go } from './AppShell';
 import { Composer, type ComposerErrors } from './Composer';
 import {
   closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
-  readCloseOutcome, readFundingOutcome, termsOf, txHashOf, whoseTransfer, type CloseResult, type Funding, type FundingResult, type Terms,
+  readCloseOutcome, readFundingOutcome, termsOf, txHashOf, typedUsdc, usdc, whoseTransfer, type CloseResult, type Funding, type FundingResult, type Terms,
 } from './funding';
 import { explorerTx, NETWORK, rpcFor, type Network } from './network';
 import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary } from './orchestrator';
@@ -21,7 +21,6 @@ import { useEase } from './useEase';
 import { useWallet, WalletAccountMismatch } from './wallet';
 
 const TERMINAL = new Set(['closed', 'cancelled', 'killed', 'failed']);
-const usdc = (atomic: string | number | bigint) => (Number(atomic) / 1e6).toFixed(2);
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const LINE_MS = 420;
 const CATCH_UP_MS = 70; // a refresh mid-run replays history quickly, then returns to the live pace
@@ -1221,7 +1220,7 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
               <h1 className="sr-only">{sending?.prompt ?? loaded.snap?.task.prompt ?? 'Task'}</h1>
               {sending ? (
                 <>
-                  <UserMessage animate prompt={sending.prompt} budget={Number(sending.budget).toFixed(2)} />
+                  <UserMessage animate prompt={sending.prompt} budget={typedUsdc(sending.budget)} />
                   <RookMessage><AgentSearch plan={null} animate={false} onGrow={follow} /></RookMessage>
                 </>
               ) : id && <Thread key={id} id={id} loaded={loaded} tasks={tasks} onGrow={follow} fresh={justDrafted.current.has(id)} onRevealed={onRevealed} />}

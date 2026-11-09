@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
   closeTaskTransaction, confirmFailure, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel, moneyMoved, planTerms,
-  readCloseOutcome, readFundingOutcome, termsOf, txHashOf, whoseTransfer, untilFinal, type Funding,
+  readCloseOutcome, readFundingOutcome, termsOf, txHashOf, typedUsdc, usdc, whoseTransfer, untilFinal, type Funding,
 } from './funding';
 
 const F: Funding = {
@@ -19,6 +19,27 @@ const outcome = (receipts: { executor_id: string; logs: string[]; status?: unkno
   transaction: { hash: '9xQ1oFz3pW7Zb6cQx6m3c7cR8mN4m2Qe5yVfK1sLdTzA', signer_id: 'ops.near', receiver_id: F.usdc },
   transaction_outcome: { id: '9xQ1oFz3pW7Zb6cQx6m3c7cR8mN4m2Qe5yVfK1sLdTzA', outcome: { logs: [] } },
   receipts_outcome: receipts.map((r, i) => ({ id: `r${i}`, outcome: { executor_id: r.executor_id, logs: r.logs, status: r.status ?? { SuccessValue: '' } } })),
+});
+
+test('USDC amounts show what really moves: at least 2 decimals, up to 6, no float rounding', () => {
+  assert.equal(usdc('3000000'), '3.00');
+  assert.equal(usdc('2999000'), '2.999'); // never "3.00" while the wallet sends 2.999
+  assert.equal(usdc('5000'), '0.005'); // a sub-cent price is not "0.00"
+  assert.equal(usdc('855000'), '0.855');
+  assert.equal(usdc('1500000'), '1.50');
+  assert.equal(usdc('100000'), '0.10');
+  assert.equal(usdc('1'), '0.000001');
+  assert.equal(usdc(0), '0.00');
+  assert.equal(usdc(125000n), '0.125');
+  assert.equal(usdc(2_130_000), '2.13'); // sums the page adds up as numbers
+  assert.equal(usdc('9007199254740993000000'), '9007199254740993.00');
+  assert.equal(usdc(-250000n), '-0.25');
+  assert.equal(usdc('abc'), '?');
+  // A budget as typed, before the task exists.
+  assert.equal(typedUsdc('2.999'), '2.999');
+  assert.equal(typedUsdc(' 3 '), '3.00');
+  assert.equal(typedUsdc('03.5'), '3.50');
+  assert.equal(typedUsdc('1,5'), '1,5');
 });
 
 test('the transfer: USDC ft_transfer_call to the contract with the approved msg, 1 yoctoNEAR, 100 Tgas', () => {
@@ -71,6 +92,7 @@ test('a contract task is this plan\'s funding only with its budget, reserve, cap
   // Another task's transfer, another account's, or a different plan: never this one.
   assert.match(fundingMismatch({ ...created, funder: 'alice.near' }, want, 'ops.near') ?? '', /sent by alice\.near, not ops\.near/);
   assert.match(fundingMismatch({ ...created, budget: '5000000' }, want, 'ops.near') ?? '', /budget is 5\.00 USDC, not 3\.00 USDC/);
+  assert.match(fundingMismatch({ ...created, budget: '2999000' }, want, 'ops.near') ?? '', /budget is 2\.999 USDC, not 3\.00 USDC/);
   assert.match(fundingMismatch({ ...created, reserve: '0' }, want, 'ops.near') ?? '', /reserve is 0\.00 USDC/);
   assert.match(fundingMismatch({ ...created, caps: ['800000', '1000000'] }, want, 'ops.near') ?? '', /caps are 0\.80 USDC, 1\.00 USDC/);
   assert.match(fundingMismatch({ ...created, caps: null, funder: null }, want, 'ops.near') ?? '', /unnamed account.*caps are missing/);

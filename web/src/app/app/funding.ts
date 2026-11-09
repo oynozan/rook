@@ -14,6 +14,24 @@ export type Funding = {
   funder?: string | null; contract_owner?: string | null; owner?: string;
 };
 
+/**
+ * Atomic USDC (6 decimals) as the amount that really moves: at least 2 decimals, up to 6 (3000000 -> "3.00",
+ * 2999000 -> "2.999", 5000 -> "0.005"). No floats, like the services' formatUsdc.
+ */
+export function usdc(atomic: string | number | bigint): string {
+  let a: bigint;
+  try { a = BigInt(typeof atomic === 'number' ? Math.round(atomic) : atomic); } catch { return '?'; }
+  const neg = a < 0n, v = neg ? -a : a;
+  const frac = (v % 1_000_000n).toString().padStart(6, '0').replace(/0{1,4}$/, '');
+  return `${neg ? '-' : ''}${v / 1_000_000n}.${frac}`;
+}
+
+/** A budget as typed ("2.999", "3") shown the same way; anything that isn't an amount, as typed. */
+export function typedUsdc(s: string): string {
+  const m = s.trim().match(/^(\d+)(?:\.(\d{1,6}))?$/);
+  return m ? usdc(BigInt(m[1]) * 1_000_000n + BigInt((m[2] ?? '').padEnd(6, '0'))) : s.trim();
+}
+
 /** The account whose wallet must send the funding, or null if any account may. */
 export const fundingFrom = (f: Funding) => f.funder ?? f.owner ?? null;
 
@@ -140,7 +158,7 @@ export const planTerms = (budget_atomic: string, plan: Pick<PlanView, 'subtasks'
   caps: plan.subtasks.filter((s) => !s.self_do).map((s) => s.cap_atomic),
 });
 
-const usd = (atomic: string | null) => (atomic !== null && /^\d+$/.test(atomic) ? `${(Number(atomic) / 1e6).toFixed(2)} USDC` : 'missing');
+const usd = (atomic: string | null) => (atomic !== null && /^\d+$/.test(atomic) ? `${usdc(atomic)} USDC` : 'missing');
 
 /**
  * Why a contract task isn't this plan's funding from `funder`, or null when it is. A transaction hash proves only that
