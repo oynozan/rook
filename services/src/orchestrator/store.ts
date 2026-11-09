@@ -37,6 +37,7 @@ export type Task = {
   // supersedes (`edited`: its text or budget differs), and that one names it back. Unlike a plan replaced by a
   // revision, a superseded task no longer shows in its conversation. Tasks stored before this have neither.
   supersedes?: string | null; superseded_by?: string | null; edited?: boolean;
+  deleted_at?: string | null; // its owner deleted its conversation: gone for the owner, kept for the record (8.9)
   status: TaskStatus; error: string | null; created_at: string; updated_at: string;
   plan: Plan | null; subtasks: Sub[]; receipts: ReceiptView[]; events: RookEvent[];
   final_result: { final_markdown: string; attribution: { subtask_id: string; agent_handle: string }[]; abandoned: string[] } | null;
@@ -155,7 +156,7 @@ export function taskView(t: Task) {
   const { id, status, prompt, budget_atomic, reserve_share, funder, owner, parent_id, error, created_at, updated_at, plan } = t;
   return {
     id, status, prompt, budget_atomic, reserve_share, funder, owner, parent_id, replaced_by: t.replaced_by ?? null,
-    supersedes: t.supersedes ?? null, superseded_by: t.superseded_by ?? null, edited: t.edited ?? false,
+    supersedes: t.supersedes ?? null, superseded_by: t.superseded_by ?? null, edited: t.edited ?? false, deleted_at: t.deleted_at ?? null,
     error, created_at, updated_at, plan,
   };
 }
@@ -200,6 +201,23 @@ export function supersedeRefusal(old: Task, all: Iterable<Task>): string | null 
   if (!UNTOUCHED.includes(old.status) || wasApproved(old)) return "This message's plan was approved, so it can't be changed now. Send a new message instead.";
   for (const x of all) if (x.parent_id === old.id) return 'Only the newest message can be edited or sent again.';
   return null;
+}
+
+/**
+ * Every task of the conversation `t` is in: along its parent links both ways, and across messages sent again or edited
+ * (sent again in place of a conversation's first message, a new first task supersedes the old one).
+ */
+export function conversationTasks(t: Task, all: Iterable<Task>): Task[] {
+  const list = [...all];
+  const byId = new Map(list.map((x) => [x.id, x]));
+  const linked = new Map<string, Task[]>(); // id -> the tasks that follow it or supersede it
+  for (const x of list) for (const to of [x.parent_id, x.supersedes]) if (to) linked.set(to, [...(linked.get(to) ?? []), x]);
+  const out = new Set([t]);
+  for (const x of out) { // a Set's iteration also visits what is added during it
+    for (const to of [x.parent_id, x.supersedes, x.superseded_by]) { const y = to ? byId.get(to) : undefined; if (y) out.add(y); }
+    for (const y of linked.get(x.id) ?? []) out.add(y);
+  }
+  return [...out];
 }
 
 export function snapshot(t: Task, ledger: Ledger) {

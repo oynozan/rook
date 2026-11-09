@@ -525,6 +525,9 @@ test('orchestrator, ROOK_LEDGER=chain: approve gives funding instructions, /fund
   await refused(call(`${orch.url}/tasks/${alice.id}/funded`, { contract_task_id: 'other', owner: 'alice.near' }), /funded by owner\.test, not by the task owner alice\.near/);
   // Approved and not funded: no run has started, so a message after it is told to fund or cancel it, not to wait for a run.
   await refused(call(`${orch.url}/tasks`, { prompt: 'more', budget_usdc: '1', owner: 'alice.near', parent_id: alice.id }), /^Fund or cancel the plan above before sending more\.$/);
+  // Its transfer may be on its way, so its chat can't be deleted, nor its message edited, until the plan is cancelled.
+  await refused(call(`${orch.url}/conversations/${alice.id}/delete`, { owner: 'alice.near' }), /^A plan in this chat is waiting for its funding\. Cancel it on its page first, then delete the chat\.$/);
+  await refused(call(`${orch.url}/tasks`, { prompt: 'p4', budget_usdc: '1', owner: 'alice.near', supersedes: alice.id }), /plan was approved/);
   const both = await Promise.allSettled([1, 2].map(() => call(`${orch.url}/tasks/${t.id}/funded`, { contract_task_id: 'ok' })));
   assert.deepEqual(both.map((x) => x.status).sort(), ['fulfilled', 'rejected']); // overlapping /funded: one binds and runs
   assert.equal((both.find((x) => x.status === 'fulfilled') as any).value.contract_task_id, 'ok');
@@ -581,4 +584,12 @@ test('orchestrator, ROOK_LEDGER=chain: approve gives funding instructions, /fund
   assert.equal(f.final_result.final_markdown, 'final');
   assert.deepEqual([f.ledger.budget_atomic, f.ledger.spent_atomic, f.ledger.refunded_atomic], ['0', '0', '0']);
   assert.equal(calls.length, before); // nothing signed, funded or closed on chain
+
+  // Closed with its books closed, the run on chain and the free one alike, or stopped before any funding: deletable.
+  await call(`${orch.url}/conversations/${t.id}/delete`, {});
+  await call(`${orch.url}/conversations/${free.id}/delete`, { owner: 'alice.near' });
+  await call(`${orch.url}/tasks/${alice.id}/kill`, { owner: 'alice.near' });
+  assert.deepEqual((await call(`${orch.url}/conversations/${alice.id}/delete`, { owner: 'alice.near' })).deleted, [alice.id]);
+  assert.deepEqual((await call(`${orch.url}/tasks?owner=alice.near`)).tasks, []);
+  assert.equal(calls.length, before);
 });

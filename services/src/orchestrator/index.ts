@@ -13,7 +13,7 @@ import { openStore } from './db.ts';
 import {
   ancestors, emit, fromDoc, headOf, isFree, isTerminal, newTask, openPlan, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task,
 } from './store.ts';
-import { supersedeRefusal } from './store.ts';
+import { conversationTasks, supersedeRefusal } from './store.ts';
 
 const CreateBody = z.object({
   prompt: z.string().trim().min(1),
@@ -24,6 +24,9 @@ const CreateBody = z.object({
   parent_id: z.string().min(1).max(64).optional(), // the conversation's newest task: this message follows it
   supersedes: z.string().min(1).max(64).optional(), // the newest message, sent again or edited: this one takes its place
 });
+
+/** A message about a deleted conversation, for a caller naming no owner (an owner gets 404). */
+const DELETED = 'This conversation was deleted.';
 
 /**
  * What the planner gets with a follow-up: the earlier messages (the first and the newest when there are too many) and
@@ -103,10 +106,11 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
   };
   // The web app passes the signed-in account as `owner` (body, or ?owner= on a GET); someone else's task looks like no
   // task at all. Callers that pass no owner (the CLI) act on any task: the orchestrator listens on localhost only, and
-  // with ROOK_SERVICE_TOKEN set only callers holding the token (the web server, the CLI) reach it.
+  // with ROOK_SERVICE_TOKEN set only callers holding the token (the web server, the CLI) reach it. A task of a deleted
+  // conversation is gone for its owner too, while the CLI still sees it.
   const owned = (id: string, owner: unknown) => {
     const t = get(id);
-    if (typeof owner === 'string' && t.owner !== owner) throw new HttpError(404, `no task ${id}`);
+    if (typeof owner === 'string' && (t.owner !== owner || t.deleted_at)) throw new HttpError(404, `no task ${id}`);
     return t;
   };
   /** A newer message is being planned as a revision of `t`, a planned task: its plan replaces `t` once ready (8.9). */
@@ -169,6 +173,22 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
   // mode only a task bound to a contract task holds money (a plan that hires no agent has books of 0, never on chain).
   // The unwind retries until the books close, so a stream can stay open for minutes; each problem streams once.
   const moving = (t: Task) => ledger.view(t.id)?.closed === false && (chain === null || chain.contractTaskOf(t.id) !== null);
+  /**
+   * The task holds money, or may: approved (its funding may be in flight), running, closing, or ended with its books
+   * still open (the refund is on its way, or, in chain mode, books not rebuilt yet after a restart).
+   */
+  const holdsMoney = (t: Task) => {
+    if (['approved', 'funded', 'running', 'aggregating', 'closing'].includes(t.status) || t.unwinding) return true;
+    if (!chain) return ledger.view(t.id)?.closed === false;
+    const books = (ledger.view(t.id) ?? t.ledger_saved) as { closed?: boolean } | null | undefined;
+    return books?.closed === false && (chain.contractTaskOf(t.id) !== null || !!t.chain);
+  };
+  /** Why a conversation with `t` in it can't be deleted yet, in words the web app shows as they are. */
+  const deleteRefusal = (t: Task) => {
+    if (t.status === 'approved' && chain && !isFree(t) && !chain.contractTaskOf(t.id)) return 'A plan in this chat is waiting for its funding. Cancel it on its page first, then delete the chat.';
+    if (['approved', 'funded', 'running', 'aggregating'].includes(t.status)) return 'A run in this chat is still under way. Stop it or let it finish, then delete the chat.';
+    return 'Rook is still returning the unspent USDC of a task in this chat. Delete the chat once it is back in your wallet.';
+  };
   /** The contract's settings, read once from the chain-gateway (null until it answers). */
   let chainCfg: ChainCfg | null = null;
   const contractCfg = async (): Promise<ChainCfg | null> => {
@@ -197,7 +217,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       if (old) {
         if (b.parent_id !== undefined && b.parent_id !== old.parent_id) throw new HttpError(400, `parent_id must be ${old.parent_id ?? 'left out'}: a message sent again keeps its place`);
         if (old.owner !== (b.owner ?? null)) throw new HttpError(409, `task ${old.id} has another owner: a message sent again keeps its owner`);
-        const why = supersedeRefusal(old, tasks.values());
+        const why = old.deleted_at ? DELETED : supersedeRefusal(old, tasks.values());
         if (why) throw new HttpError(409, why);
       }
       // A message in a conversation follows its newest task. Checked after the last await, so two messages sent at once
@@ -206,6 +226,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       const parent = parentId == null ? null : owned(parentId, b.owner);
       const above = parent ? ancestors(parent, tasks) : []; // the parent and the tasks above it, nearest first
       if (parent) {
+        if (parent.deleted_at) throw new HttpError(409, DELETED);
         if (parent.owner !== (b.owner ?? null)) throw new HttpError(409, `task ${parent.id} has another owner: a follow-up keeps its owner`);
         // What the message acts on: the parent, or the task above replies that never got a plan (a run under way, say).
         const head = headOf(above)!;
@@ -295,14 +316,14 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     },
 
     // An owner sees only their own tasks; a caller naming no owner (the CLI) sees every task. `has_plan`: it got a plan
-    // with something to run, which tells a failed run from a failed reply in a conversation. `supersedes` and
-    // `superseded_by` link a message sent again or edited.
+    // with something to run, which tells a failed run from a failed reply in a conversation. An owner's list leaves out
+    // the tasks of conversations they deleted; `supersedes` and `superseded_by` link a message sent again or edited.
     'GET /tasks': ({ query }) => ({
       tasks: [...tasks.values()]
-        .filter((t) => !query.has('owner') || t.owner === query.get('owner'))
-        .map(({ id, status, prompt, budget_atomic, created_at, parent_id, subtasks, supersedes, superseded_by }) => ({
+        .filter((t) => !query.has('owner') || (t.owner === query.get('owner') && !t.deleted_at))
+        .map(({ id, status, prompt, budget_atomic, created_at, parent_id, subtasks, supersedes, superseded_by, deleted_at }) => ({
           id, status, prompt, budget_atomic, created_at, parent_id, has_plan: subtasks.length > 0,
-          supersedes: supersedes ?? null, superseded_by: superseded_by ?? null,
+          supersedes: supersedes ?? null, superseded_by: superseded_by ?? null, deleted_at: deleted_at ?? null,
         })),
     }),
 
@@ -403,6 +424,26 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     },
 
     'GET /tasks/:id/events': (ctx) => events(ctx, owned(ctx.params.id, ctx.query.get('owner')), moving),
+
+    /**
+     * Deletes the conversation task :id is in (8.9): its tasks leave the owner's list and answer 404 to the owner. They
+     * stay stored, with their receipts and books, and a caller naming no owner (the CLI) still sees them. Refused while
+     * any of them holds or may hold money; a plan waiting for approval is cancelled, a draft's planning stopped.
+     */
+    'POST /conversations/:id/delete': ({ params, body }) => {
+      const t = owned(params.id, body?.owner);
+      const all = conversationTasks(t, tasks.values()).filter((x) => x.owner === t.owner);
+      const busy = all.find(holdsMoney);
+      if (busy) throw new HttpError(409, deleteRefusal(busy));
+      const at = new Date().toISOString();
+      for (const x of all) {
+        if (x.status === 'draft') kill(ledger, x);
+        else if (x.status === 'planned') setStatus(x, 'cancelled');
+        x.deleted_at ??= at;
+        saveTask(x);
+      }
+      return { deleted: all.map((x) => x.id) };
+    },
   }), port);
 
   return {

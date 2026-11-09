@@ -384,7 +384,7 @@ test('a follow-up on a finished task gives the planner the earlier messages and 
   const rows = (await call(`${orch.url}/tasks`)).tasks;
   assert.deepEqual(rows.find((x: any) => x.id === follow.id),
     { id: follow.id, status: 'planned', prompt: 'Now translate it to Turkish', budget_atomic: '2000000', created_at: follow.created_at, parent_id: first.task.id, has_plan: true,
-      supersedes: null, superseded_by: null });
+      supersedes: null, superseded_by: null, deleted_at: null });
   assert.equal(rows.find((x: any) => x.id === first.task.id).parent_id, null);
 
   await call(`${orch.url}/tasks/${follow.id}/approve`, {});
@@ -567,11 +567,12 @@ test('the conversation sent to the planner keeps the first and the newest messag
   assert.deepEqual(conversationFor(chain.slice(-2), chain.at(-1)!), { earlier: ['m0', 'm1'], revising: true });
 });
 
-// ---- sending again, editing ----
+// ---- sending again, editing, deleting ----
 
 const as = (owner: string) => ({
   send: (body: any) => call(`${orch.url}/tasks`, { budget_usdc: '1', owner, ...body }),
   approve: (id: string) => call(`${orch.url}/tasks/${id}/approve`, { owner }),
+  del: (id: string, who: string | null = owner) => call(`${orch.url}/conversations/${id}/delete`, who ? { owner: who } : {}),
 });
 const refusedWith = (status: number, message?: string) => (e: any) => e.status === status && (message === undefined || e.message === message);
 const NEWER = 'This conversation has a newer message: send after the newest one.';
@@ -647,4 +648,48 @@ test('the newest message can be edited until its plan is approved: its draft sto
   await approve(next.id);
   assert.equal((await ended(next.id)).task.status, 'closed');
   await assert.rejects(send({ prompt: 'x', supersedes: next.id }), refusedWith(409, "This message's plan was approved, so it can't be changed now. Send a new message instead."));
+});
+
+test('deleting a conversation leaves all its tasks out for their owner, refused while one holds money; the CLI still sees them', async () => {
+  const { send, approve, del } = as('hal.near');
+  planDown = true;
+  const root = await send({ prompt: 'Holders' });
+  planDown = false;
+  plan = { subtasks: [sub('s1', 'Hang', '200000', [cand('hang', '100000', 60)])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] };
+  const root2 = await send({ prompt: 'Holders', supersedes: root.id });
+  await approve(root2.id);
+  await until(async () => (await snap(root2.id)).subtasks[0].status === 'working');
+  await assert.rejects(del(root2.id), refusedWith(409, 'A run in this chat is still under way. Stop it or let it finish, then delete the chat.'));
+  await call(`${orch.url}/tasks/${root2.id}/kill`, { owner: 'hal.near' });
+  const stopped = await until(async () => { const x = await snap(root2.id); return x.ledger?.closed ? x : false; });
+
+  plan = holdersPlan();
+  const follow = await send({ prompt: 'Try it again', parent_id: root2.id });
+  let open!: () => void;
+  planGate = new Promise((ok) => (open = ok));
+  const drafting = await send({ prompt: 'Make it shorter', parent_id: follow.id, wait: false });
+  const other = await send({ prompt: 'Another chat', wait: false });
+  await assert.rejects(del(follow.id, 'eve.near'), refusedWith(404));
+
+  // Any of its tasks names it, the superseded first message too. A plan waiting is cancelled, a draft stopped.
+  const out = await del(drafting.id);
+  assert.deepEqual(out.deleted.sort(), [root.id, root2.id, follow.id, drafting.id].sort());
+  open();
+  planGate = Promise.resolve();
+  assert.deepEqual([(await snap(follow.id)).task.status, (await snap(drafting.id)).task.status], ['cancelled', 'killed']);
+  await until(async () => (await snap(other.id)).task.status === 'planned'); // another conversation is left alone
+
+  // Gone for the owner: not listed, 404 on its routes, and nothing can follow it.
+  assert.deepEqual((await call(`${orch.url}/tasks?owner=hal.near`)).tasks.map((x: any) => x.id), [other.id]);
+  await assert.rejects(call(`${orch.url}/tasks/${follow.id}?owner=hal.near`), refusedWith(404));
+  assert.equal((await fetch(`${orch.url}/tasks/${root2.id}/events?owner=hal.near`)).status, 404);
+  await assert.rejects(send({ prompt: 'More', parent_id: drafting.id }), refusedWith(404));
+  await assert.rejects(call(`${orch.url}/tasks`, { prompt: 'More', budget_usdc: '1', parent_id: drafting.id }), refusedWith(409, 'This conversation was deleted.'));
+  await assert.rejects(del(follow.id), refusedWith(404));
+  // Kept for the record: the CLI still sees every task, marked deleted, with its books and receipts.
+  const kept = await snap(root2.id);
+  assert.ok(kept.task.deleted_at);
+  assert.deepEqual([kept.ledger, kept.receipts], [stopped.ledger, stopped.receipts]);
+  assert.ok((await call(`${orch.url}/tasks`)).tasks.find((x: any) => x.id === root.id).deleted_at);
+  await call(`${orch.url}/tasks/${other.id}/cancel`, {});
 });
