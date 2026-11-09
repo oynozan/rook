@@ -79,7 +79,7 @@ export function Composer({ onSend, errors, sending, compact, thread }: {
         onSubmit={(e) => { e.preventDefault(); void submit(); }}
         onFocus={() => setFocused(true)}
         onBlur={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setFocused(false); }}
-        className={`relative rounded-[1.75rem] border bg-surface p-2 sm:p-3 shadow-sm shadow-ink/5 transition-[border-color,box-shadow] duration-200 focus-within:ring-4 motion-reduce:transition-none ${invalid ? 'border-red-700/50 focus-within:ring-red-700/10' : 'border-ink/15 not-focus-within:hover:border-ink/25 focus-within:border-accent/50 focus-within:ring-accent/10'}`}
+        className={`relative rounded-[1.75rem] border bg-surface p-2 sm:p-3 shadow-sm shadow-ink/5 transition-[border-color,box-shadow] duration-200 focus-within:ring-4 motion-reduce:transition-none ${invalid ? 'border-alert/50 focus-within:ring-alert/10' : 'border-ink/15 not-focus-within:hover:border-ink/25 focus-within:border-accent/50 focus-within:ring-accent/10'}`}
       >
         <textarea
           name="prompt"
@@ -100,7 +100,7 @@ export function Composer({ onSend, errors, sending, compact, thread }: {
 
         <div className={`grid transition-[grid-template-rows] duration-300 ease-out motion-reduce:transition-none ${folded ? 'grid-rows-[1fr] max-sm:grid-rows-[0fr]' : 'grid-rows-[1fr]'}`}>
           <div className="flex min-h-0 min-w-0 items-center gap-3 overflow-hidden pr-14">
-            <label className={`mt-2 inline-flex h-11 cursor-text items-center gap-1.5 rounded-full px-4 whitespace-nowrap text-ink/65 ring-inset transition-colors duration-200 focus-within:ring-2 motion-reduce:transition-none ${shown?.budget ?'bg-red-50 ring-1 ring-red-700/50 focus-within:ring-red-700/50' : 'bg-ink/5 hover:bg-ink/10 focus-within:bg-surface focus-within:ring-accent/50'}`}>
+            <label className={`mt-2 inline-flex h-11 cursor-text items-center gap-1.5 rounded-full px-4 whitespace-nowrap text-ink/65 ring-inset transition-colors duration-200 focus-within:ring-2 motion-reduce:transition-none ${shown?.budget ? 'bg-alert/10 text-ink ring-1 ring-alert/50 focus-within:ring-alert/50' : 'bg-ink/5 hover:bg-ink/10 focus-within:bg-surface focus-within:ring-accent/50'}`}>
               Budget
               <input
                 name="budget"
