@@ -953,7 +953,9 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
   const contractId = funding?.contract_id ?? mode?.contract_id ?? null;
   // Approved but not yet funded (chain mode): the run starts only once the funding is bound, so this survives a reload.
   // The in-memory ledger starts the run at once, so there this state is gone in a moment.
-  const awaitingFunding = status === 'approved' && !snap?.ledger && !noMoney;
+  // A plan that hires no agent (Rook does every part itself) pays no one, so it starts with no funding at all.
+  const free = !!snap?.plan?.subtasks.length && snap.plan.subtasks.every((s) => s.self_do);
+  const awaitingFunding = status === 'approved' && !snap?.ledger && !noMoney && !free;
   // A transfer already sent needs no new instructions (the mode names the contract, the plan gives the terms). Asking
   // again would count its own contract task against the funder's open-task limit, and fail at that limit.
   const sentLive = !!snap?.funding_sent && !snap.funding_sent.refunded;
@@ -1045,12 +1047,19 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
 
       {plan && !revealing && plan.subtasks.length > 0 && (
         <RookMessage>
-          <p>
-            Here&apos;s the plan. The caps add up to <span className="font-medium">{usdc(plan.budget.allocated_atomic)} USDC</span>
-            {BigInt(plan.budget.reserve_atomic || 0) > 0n && <>, and up to {usdc(plan.budget.reserve_atomic)} USDC more can come from the reserve when a subtask needs more than its cap</>}.{' '}
-            {started ? 'You approved it.' : task.status === 'cancelled' ? 'You cancelled it, so nothing was spent.' : task.status === 'approved' ? 'You approved it. Nothing has been spent yet.' : task.status !== 'killed' ? 'Nothing has been spent.'
-              : 'You stopped it before Rook started the run, so no agent was paid.'}
-          </p>
+          {free ? (
+            <p>
+              Here&apos;s the plan. No agent on the market fits these parts, so Rook does them all itself with its own model.
+              Nothing is hired, so nothing is paid and nothing leaves your wallet.{task.status === 'cancelled' && ' You cancelled it.'}
+            </p>
+          ) : (
+            <p>
+              Here&apos;s the plan. The caps add up to <span className="font-medium">{usdc(plan.budget.allocated_atomic)} USDC</span>
+              {BigInt(plan.budget.reserve_atomic || 0) > 0n && <>, and up to {usdc(plan.budget.reserve_atomic)} USDC more can come from the reserve when a subtask needs more than its cap</>}.{' '}
+              {started ? 'You approved it.' : task.status === 'cancelled' ? 'You cancelled it, so nothing was spent.' : task.status === 'approved' ? 'You approved it. Nothing has been spent yet.' : task.status !== 'killed' ? 'Nothing has been spent.'
+                : 'You stopped it before Rook started the run, so no agent was paid.'}
+            </p>
+          )}
           <PlanCard plan={plan} usage={usage} />
           {plan.dropped.length > 0 && <p className="mt-2 text-sm text-ink/65">Left out: {plan.dropped.map((d) => `${d.title} (${d.reason})`).join(', ')}</p>}
           {/* Stopped before Rook bound the wallet's transfer: whatever the feed shows, its USDC is the funder's to take back. */}
@@ -1061,14 +1070,14 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
           {task.status === 'planned' && (
             <div className="rook-in mt-4 flex flex-wrap gap-3" style={{ animationDelay: `${250 + plan.subtasks.length * 90}ms` }}>
               <ActionButton primary onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account || paymentsOff} title={paymentsOff ? 'Paying live agents is not switched on yet' : wallet.account ? undefined : 'Connect your wallet first'}>
-                {busy === 'approve' ? (chain ? 'Preparing the transfer…' : 'Starting…') : paymentsOff ? 'Approve' : noMoney ? 'Run simulation' : `Fund ${usdc(task.budget_atomic)} USDC and start`}
+                {busy === 'approve' ? (chain && !free ? 'Preparing the transfer…' : 'Starting…') : free ? 'Start' : paymentsOff ? 'Approve' : noMoney ? 'Run simulation' : `Fund ${usdc(task.budget_atomic)} USDC and start`}
               </ActionButton>
               <ActionButton onClick={() => act('cancel')} busy={busy === 'cancel'}>Cancel</ActionButton>
             </div>
           )}
-          {task.status === 'planned' && !paymentsOff && noMoney && <p className="mt-2 text-sm text-ink/60">A simulated {usdc(task.budget_atomic)} USDC budget: nothing leaves your wallet and no agent is paid.</p>}
-          {task.status === 'planned' && !paymentsOff && !noMoney && <p className="mt-2 text-sm text-ink/60">One click: your wallet opens to send the {usdc(task.budget_atomic)} USDC budget to the Rook contract on NEAR {network}, and the run starts once it lands. Each subtask spends at most its cap plus what Rook tops up from the reserve, and whatever isn&apos;t spent comes back to you.</p>}
-          {task.status === 'planned' && paymentsOff && <p className="mt-2 text-sm text-ink/60">Live agents and prices. Paying them isn&apos;t switched on yet, so nothing can be spent.</p>}
+          {task.status === 'planned' && !free && !paymentsOff && noMoney && <p className="mt-2 text-sm text-ink/60">A simulated {usdc(task.budget_atomic)} USDC budget: nothing leaves your wallet and no agent is paid.</p>}
+          {task.status === 'planned' && !free && !paymentsOff && !noMoney && <p className="mt-2 text-sm text-ink/60">One click: your wallet opens to send the {usdc(task.budget_atomic)} USDC budget to the Rook contract on NEAR {network}, and the run starts once it lands. Each subtask spends at most its cap plus what Rook tops up from the reserve, and whatever isn&apos;t spent comes back to you.</p>}
+          {task.status === 'planned' && !free && paymentsOff && <p className="mt-2 text-sm text-ink/60">Live agents and prices. Paying them isn&apos;t switched on yet, so nothing can be spent.</p>}
         </RookMessage>
       )}
 
@@ -1089,8 +1098,10 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
           <div className="flex items-start justify-between gap-x-3 gap-y-2 sm:flex-wrap sm:items-center sm:gap-x-6">
             <p className="min-w-0 tabular-nums max-sm:pt-2.5">
               <span className="font-medium">{live ? 'Running.' : task.status === 'killed' ? 'Stopped.' : task.status === 'failed' ? 'This run hit a problem.' : 'Finished.'}</span>
-              {' '}Spent {usdc(spent)} of {usdc(task.budget_atomic)} USDC{simNote}
-              {reserveUsed > 0 && <span className="text-ink/65">, {usdc(reserveUsed)} from the reserve</span>}
+              {free ? ' Rook does every part itself, so nothing is spent.' : <>
+                {' '}Spent {usdc(spent)} of {usdc(task.budget_atomic)} USDC{simNote}
+                {reserveUsed > 0 && <span className="text-ink/65">, {usdc(reserveUsed)} from the reserve</span>}
+              </>}
             </p>
             {!TERMINAL.has(task.status) && <ActionButton onClick={() => act('stop')} busy={busy === 'stop'} disabled={fundingBusy}>{busy === 'stop' ? 'Stopping…' : 'Stop'}</ActionButton>}
           </div>
@@ -1104,12 +1115,12 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed }: { id: string; 
           {final_result.abandoned.length > 0 && <p className="mt-1 text-alert">{final_result.abandoned.length} subtask{final_result.abandoned.length > 1 ? 's' : ''} couldn&apos;t be completed.</p>}
           <Report markdown={final_result.final_markdown} />
 
-          <MoneyCard ledger={ledger} receipts={receipts} network={network} simNote={simNote} />
+          {!free && <MoneyCard ledger={ledger} receipts={receipts} network={network} simNote={simNote} />}
         </RookMessage>
       )}
 
       {/* Stopped or failed without a report: still say where the money went, and what came back. */}
-      {!final_result && settled && started && (ledger || receipts.length > 0) && (
+      {!final_result && settled && started && !free && (ledger || receipts.length > 0) && (
         <RookMessage><MoneyCard ledger={ledger} receipts={receipts} network={network} simNote={simNote} /></RookMessage>
       )}
 
