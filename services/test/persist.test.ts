@@ -35,7 +35,8 @@ before(async () => {
 after(async () => {
   await planner.close();
   delete process.env.ROOK_DB;
-  rmSync(dir, { recursive: true, force: true });
+  // Every store is closed by now; the retries cover Windows releasing the SQLite and WAL files a moment late (EBUSY).
+  rmSync(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
 test('a planned task, its plan and its event history survive a restart', async () => {
@@ -56,7 +57,7 @@ test('a planned task, its plan and its event history survive a restart', async (
   await orch.close();
 });
 
-test('a task that was mid-run when the services stopped is marked failed, with the reason in its events', async () => {
+test('a sim-ledger task that was mid-run when the services stopped is marked failed, with the reason in its events', async () => {
   const path = freshDb();
   const ts = new Date().toISOString();
   const store = openStore(path);
@@ -70,11 +71,13 @@ test('a task that was mid-run when the services stopped is marked failed, with t
   const orch = await start(0);
   const s = await call(`${orch.url}/tasks/t_running`);
   assert.equal(s.task.status, 'failed');
-  assert.match(s.task.error, /restarted while this task was running/);
+  assert.match(s.task.error, /restarted while this task was running.*simulated ledger lived in memory only.*no real money/);
   await orch.close();
 
   // And the change itself was saved: the next start sees it already failed.
-  const [doc] = openStore(path).load();
+  const check = openStore(path);
+  const [doc] = check.load();
+  check.close(); // an open handle keeps the file locked on Windows, and the cleanup fails with EBUSY
   assert.equal(doc.status, 'failed');
   assert.deepEqual(doc.events.at(-1)?.data, { from: 'running', to: 'failed' });
 });

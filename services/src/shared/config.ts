@@ -1,6 +1,7 @@
 // Env-driven config shared by every service. See docs/agentic-system.md sections 2, 3, 11.
 import { existsSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import { parseUsdc } from './money.ts';
 
 // ponytail: tiny .env loader (repo root, then cwd); real env vars win.
 // NEAR role keys are never read from a .env file: keys come from the environment or files outside the repo.
@@ -76,4 +77,55 @@ export const config = {
   get contractId() { return env('ROOK_CONTRACT_ID', ''); },
   /** Longest payment validity Rook signs or accepts, in blocks (about seconds): a quote asking more is refused. */
   get maxPaymentTimeoutS() { return num('ROOK_MAX_PAYMENT_TIMEOUT_S', 3600); },
+
+  /** `live`: `pnpm live`, nothing simulated (checkProfile). Anything else: the simulation profile of `pnpm dev`. */
+  get profile() { return process.env.ROOK_PROFILE === 'live' ? 'live' as const : 'sim' as const; },
+  /** Any simulated part: a client must label the run as simulation, never as real money. */
+  get simulated(): boolean { return config.market === 'sim' || config.ledger === 'sim' || config.llm === 'canned'; },
+  /** Shared secret the orchestrator requires as `x-rook-token` when set (the web server and the CLI send it). */
+  get serviceToken() { return process.env.ROOK_SERVICE_TOKEN ?? ''; },
+  /** Largest budget one task may ask for (ROOK_MAX_BUDGET_USDC, default 50 USDC), atomic; unparseable means 50. */
+  get maxBudgetAtomic(): bigint { try { return parseUsdc(env('ROOK_MAX_BUDGET_USDC', '50')); } catch { return 50_000_000n; } },
 };
+
+/** Longest task prompt the orchestrator and the planner accept. */
+export const MAX_PROMPT_CHARS = 4000;
+
+/** NEAR role keys and the one service that holds each (scripts/dev.ts hands them to no other). */
+const ROLE_KEYS: Record<string, string[]> = {
+  signer: ['ROOK_SIGNER_ACCOUNT', 'ROOK_SIGNER_KEY'],
+  'chain-gateway': ['ROOK_ORCHESTRATOR_ACCOUNT', 'ROOK_ORCHESTRATOR_KEY'],
+};
+
+/**
+ * What stops this configuration from starting; empty when it may start. `service`: check what that one service
+ * holds; omitted: the whole stack (scripts/dev.ts). The live profile runs on nothing simulated, and anything that
+ * pays real agents needs the live profile.
+ */
+export function profileProblems(service?: string): string[] {
+  const e = process.env, p: string[] = [];
+  if (config.llm === 'canned' && (config.market !== 'sim' || config.ledger !== 'sim')) {
+    p.push(`ROOK_LLM=canned${e.ROOK_LLM ? '' : ' (the default without NEARAI_API_KEY)'} runs only with ROOK_MARKET=sim and ROOK_LEDGER=sim; set ROOK_LLM=near and NEARAI_API_KEY`);
+  }
+  if (config.market === 'live' && config.ledger === 'chain' && config.nearNetwork !== 'mainnet') {
+    p.push('ROOK_MARKET=live with ROOK_LEDGER=chain needs NEAR_NETWORK=mainnet: x402 settles on mainnet only');
+  }
+  if (config.profile !== 'live') {
+    if (!config.simulated) p.push('this configuration pays real agents: start it with `pnpm live`, which checks the whole real-mode setup');
+    return p;
+  }
+  for (const [k, v] of [['ROOK_MARKET', 'live'], ['ROOK_LEDGER', 'chain'], ['ROOK_LLM', 'near'], ['NEAR_NETWORK', 'mainnet']]) {
+    if (e[k] !== v) p.push(`${k}=${v} is required (it is ${e[k] ? e[k] : 'not set'})`);
+  }
+  const keys = service ? ROLE_KEYS[service] ?? [] : Object.values(ROLE_KEYS).flat();
+  for (const k of ['NEAR_RPC_URL', 'ROOK_CONTRACT_ID', 'NEARAI_API_KEY', 'ROOK_SERVICE_TOKEN', ...keys]) if (!e[k]) p.push(`${k} is not set`);
+  if (e.ROOK_SERVICE_TOKEN && e.ROOK_SERVICE_TOKEN.length < 32) p.push('ROOK_SERVICE_TOKEN must be at least 32 characters');
+  if (service === 'simulator') p.push('the simulator does not run in the live profile');
+  return p;
+}
+
+/** Throws one message listing every problem (fail fast at startup). */
+export function checkProfile(service?: string) {
+  const p = profileProblems(service);
+  if (p.length) throw new Error(`rook (${config.profile} profile${service ? `, ${service}` : ''}) refuses to start:\n  - ${p.join('\n  - ')}`);
+}

@@ -81,6 +81,11 @@ function sendTx(id: unknown, b64: string) {
       value = true;
     }
     if (fc.methodName === 'ft_transfer_call') { chain.balances.set(tx.signerId, 0n); value = args.amount; }
+    if (fc.methodName === 'mark_empty') { // like the contract's callback: Returned only when the sub-account holds exactly 0
+      const s = chain.subtasks.find((x) => x.n === args.n);
+      value = s?.status === 'Funded' && (chain.balances.get(s.account_id) ?? 0n) === 0n;
+      if (value) s.status = 'Returned';
+    }
   }
   const result = {
     final_execution_status: 'FINAL', status: failure ? { Failure: failure } : { SuccessValue: Buffer.from(JSON.stringify(value)).toString('base64') },
@@ -230,7 +235,6 @@ test('/sign refusals, /expire, /kill', async () => {
 
   assert.equal((await call(`${signer.url}/expire`, { task_id: '0', n: 1, terminal_unpaid: true })).cleared, true);
   await refused(sign({ ...row, amount: '300006' }), /exceeds the sub-account balance 300005/);
-  await refused(sign({ ...row, amount: '300005' }), /would empty the sub-account/); // NEP-141 could never return 0
   await refused(sign({ ...row, maxTimeoutSeconds: 1e9 }), /maxTimeoutSeconds/);
   await refused(sign({ ...row, maxTimeoutSeconds: 1200.5 }), /maxTimeoutSeconds/);
   const s = await sign(row); // allowed again after the terminal release
@@ -239,7 +243,9 @@ test('/sign refusals, /expire, /kill', async () => {
 
   // A payment that lands (the sub-account key's nonce reaches the delegate's) clears at once, and says it was paid.
   const p = await sign(row);
+  assert.match(p.nonce, /^\d+$/); // stored by the orchestrator with the task, so a restart can follow the payment
   const d = verifySignedDelegate(JSON.parse(Buffer.from(p.header, 'base64').toString()).payload.signedDelegateAction);
+  assert.equal(BigInt(p.nonce), d.nonce);
   await refused(call(`${signer.url}/expire`, { task_id: '0', n: 1, terminal_unpaid: false }), /still valid/);
   chain.keys.set(`${ACCOUNT}/${subKey}`, d.nonce);
   chain.balances.set(ACCOUNT, chain.balances.get(ACCOUNT)! - BigInt(row.amount));
@@ -247,7 +253,8 @@ test('/sign refusals, /expire, /kill', async () => {
 
   // Kill is per contract task, and survives a restart.
   await call(`${signer.url}/kill`, { task_id: '7' });
-  assert.ok((await sign({ ...row, amount: '1' })).header); // another task's kill leaves task 0 signing
+  // Another task's kill leaves task 0 signing; and the whole balance may be spent (mark_empty closes out an empty account).
+  assert.ok((await sign({ ...row, amount: String(chain.balances.get(ACCOUNT)) })).header);
   await call(`${signer.url}/expire`, { task_id: '0', n: 1, terminal_unpaid: true });
   await call(`${signer.url}/kill`, { task_id: '0' });
   await refused(sign({ ...row, amount: '1' }), /killed/);
@@ -263,7 +270,23 @@ test('/return sends the whole balance back with ft_transfer_call and the return 
     args: { receiver_id: CONTRACT, amount: '5', msg: '{"return":{"task_id":"0","n":1}}' }, gas: 50n * TGAS, deposit: 1n,
   });
   // An empty sub-account cannot return (NEP-141 refuses 0), so it is refused rather than reported as returned.
-  await refused(call(`${signer.url}/return`, { task_id: '0', n: 1, account_id: ACCOUNT }), /empty/);
+  await refused(call(`${signer.url}/return`, { task_id: '0', n: 1, account_id: ACCOUNT }), /mark-empty/);
+});
+
+test('chain-gateway /mark-empty: mark_empty with 50 Tgas from the orchestrator key; marked only at a 0 balance', async () => {
+  chain.balances.set(ACCOUNT, 3n);
+  const no = await call(`${gw.url}/mark-empty`, { task_id: '0', n: 1 });
+  assert.deepEqual([no.success, no.marked], [true, false]); // the callback's false is an answer here, not a failure
+  assert.deepEqual(lastTx(), {
+    signer: 'orch.test', key: orchKp.getPublicKey().toString(), receiver: CONTRACT, method: 'mark_empty',
+    args: { task_id: '0', n: 1 }, gas: 50n * TGAS, deposit: 0n,
+  });
+  chain.balances.set(ACCOUNT, 0n);
+  const yes = await call(`${gw.url}/mark-empty`, { task_id: '0', n: 1 });
+  assert.equal(yes.marked, true);
+  assert.equal(chain.subtasks.find((s) => s.n === 1).status, 'Returned');
+  assert.match(yes.explorer_url, /^https:\/\/testnet\.nearblocks\.io\/txns\//);
+  chain.subtasks.find((s) => s.n === 1).status = 'Funded';
 });
 
 test('simulator: a delegate nonce is used only once its task settles; expired delegates and empty briefs use nothing', async () => {
@@ -305,17 +328,18 @@ test('simulator: a delegate nonce is used only once its task settles; expired de
   assert.ok((await send('sim-price', await pay('sim-price', 6n))).body.result);
 });
 
-test('chain ledger: a fund_subtask that errors but is Funded on chain counts; a payment that lands while waiting is settled', async () => {
-  let expires = 0;
+test('chain ledger: a fund_subtask that errors but is Funded on chain counts; a payment is booked only once the balance shows it', async () => {
+  let expires = 0, balance = '600'; // what the sub-account holds on chain: 1000 funded, 400 paid
   const sg = await serve('mock-signer-2', {
     'POST /keys': () => ({ public_key: 'ed25519:x' }),
-    'POST /sign': ({ body }) => ({ header: 'h', payment_hash: 'ph', expires_at_block: 1, row: body.row }),
-    // 'wait': still redeemable on the first poll, then the chain shows it landed
+    'POST /sign': ({ body }) => ({ header: 'h', payment_hash: `ph-${body.row.amount}`, expires_at_block: 1, nonce: '9', row: body.row }),
+    // 'wait': still redeemable on the first poll, then the delegate has run
     'POST /expire': () => { if (expires++ === 0) throw new HttpError(409, 'still valid'); return { cleared: true, landed: true }; },
   }, 0);
   const g = await serve('mock-gateway-2', {
     'POST /fund': () => { throw new Error('NEAR RPC send_tx: TIMEOUT_ERROR'); }, // a 500, but the tx landed
     'GET /task/:id': () => ({ task: {}, subtasks: [{ n: 1, account_id: `t5-1.${CONTRACT}`, cap: '1000', status: 'Funded' }] }),
+    'GET /balance': () => ({ balance }),
   }, 0);
   servers.unshift(sg, g);
   Object.assign(process.env, { SIGNER_URL: sg.url, CHAIN_GATEWAY_URL: g.url });
@@ -325,9 +349,20 @@ test('chain ledger: a fund_subtask that errors but is Funded on chain counts; a 
   l.createTask('T', 'owner.test', 2000n, 0.2);
   assert.equal(await l.fundSubtask('T', 1, 1000n), 1000n);
   const allow = [{ network: 'near:testnet', asset: USDC, payTo: PAY_TO }];
-  await l.authorize('T', 1, { scheme: 'exact', ...allow[0], amount: '400', maxTimeoutSeconds: 60 }, allow);
+  const pay = (amount: string) => l.authorize('T', 1, { scheme: 'exact', ...allow[0], amount, maxTimeoutSeconds: 60 }, allow);
+  await pay('400');
+  assert.deepEqual(l.binding('T')!.auths, { 1: { payment_hash: 'ph-400', amount: '400', expires_at_block: 1, nonce: '9' } }); // stored with the task
   assert.deepEqual(await l.release('T', 1, 'wait'), { amount: 400n, settled: true });
   assert.deepEqual([l.view('T')!.spent_atomic, l.view('T')!.subtasks[0].balance_atomic, expires], [400n, 600n, 2]);
+  // COMPLETED, but the payment never moved the balance (it expired unsettled, or its transfer failed): booked unpaid.
+  await pay('100');
+  assert.equal(await l.settle('T', 1), 0n);
+  assert.deepEqual([l.view('T')!.spent_atomic, l.view('T')!.subtasks[0].authorized_atomic, l.binding('T')!.auths], [400n, null, {}]);
+  // And one that did: 500 left of 600.
+  await pay('100');
+  balance = '500';
+  assert.equal(await l.settle('T', 1), 100n);
+  assert.deepEqual([l.view('T')!.spent_atomic, l.view('T')!.subtasks[0].balance_atomic], [500n, 500n]);
 });
 
 test('orchestrator, ROOK_LEDGER=chain: approve gives funding instructions, /funded checks the contract task, run, close', async () => {
@@ -343,11 +378,11 @@ test('orchestrator, ROOK_LEDGER=chain: approve gives funding instructions, /fund
     'POST /sign': ({ body }) => {
       rec('sign', { n: body.n, account_id: body.account_id, amount: body.row.amount });
       if (auths.has(body.account_id)) throw new HttpError(409, 'outstanding authorization');
-      if (BigInt(body.row.amount) >= left.get(body.account_id)!) throw new HttpError(409, 'would empty the sub-account');
+      if (BigInt(body.row.amount) > left.get(body.account_id)!) throw new HttpError(409, 'exceeds the sub-account balance');
       auths.add(body.account_id);
       left.set(body.account_id, left.get(body.account_id)! - BigInt(body.row.amount)); // every hire below completes
       const header = Buffer.from(JSON.stringify({ x402Version: 2, accepted: body.row, payload: { signedDelegateAction: 'AA==' } })).toString('base64');
-      return { header, payment_hash: createHash('sha256').update(header).digest('hex'), expires_at_block: 1 };
+      return { header, payment_hash: createHash('sha256').update(header).digest('hex'), expires_at_block: 1, nonce: '1' };
     },
     'POST /expire': ({ body }) => { // the payment landed at once: settle clears the authorization
       rec('expire', body);
@@ -379,7 +414,13 @@ test('orchestrator, ROOK_LEDGER=chain: approve gives funding instructions, /fund
       left.set(account_id, left.get(account_id)! + BigInt(body.amount_atomic));
       return { tx_hash: 'u', success: true };
     },
-    'POST /receipt': ({ body }) => (rec('receipt', { n: body.n, amount: body.receipt.amount, verdict: body.receipt.verdict }), { tx_hash: `rtx-${body.n}` }),
+    'POST /receipt': ({ body }) => (rec('receipt', { n: body.n, amount: body.receipt.amount, verdict: body.receipt.verdict }), { tx_hash: `rtx-${body.n}`, explorer_url: `https://testnet.nearblocks.io/txns/rtx-${body.n}` }),
+    'POST /mark-empty': ({ body }) => {
+      rec('mark-empty', body);
+      const marked = !left.get(`t${body.task_id}-${body.n}.${CONTRACT}`);
+      if (marked) returned.add(body.n);
+      return { tx_hash: 'm', success: true, marked };
+    },
     'POST /close': ({ body }) => {
       rec('close', body);
       const open = subs.filter((x) => !returned.has(x.n)).map((x) => x.n);
@@ -387,6 +428,7 @@ test('orchestrator, ROOK_LEDGER=chain: approve gives funding instructions, /fund
       return { tx_hash: 'c', success: true };
     },
     'GET /balance': ({ query }) => ({ balance: String(left.get(query.get('account')!) ?? 0n) }),
+    'GET /payment': ({ query }) => ({ found: true, tx_hash: `pay-${query.get('account')}-${query.get('amount')}`, explorer_url: `https://testnet.nearblocks.io/txns/pay-${query.get('amount')}` }),
   }, 0);
   const X402 = { network: 'near:testnet', asset: USDC, payTo: PAY_TO };
   const r = (amount: string) => ({ scheme: 'exact', ...X402, amount, maxTimeoutSeconds: 60 });
@@ -424,8 +466,9 @@ test('orchestrator, ROOK_LEDGER=chain: approve gives funding instructions, /fund
   const t = await call(`${orch.url}/tasks`, { prompt: 'p', budget_usdc: '1' });
   const a = await call(`${orch.url}/tasks/${t.id}/approve`, {});
   assert.equal(a.status, 'approved');
-  assert.deepEqual(a.funding, {
-    network: 'testnet', contract_id: CONTRACT, usdc: USDC, funder: 'owner.test', amount_atomic: '1000000',
+  const { network, contract_id, usdc, amount_atomic, msg } = a.funding;
+  assert.deepEqual({ network, contract_id, usdc, amount_atomic, msg }, {
+    network: 'testnet', contract_id: CONTRACT, usdc: USDC, amount_atomic: '1000000',
     msg: '{"create_task":{"reserve_bps":2000,"caps":["300000","200000"]}}',
   });
   await new Promise((ok) => setTimeout(ok, 100));
@@ -439,6 +482,11 @@ test('orchestrator, ROOK_LEDGER=chain: approve gives funding instructions, /fund
   assert.equal(calls.length, 0);
 
   await refused(call(`${orch.url}/tasks/${t.id}/funded`, { contract_task_id: 'bad' }), /caps/);
+  assert.equal(a.funding.owner, 'owner.test'); // SHARED API DECISION 4 (`funder` kept for older clients)
+  // A signed-in owner binds only a contract task their own wallet funded, never someone else's matching one.
+  const alice = await call(`${orch.url}/tasks`, { prompt: 'p3', budget_usdc: '1', owner: 'alice.near' });
+  await call(`${orch.url}/tasks/${alice.id}/approve`, { owner: 'alice.near' });
+  await refused(call(`${orch.url}/tasks/${alice.id}/funded`, { contract_task_id: 'other', owner: 'alice.near' }), /funded by owner\.test, not by the task owner alice\.near/);
   const both = await Promise.allSettled([1, 2].map(() => call(`${orch.url}/tasks/${t.id}/funded`, { contract_task_id: 'ok' })));
   assert.deepEqual(both.map((x) => x.status).sort(), ['fulfilled', 'rejected']); // overlapping /funded: one binds and runs
   assert.equal((both.find((x) => x.status === 'fulfilled') as any).value.contract_task_id, 'ok');
@@ -453,16 +501,30 @@ test('orchestrator, ROOK_LEDGER=chain: approve gives funding instructions, /fund
   assert.deepEqual(calls.filter((c) => !c.startsWith('receipt') && !c.startsWith('return')).slice(0, 4), [
     'keys {"task_id":"ok","n":1}', 'fund {"task_id":"ok","n":1}', 'keys {"task_id":"ok","n":2}', 'fund {"task_id":"ok","n":2}',
   ]);
-  assert.deepEqual(calls.filter((c) => /^(sign|receipt|return)/.test(c)).sort(), [
+  assert.deepEqual(calls.filter((c) => /^(sign|receipt|return|mark-empty)/.test(c)).sort(), [
+    'mark-empty {"task_id":"ok","n":1}', // s1's price equals its cap: spent to 0, so the contract marks it empty
     'receipt {"n":1,"amount":"300000","verdict":"pass"}', 'receipt {"n":2,"amount":"150000","verdict":"pass"}',
-    `return {"task_id":"ok","n":1,"account_id":"${ok}-1.${CONTRACT}"}`, `return {"task_id":"ok","n":2,"account_id":"${ok}-2.${CONTRACT}"}`,
+    `return {"task_id":"ok","n":2,"account_id":"${ok}-2.${CONTRACT}"}`,
     `sign {"n":1,"account_id":"${ok}-1.${CONTRACT}","amount":"300000"}`, `sign {"n":2,"account_id":"${ok}-2.${CONTRACT}","amount":"150000"}`,
   ]);
   assert.equal(calls.at(-1), 'close {"task_id":"ok"}');
-  // s1's price equals its cap: 1 is topped up from the reserve so the payment leaves something to return.
-  assert.ok(calls.includes('top-up {"task_id":"ok","n":1,"amount_atomic":"1"}'));
-  assert.deepEqual(s.receipts.map((x: any) => [x.agent_handle, x.receipt_tx, x.evidence.ft_balance_atomic]).sort(), [['check', 'rtx-2', '50000'], ['holders', 'rtx-1', '1']]);
+  assert.ok(!calls.some((c) => c.startsWith('top-up'))); // no unit kept back in the sub-account any more
+  assert.deepEqual(s.receipts.map((x: any) => [x.agent_handle, x.receipt_tx, x.evidence.ft_balance_atomic]).sort(), [['check', 'rtx-2', '50000'], ['holders', 'rtx-1', '0']]);
   assert.equal(s.ledger.contract_task_id, 'ok');
   assert.equal(s.ledger.refunded_atomic, String(1_000_000 - 450_000));
+  // Receipts carry the A2A task, the verdict's hash and both transactions with explorer links; payment_tx comes from
+  // the indexer lookup in the background, so it may land just after the task closed.
+  for (const end = Date.now() + 5000; s.receipts.some((x: any) => !x.payment_tx) && Date.now() < end; await new Promise((ok) => setTimeout(ok, 25))) {
+    s = await call(`${orch.url}/tasks/${t.id}`);
+  }
+  const holders = s.receipts.find((x: any) => x.agent_handle === 'holders');
+  assert.match(holders.a2a_task_id, /^a2a-/);
+  assert.deepEqual([holders.attestation_hash, holders.receipt_explorer_url, holders.payment_tx, holders.payment_explorer_url], [
+    'att', 'https://testnet.nearblocks.io/txns/rtx-1', `pay-${ok}-1.${CONTRACT}-300000`, 'https://testnet.nearblocks.io/txns/pay-300000',
+  ]);
+  const evs = (await fetch(`${orch.url}/tasks/${t.id}/events`).then((x) => x.text())).split('\n\n').filter(Boolean);
+  assert.ok(evs.some((e) => e.includes('"op":"payment_found"')));
+  // The binding to the contract task is in the snapshot's ledger view; the stored task keeps it for a restart.
+  assert.deepEqual(s.ledger.accounts, { 1: `${ok}-1.${CONTRACT}`, 3: `${ok}-2.${CONTRACT}` });
   await refused(call(`${orch.url}/tasks/${t.id}/funded`, { contract_task_id: 'ok' }), /closed/);
 });

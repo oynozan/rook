@@ -50,6 +50,9 @@ export type LlmCall = {
   input_tokens: number; output_tokens: number; cost_usd: number;
   signature: string | null; signing_address: string | null; signing_algo: string | null; signature_kind: string | null;
   signature_verified: boolean;
+  // Verification (docs/model-choice.md): signer recovered from the signature; the signer's attestation report checked
+  // (true / false, null when it could not be fetched).
+  signer_recovered: boolean; attested: boolean | null; attestation_checked_at: string | null;
 };
 
 // ---- Planner (section 5) ----

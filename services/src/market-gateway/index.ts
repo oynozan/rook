@@ -54,6 +54,24 @@ function normPart(p: any): Part {
   return { raw: JSON.stringify(p?.data ?? p) };
 }
 
+/**
+ * SendMessage's result: a Task, or a Message, which A2A allows as a direct answer. A Message is a finished answer, so it
+ * becomes a COMPLETED task carrying its parts (id: its taskId, else its messageId). Null when it is neither.
+ */
+export function sendResult(res: any): A2ATask | null {
+  const m = res?.message ?? (res?.kind === 'message' || (Array.isArray(res?.parts) && !res?.status && !res?.artifacts) ? res : null);
+  if (m && !res?.task) {
+    return { id: String(m.taskId ?? m.messageId ?? `msg-${randomUUID()}`), context_id: m.contextId ?? null, state: 'COMPLETED', artifacts: [{ name: 'message', parts: (m.parts ?? []).map(normPart) }] };
+  }
+  const t = res?.task ?? res;
+  return t?.id ? normTask(t) : null;
+}
+
+/** A paid call's window: the payment's maxTimeoutSeconds minus the marketplace's 10 minutes (x402 caller skill). */
+function windowS(payment: string) {
+  try { return Number(JSON.parse(Buffer.from(payment, 'base64').toString('utf8'))?.accepted?.maxTimeoutSeconds) - 600 || 0; } catch { return 0; }
+}
+
 export function normTask(t: any): A2ATask {
   return {
     id: String(t.id),
@@ -166,12 +184,14 @@ export async function start(port = config.ports.marketGateway): Promise<Running>
       if (typeof body?.text !== 'string' || !body.text.trim()) throw new HttpError(400, 'text is required');
       const message: Record<string, unknown> = { messageId: randomUUID(), role: 'ROLE_USER', parts: [{ text: body.text }] };
       if (body.context_id) message.contextId = body.context_id;
+      // Over 60 s the agent would not finish inside the call's 60 s hold: take the task id at once and poll from the start.
+      const configuration = { historyLength: 0, ...(windowS(body.payment) > 60 ? { returnImmediately: true } : {}) };
       let r: Reply | undefined, saw502 = false;
       try {
         // 502 means the facilitator was unreachable: retry with the SAME header, never re-sign.
         for (let attempt = 0; attempt <= 3; attempt++) {
           if (attempt) await sleep(1000 * 2 ** (attempt - 1));
-          r = await rpc(handle, 'SendMessage', { message }, body.payment);
+          r = await rpc(handle, 'SendMessage', { message, configuration }, body.payment);
           if (r.status !== 502) break;
           saw502 = true;
         }
@@ -185,9 +205,9 @@ export async function start(port = config.ports.marketGateway): Promise<Running>
       if (saw502 && !ok) return fail('outcome_unknown', `after a 502 the agent answered HTTP ${r!.status}: payment may have settled`);
       if (r!.status === 402) return fail(402, typeof r!.body?.error === 'string' ? r!.body.error : 'payment refused');
       if (r!.status === 200 && r!.body?.result) {
-        const t = r!.body.result.task ?? r!.body.result;
-        if (!t?.id) return fail('no_task', 'agent replied without a task');
-        return { ok: true, task: normTask(t) };
+        const task = sendResult(r!.body.result);
+        if (!task) return fail('no_task', 'agent replied without a task or a message');
+        return { ok: true, task };
       }
       return replyError(r!);
     },

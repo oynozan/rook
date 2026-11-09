@@ -1,9 +1,14 @@
 // Local stack: one child process per service, started in dependency order, output prefixed by service name.
-// `pnpm dev` (ROOK_LLM / ROOK_MARKET from env or ../.env). Ctrl+C stops every child.
+// `pnpm dev`: the simulation profile (ROOK_LLM / ROOK_MARKET / ROOK_LEDGER from env or ../.env); it refuses a
+// configuration that would pay real agents. `pnpm live` (--live): ROOK_PROFILE=live, nothing simulated, every
+// variable and key checked before anything starts (config.ts profileProblems). Ctrl+C stops every child.
 import { spawn, type ChildProcess } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
-import { config } from '../src/shared/config.ts';
+import { checkProfile, config } from '../src/shared/config.ts';
+
+if (process.argv.includes('--live')) process.env.ROOK_PROFILE = 'live';
+try { checkProfile(); } catch (e: any) { console.error(e.message); process.exit(1); }
 
 const ORDER: [name: string, url: () => string][] = [
   ['simulator', () => config.urls.simulator],
@@ -34,7 +39,20 @@ const tag = (name: string, i: number) => {
   return color ? `\x1b[${COLORS[i]}m${t}\x1b[0m |` : `${t} |`;
 };
 
-console.log(`rook dev: market=${config.market} llm=${config.llm} ledger=${config.ledger}`);
+console.log(`rook ${config.profile === 'live' ? 'live' : 'dev'}: market=${config.market} llm=${config.llm} ledger=${config.ledger}`);
+{
+  const sim = [
+    config.market === 'sim' && 'Agent Market: the local simulator and its scripted agents',
+    config.ledger === 'sim' && 'ledger: in memory, no NEAR transactions, no USDC',
+    config.llm === 'canned' && 'LLM: canned answers, no NEAR AI calls',
+  ].filter(Boolean) as string[];
+  const lines = sim.length
+    ? ['SIMULATION: no real money moves.', ...sim.map((s) => `  simulated ${s}`), 'Real mode: pnpm live (README, "Running for real").']
+    : [`LIVE: real Agent Market agents paid in USDC on NEAR ${config.nearNetwork}, contract ${config.contractId}.`, 'Every approved plan spends real money.'];
+  const w = Math.max(...lines.map((l) => l.length)) + 4, bar = '#'.repeat(w);
+  const paint = (s: string) => (color ? `\x1b[1;${sim.length ? '30;43' : '97;41'}m${s}\x1b[0m` : s);
+  for (const l of [bar, ...lines.map((l) => `# ${l.padEnd(w - 4)} #`), bar]) console.log(paint(l));
+}
 if (config.ledger === 'chain') {
   // Origin only: commercial RPC URLs often carry an API key in the path or query.
   const rpc = process.env.NEAR_RPC_URL ? (URL.canParse(process.env.NEAR_RPC_URL) ? new URL(process.env.NEAR_RPC_URL).origin : '(NEAR_RPC_URL is not a URL)') : '(NEAR_RPC_URL not set)';

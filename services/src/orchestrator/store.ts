@@ -4,6 +4,7 @@ import { randomUUID } from 'node:crypto';
 import type {
   EventType, Evaluation, LlmCall, Part, Plan, PlanSubtask, Receipt, RookEvent, SubtaskStatus, TaskStatus,
 } from '../shared/types.ts';
+import type { ChainBinding } from './chain-ledger.ts';
 import type { Ledger, Recipient } from './ledger.ts';
 
 export type Hire = {
@@ -12,7 +13,12 @@ export type Hire = {
   state: string; // A2A state, or SENDING / TIMEOUT / SEND_FAILED / OUTCOME_UNKNOWN / KILLED
   paid: boolean; deliverable_text: string | null; parts: Part[]; verdict: 'pass' | 'fail' | null;
   started_at: string; ended_at: string | null;
+  // The quote's payTo and when its authorization expires: a restarted orchestrator resumes or settles the hire with them.
+  pay_to?: string; expires_at?: string;
 };
+
+/** Receipt as stored and shown: explorer links are filled in chain mode (null in simulation). */
+export type ReceiptView = Receipt & { payment_explorer_url?: string | null; receipt_explorer_url?: string | null };
 
 export type Sub = PlanSubtask & {
   n: number; status: SubtaskStatus; final_outcome: 'passed' | 'abandoned' | null; rehire_count: number;
@@ -24,15 +30,22 @@ export type Task = {
   id: string; prompt: string; budget_atomic: string; reserve_share: number; funder: string | null;
   owner: string | null; // the NEAR account that drafted it, verified by the web app; null for tasks from the CLI
   status: TaskStatus; error: string | null; created_at: string; updated_at: string;
-  plan: Plan | null; subtasks: Sub[]; receipts: Receipt[]; events: RookEvent[];
+  plan: Plan | null; subtasks: Sub[]; receipts: ReceiptView[]; events: RookEvent[];
   final_result: { final_markdown: string; attribution: { subtask_id: string; agent_handle: string }[]; abandoned: string[] } | null;
   llm_calls: LlmCall[]; // self-do and aggregate calls (plan and evaluation calls live on the plan and evaluations)
   ledger_saved?: unknown; // the ledger's last view, kept so a reloaded task still shows what it spent
+  chain?: ChainBinding | null; // ROOK_LEDGER=chain: its contract task, sub-accounts and outstanding authorizations
   // runtime only, never serialised
   listeners: Set<(e: RookEvent) => void>; abort: AbortController;
   inflight: Map<string, { subtask: Sub; hire: Hire; handle: string; a2a_task_id: string | null }>; // null: /send in flight
   allow: Recipient[];
+  running?: Promise<void>; // the run (or a restore), so the unwind after a kill starts once its loops have stopped
+  unwinding?: Promise<void>; // returning what is still on chain after a kill or a failure
+  salvaging?: boolean; // events still record after the terminal status while money moves back
 };
+type Runtime = 'listeners' | 'abort' | 'inflight' | 'allow' | 'running' | 'unwinding' | 'salvaging';
+/** A task without its runtime parts: what SQLite stores. */
+export type TaskDoc = Omit<Task, Runtime>;
 
 export const TERMINAL_TASK: TaskStatus[] = ['closed', 'cancelled', 'killed', 'failed'];
 export const isTerminal = (s: TaskStatus) => TERMINAL_TASK.includes(s);
@@ -44,13 +57,13 @@ export function persistWith(fn: ((t: Task) => void) | null) { persist = fn; }
 export const saveTask = (t: Task) => persist?.(t);
 
 /** The task without its runtime parts, ready to store. */
-export function toDoc(t: Task) {
-  const { listeners: _l, abort: _a, inflight: _i, allow: _w, ...doc } = t;
+export function toDoc(t: Task): TaskDoc {
+  const { listeners: _l, abort: _a, inflight: _i, allow: _w, running: _r, unwinding: _u, salvaging: _s, ...doc } = t;
   return doc;
 }
 
 /** A stored task with fresh runtime parts. */
-export function fromDoc(doc: Omit<Task, 'listeners' | 'abort' | 'inflight' | 'allow'>): Task {
+export function fromDoc(doc: TaskDoc): Task {
   // Tasks saved before owners existed have none; they stay out of every account's list.
   return { ...doc, owner: doc.owner ?? null, listeners: new Set(), abort: new AbortController(), inflight: new Map(), allow: [] };
 }
@@ -75,9 +88,13 @@ export function setPlan(t: Task, plan: Plan) {
   saveTask(t);
 }
 
-/** Append and broadcast. Nothing is emitted after the terminal task_status event, so SSE can end on it. */
-export function emit(t: Task, type: EventType, data: any, subtask_id?: string) {
-  if (isTerminal(t.status)) return;
+/**
+ * Append and broadcast. Nothing is emitted after the terminal task_status event, so SSE can end on it, except what
+ * still moves money (`late`, or while t.salvaging): the unwind after a kill or failure, a payment found later. Those
+ * reach the stored history (replay, snapshot) but not an SSE stream that already ended.
+ */
+export function emit(t: Task, type: EventType, data: any, subtask_id?: string, late = false) {
+  if (isTerminal(t.status) && !late && !t.salvaging) return;
   const e: RookEvent = { seq: t.events.length + 1, ts: now(), task_id: t.id, ...(subtask_id ? { subtask_id } : {}), type, data };
   t.events.push(e);
   for (const fn of t.listeners) fn(e);
@@ -117,7 +134,8 @@ export function snapshot(t: Task, ledger: Ledger) {
       accepted: s.accepted && { hire_id: s.accepted.hire_id, agent_handle: s.accepted.agent_handle },
       hires: s.hires, evaluations: s.evaluations,
     })),
-    receipts: t.receipts,
+    // a2a_task_id, attestation_hash, payment_tx and receipt_tx with their explorer links (null until known, and in simulation)
+    receipts: t.receipts.map((r) => ({ payment_explorer_url: null, receipt_explorer_url: null, ...r })),
     ledger: ledger.view(t.id) ?? t.ledger_saved ?? null,
     final_result: t.final_result,
     llm_cost: {

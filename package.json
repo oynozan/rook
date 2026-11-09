@@ -6,6 +6,7 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "dev": "pnpm --filter @rook/services dev",
+    "live": "pnpm --filter @rook/services dev --live",
     "web": "pnpm --filter @rook/web dev",
     "rook": "pnpm --filter @rook/services --silent rook",
     "test": "pnpm --filter @rook/services test",

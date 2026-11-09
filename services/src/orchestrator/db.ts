@@ -5,10 +5,9 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { bigintReplacer } from '../shared/http.ts';
-import type { Task } from './store.ts';
+import type { TaskDoc } from './store.ts';
 
-/** A task without its runtime parts (listeners, abort signal, in-flight hires, payee allowlist). */
-export type TaskDoc = Omit<Task, 'listeners' | 'abort' | 'inflight' | 'allow'>;
+export type { TaskDoc }; // a task without its runtime parts (listeners, abort signal, in-flight hires, payee allowlist)
 
 const SCHEMA_VERSION = 1;
 

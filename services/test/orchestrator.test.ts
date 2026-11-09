@@ -147,6 +147,9 @@ test('re-hire after a failed verdict with a top-up, skip a FAILED agent, close w
   assert.equal(s.subtasks[0].rehire_count, 1);
   assert.equal(s.subtasks[1].rehire_count, 0);
   assert.ok(s.receipts.every((r: any) => /^[0-9a-f]{64}$/.test(r.payment_hash) && r.payment_tx === null));
+  // Same receipt shape as chain mode, with no transactions and no explorer links in simulation.
+  assert.ok(s.receipts.every((r: any) => /^a2a-/.test(r.a2a_task_id) && r.attestation_hash && r.receipt_tx === null
+    && r.payment_explorer_url === null && r.receipt_explorer_url === null));
 
   const receiptSum = s.receipts.reduce((x: bigint, r: any) => x + BigInt(r.amount_atomic), 0n);
   const L = s.ledger;

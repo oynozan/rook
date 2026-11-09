@@ -1,9 +1,9 @@
 // Planner service: POST /plan, POST /self-do, POST /aggregate. docs/agentic-system.md sections 5, 7, 11.
 // Reaches the market only through the market gateway (section 9).
-import { config } from '../shared/config.ts';
+import { config, MAX_PROMPT_CHARS } from '../shared/config.ts';
 import { HttpError, bigintReplacer, call, serve, type Running } from '../shared/http.ts';
 import { AggregateRequest, PlanRequest, SelfDoRequest, type AgentSummary, type AggregateResult, type LlmCall, type Plan, type X402Config } from '../shared/types.ts';
-import { share } from '../shared/money.ts';
+import { formatUsdc, share } from '../shared/money.ts';
 import { applySelection, buildPlan, filterSearch, type QuoteResult } from './plan.ts';
 import { aggregate, draft, select, selfDo } from './prompts.ts';
 import { agentOf, isMerged } from './canned.ts';
@@ -20,6 +20,9 @@ const FOUND_SHOWN = 8; // agents reported per subtask; the search can return mor
 async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {}): Promise<Plan> {
   const req = PlanRequest.parse(body);
   const budget = BigInt(req.budget_atomic);
+  // Same limits as the orchestrator, checked again before any paid LLM call.
+  if (req.prompt.length > MAX_PROMPT_CHARS) throw new HttpError(400, `prompt is ${req.prompt.length} characters; the limit is ${MAX_PROMPT_CHARS}`);
+  if (budget > config.maxBudgetAtomic) throw new HttpError(400, `budget is above ROOK_MAX_BUDGET_USDC (${formatUsdc(config.maxBudgetAtomic)} USDC)`);
   const calls: LlmCall[] = [];
 
   const { draft: d } = await llmStep(calls, () => draft(req.prompt, budget, budget - share(budget, req.reserve_share)));

@@ -1,12 +1,14 @@
 // Orchestrator HTTP API (docs/agentic-system.md section 8.1). No side effects on import.
+import { createHash, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
-import { config } from '../shared/config.ts';
-import { bigintReplacer, call, HttpError, serve, type Ctx, type Running } from '../shared/http.ts';
-import { parseUsdc } from '../shared/money.ts';
-import type { Plan, RookEvent } from '../shared/types.ts';
+import { config, MAX_PROMPT_CHARS } from '../shared/config.ts';
+import { bigintReplacer, call, HttpError, serve, type Ctx, type Routes, type Running } from '../shared/http.ts';
+import { formatUsdc, parseUsdc } from '../shared/money.ts';
+import type { Plan, RookEvent, X402Config } from '../shared/types.ts';
+import { attack } from './attack.ts';
 import { createChainLedger } from './chain-ledger.ts';
 import { createLedger, type Ledger } from './ledger.ts';
-import { kill, runTask } from './runner.ts';
+import { kill, restoreTask, runTask, SHUTDOWN } from './runner.ts';
 import { openStore } from './db.ts';
 import { emit, fromDoc, isTerminal, newTask, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, type Task } from './store.ts';
 
@@ -54,6 +56,19 @@ async function planWithProgress(t: Task): Promise<Plan> {
   }
 }
 
+const digest = (s: string) => createHash('sha256').update(s).digest();
+/** With ROOK_SERVICE_TOKEN set, every route needs `x-rook-token` (constant-time compare); 401 otherwise. */
+function guard(routes: Routes): Routes {
+  const token = config.serviceToken;
+  if (!token) return routes;
+  const want = digest(token);
+  return Object.fromEntries(Object.entries(routes).map(([k, h]) => [k, (ctx: Ctx) => {
+    const got = ctx.req.headers['x-rook-token'];
+    if (typeof got !== 'string' || !timingSafeEqual(digest(got), want)) throw new HttpError(401, 'missing or wrong x-rook-token');
+    return h(ctx);
+  }]));
+}
+
 export async function start(port = config.ports.orchestrator): Promise<Running> {
   const tasks = new Map<string, Task>();
   const chain = config.ledger === 'chain' ? createChainLedger() : null;
@@ -64,38 +79,60 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     if (!t) throw new HttpError(404, `no task ${id}`);
     return t;
   };
-  // The web app passes the signed-in account as `owner`; someone else's task looks like no task at all. Callers that
-  // pass no owner (the CLI, on this machine) act on any task: the orchestrator only listens on localhost.
+  // The web app passes the signed-in account as `owner` (body, or ?owner= on a GET); someone else's task looks like no
+  // task at all. Callers that pass no owner (the CLI) act on any task: the orchestrator listens on localhost only, and
+  // with ROOK_SERVICE_TOKEN set only callers holding the token (the web server, the CLI) reach it.
   const owned = (id: string, owner: unknown) => {
     const t = get(id);
     if (typeof owner === 'string' && t.owner !== owner) throw new HttpError(404, `no task ${id}`);
     return t;
   };
 
-  // With ROOK_DB set, tasks survive restarts. A task that was mid-run cannot pick up where it left off (its in-flight
-  // hires and payment authorizations lived in memory), so it is marked failed with the reason. A plan waiting for
-  // approval carries on, and so does a chain-mode task waiting for its funding transaction.
+  // With ROOK_DB set, tasks survive restarts. A plan waiting for approval carries on, and so does a chain-mode task
+  // waiting for its funding transaction. A chain-mode task bound to a contract task is rebuilt from the contract before
+  // the API listens, then resumed (or, killed or failed with money still on chain, unwound). Any other task that was
+  // mid-run is marked failed: a sim-ledger task's balances lived in memory only.
   const db = config.dbPath ? openStore(config.dbPath) : null;
   if (db) {
     for (const doc of db.load()) tasks.set(doc.id, fromDoc(doc));
-    persistWith((t) => { if (tasks.has(t.id)) db.save({ ...toDoc(t), ledger_saved: ledger.view(t.id) ?? t.ledger_saved ?? null }); });
+    persistWith((t) => {
+      if (!tasks.has(t.id)) return;
+      if (chain) t.chain = chain.binding(t.id) ?? t.chain ?? null; // contract task, sub-accounts, outstanding authorizations
+      db.save({ ...toDoc(t), ledger_saved: ledger.view(t.id) ?? t.ledger_saved ?? null });
+    });
+    const resume: (() => Promise<void>)[] = [];
     for (const t of tasks.values()) {
-      const waiting = t.status === 'planned' || (chain !== null && t.status === 'approved');
-      if (isTerminal(t.status) || waiting) continue;
-      const was = t.status;
-      t.error = `Rook's services restarted while this task was ${was}, so it stopped there. Nothing more will be spent on it.`;
+      const waiting = t.status === 'planned' || (chain !== null && t.status === 'approved' && !t.chain);
+      if (waiting || t.status === 'closed' || t.status === 'cancelled') continue;
+      if (chain && t.chain && !(t.ledger_saved as { closed?: boolean } | undefined)?.closed) {
+        const next = await restoreTask(chain, t);
+        if (next) resume.push(next);
+        continue;
+      }
+      if (isTerminal(t.status)) continue;
+      t.error = `Rook's services restarted while this task was ${t.status}, so it stopped there. ${chain
+        ? 'It has no contract task on record, so nothing of it is on chain to resume.'
+        : 'Its simulated ledger lived in memory only, so the run cannot resume; no real money was involved.'}`;
       emit(t, 'error', { message: t.error });
       setStatus(t, 'failed');
     }
-    console.log(`[orchestrator] ${tasks.size} task${tasks.size === 1 ? '' : 's'} loaded from ${config.dbPath}`);
+    for (const go of resume) void go().catch((e) => console.error('[orchestrator] resume after restart', e));
+    console.log(`[orchestrator] ${tasks.size} task${tasks.size === 1 ? '' : 's'} loaded from ${config.dbPath}${resume.length ? `, ${resume.length} resumed from the chain` : ''}`);
   }
 
-  const running = await serve('orchestrator', {
+  // Chain mode: a killed or failed task returns its money after the terminal status; its stream stays open until then.
+  // ponytail: a closeTask that keeps failing leaves the stream open until the client goes; the errors still stream.
+  const moving = (t: Task) => chain !== null && chain.contractTaskOf(t.id) !== null && ledger.view(t.id)?.closed === false;
+  let chainCfg: { contract_id: string | null; usdc: string | null } | null = null;
+  const running = await serve('orchestrator', guard({
     'POST /tasks': async ({ body }) => {
       const b = CreateBody.parse(body ?? {});
+      if (b.prompt.length > MAX_PROMPT_CHARS) throw new HttpError(400, `prompt is ${b.prompt.length} characters; the limit is ${MAX_PROMPT_CHARS}`);
       let budget: bigint;
       try { budget = parseUsdc(b.budget_usdc); } catch (e: any) { throw new HttpError(400, e.message); }
       if (budget <= 0n) throw new HttpError(400, 'budget_usdc must be positive');
+      const max = config.maxBudgetAtomic;
+      if (budget > max) throw new HttpError(400, `budget ${formatUsdc(budget)} USDC is above this Rook's limit of ${formatUsdc(max)} USDC (ROOK_MAX_BUDGET_USDC)`);
       const t = newTask(b.prompt, budget, b.reserve_share ?? 0.2, b.owner ?? null);
       tasks.set(t.id, t);
       saveTask(t);
@@ -120,16 +157,29 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       return taskView(t);
     },
 
-    /** Which market, model and ledger this orchestrator runs with, so a client can label things honestly. No secrets. */
-    'GET /mode': () => ({ market: config.market, llm: config.llm, ledger: config.ledger, paying: config.ledger === 'chain' }),
+    /**
+     * Which market, model and ledger this orchestrator runs with, so a client can label things honestly. No secrets.
+     * `network` is 'sim' unless the ledger is the chain; `simulated`: any part is (show "simulation, no money moves").
+     */
+    'GET /mode': async () => {
+      if (chain && !chainCfg) {
+        chainCfg = await call(`${config.urls.chainGateway}/config`).then((c: any) => ({ contract_id: c.contract_id ?? null, usdc: c.usdc ?? null }), () => null);
+      }
+      return {
+        market: config.market, llm: config.llm, ledger: config.ledger, network: chain ? config.nearNetwork : 'sim',
+        contract_id: chain ? chainCfg?.contract_id ?? (config.contractId || null) : null, usdc: chain ? chainCfg?.usdc ?? null : null,
+        paying: chain !== null, simulated: config.simulated,
+      };
+    },
 
+    // An owner sees only their own tasks; a caller naming no owner (the CLI) sees every task.
     'GET /tasks': ({ query }) => ({
       tasks: [...tasks.values()]
         .filter((t) => !query.has('owner') || t.owner === query.get('owner'))
         .map(({ id, status, prompt, created_at }) => ({ id, status, prompt, created_at })),
     }),
 
-    'GET /tasks/:id': ({ params }) => snapshot(get(params.id), ledger),
+    'GET /tasks/:id': ({ params, query }) => snapshot(owned(params.id, query.get('owner')), ledger),
 
     'POST /tasks/:id/approve': async ({ params, body }) => {
       const t = owned(params.id, body?.owner);
@@ -153,7 +203,9 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
 
     /** Chain mode: the human's ft_transfer_call created contract task `contract_task_id`; check it matches the plan, then run. */
     'POST /tasks/:id/funded': async ({ params, body }) => {
-      const t = get(params.id);
+      const t = owned(params.id, body?.owner);
+      // The web app binds a funding transfer for the signed-in account only, so a task with an owner needs it named.
+      if (t.owner !== null && body?.owner !== t.owner) throw new HttpError(403, `task ${t.id} belongs to a signed-in account: /funded must name it as owner`);
       if (!chain) throw new HttpError(409, 'only with ROOK_LEDGER=chain');
       if (t.status !== 'approved') throw new HttpError(409, `task is ${t.status}, funded needs approved`);
       const cid = typeof body?.contract_task_id === 'string' ? body.contract_task_id : '';
@@ -172,6 +224,8 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
           ct.reserve !== want.reserve && `reserve ${ct.reserve} is not ${want.reserve}`,
           JSON.stringify(ct.caps) !== JSON.stringify(want.caps) && `caps ${JSON.stringify(ct.caps)} are not the plan's ${JSON.stringify(want.caps)}`,
           (ct.status !== 'Open' || ct.killed) && `contract task is ${ct.killed ? 'killed' : ct.status}`,
+          // A signed-in owner binds only a contract task their own wallet funded, never someone else's matching one.
+          t.owner !== null && ct.funder !== t.owner && `it was funded by ${ct.funder}, not by the task owner ${t.owner}`,
           subtasks.length > 0 && 'contract task already has funded subtasks',
         ].filter(Boolean);
         if (bad.length) throw new HttpError(409, `contract task ${cid} does not match the approved plan: ${bad.join('; ')}`);
@@ -197,17 +251,27 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       if (isTerminal(t.status)) throw new HttpError(409, `task is already ${t.status}`);
       kill(ledger, t);
       if (!chain) return taskView(t);
-      const cid = chain.contractTaskOf(t.id);
-      return { ...taskView(t), human_action: cid ? `The signer refuses new payments. To stop funding on chain too, the contract owner calls kill_task: near contract call-function as-transaction ${config.contractId || '<contract>'} kill_task json-args '{"task_id":"${cid}"}' prepaid-gas '30 Tgas' attached-deposit '0 NEAR' sign-as <owner> network-config ${config.nearNetwork} sign-with-keychain send` : null };
+      const cmd = chain.ownerKillCommand(t.id);
+      return { ...taskView(t), human_action: cmd ? `The signer refuses new payments and Rook returns what the sub-accounts hold. To stop the task on the contract too, the contract owner calls kill_task: ${cmd}` : null };
     },
 
-    'GET /tasks/:id/events': (ctx) => events(ctx, get(ctx.params.id)),
-  }, port);
+    /**
+     * Security demo (`rook attack`): replays the injected deliverable's demands against the ledger's refusal paths on a
+     * sandbox copy of this task's books (attack.ts). Enabled in every mode: it only reaches refusals, never money.
+     */
+    'POST /tasks/:id/attack': async ({ params, body }) => {
+      const t = owned(params.id, body?.owner);
+      const allow = t.allow.length ? t.allow : (await call<X402Config>(`${config.urls.marketGateway}/x402`)).recipients ?? [];
+      return { task_id: t.id, status: t.status, ledger: config.ledger, ...attack(t, allow) };
+    },
+
+    'GET /tasks/:id/events': (ctx) => events(ctx, owned(ctx.params.id, ctx.query.get('owner')), moving),
+  }), port);
 
   return {
     ...running,
     close: async () => {
-      for (const t of tasks.values()) if (!isTerminal(t.status)) t.abort.abort(new Error('orchestrator shutting down'));
+      for (const t of tasks.values()) if (!isTerminal(t.status)) t.abort.abort(new Error(SHUTDOWN)); // restore depends on it
       await running.close();
       persistWith(null);
       db?.close();
@@ -234,22 +298,28 @@ async function fundingInstructions(t: Task) {
   }
   const cfg = await call(`${config.urls.chainGateway}/config`);
   return {
-    network: cfg.network, contract_id: cfg.contract_id, usdc: cfg.usdc, funder: cfg.owner, amount_atomic: t.budget_atomic,
+    // `owner`: the contract owner, the only account the contract takes create_task from (`funder` kept for older clients).
+    network: cfg.network, contract_id: cfg.contract_id, usdc: cfg.usdc, owner: cfg.owner, funder: cfg.owner, amount_atomic: t.budget_atomic,
     msg: JSON.stringify({ create_task: { reserve_bps: want.reserve_bps, caps: want.caps } }),
   };
 }
 
-/** SSE: replay after Last-Event-ID (or ?after=), then stream; end after the terminal task_status event. */
-function events(ctx: Ctx, t: Task) {
+/**
+ * SSE: replay after Last-Event-ID (or ?after=), then stream; end after the terminal task_status event, or in chain
+ * mode once the money a killed or failed task held is back (`moving` false). A payment_tx the indexer finds after that
+ * is in the snapshot, not the stream.
+ */
+function events(ctx: Ctx, t: Task, moving: (t: Task) => boolean) {
   const after = Number(ctx.req.headers['last-event-id'] ?? ctx.query.get('after') ?? 0) || 0;
   const res = ctx.res;
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
   const write = (e: RookEvent) => res.write(`id: ${e.seq}\nevent: ${e.type}\ndata: ${JSON.stringify(e, bigintReplacer)}\n\n`);
   for (const e of t.events) if (e.seq > after) write(e);
-  if (isTerminal(t.status)) { res.end(); return; }
+  if (isTerminal(t.status) && !moving(t)) { res.end(); return; }
   const fn = (e: RookEvent) => {
     write(e);
-    if (e.type === 'task_status' && isTerminal(e.data.to)) { t.listeners.delete(fn); res.end(); }
+    // setStatus emits before it sets t.status, so the terminal event itself is read from the event.
+    if ((isTerminal(t.status) || (e.type === 'task_status' && isTerminal(e.data.to))) && !moving(t)) { t.listeners.delete(fn); res.end(); }
   };
   t.listeners.add(fn);
   res.on('close', () => t.listeners.delete(fn));

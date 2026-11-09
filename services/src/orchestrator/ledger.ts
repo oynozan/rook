@@ -45,8 +45,6 @@ export interface Ledger {
   kill(task_id: string): void;
   holds(task_id: string): boolean;
   view(task_id: string): LedgerView | null;
-  /** Chain only: what a payment must leave in the sub-account (an empty one can never return its leftover). */
-  minLeft?: bigint;
   /** Chain only: writes the receipt on the contract. */
   recordReceipt?(task_id: string, n: number, receipt: Receipt): Promise<ReceiptEvidence>;
 }

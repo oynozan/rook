@@ -1,5 +1,7 @@
 // Task and subtask state machines and the hiring loop (docs/agentic-system.md sections 8.2 to 8.8).
 // Agent messages and artifacts are data: they only go to the evaluator and the aggregator, never steer this loop.
+// In chain mode a run survives a restart: restoreTask() rebuilds the books from the contract and runTask() resumes,
+// skipping what is done and polling hires whose payment header was out; unwind() returns what a stopped task holds.
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { cannedAggregate, agentOf, isMerged } from '../planner/canned.ts';
@@ -8,15 +10,19 @@ import { call } from '../shared/http.ts';
 import { formatUsdc } from '../shared/money.ts';
 import {
   TERMINAL, type A2AState, type A2ATask, type AcceptsRow, type AggregateResult, type Candidate, type Evaluation,
-  type GatewayResult, type LlmCall, type Part, type Receipt, type X402Config,
+  type GatewayResult, type LlmCall, type Part, type TaskStatus, type X402Config,
 } from '../shared/types.ts';
+import type { ChainLedger } from './chain-ledger.ts';
 import { LedgerError, type Ledger, type Recipient } from './ledger.ts';
-import { emit, now, setStatus, setSub, type Hire, type Sub, type Task } from './store.ts';
+import { emit, isTerminal, now, setStatus, setSub, type Hire, type ReceiptView, type Sub, type Task } from './store.ts';
 
 const gw = (path: string) => config.urls.marketGateway + path;
 const msg = (e: any) => e?.message ?? String(e);
 /** LLM calls a failed planner or evaluator request already paid for (they come back in its 502 body). */
 const paidCalls = (e: any): LlmCall[] => e?.body?.details?.llm_calls ?? [];
+const onChain = (l: Ledger): l is ChainLedger => 'bind' in l;
+/** The abort reason of an orchestrator shutdown: a chain-mode run is left as it is, to be restored on the next start. */
+export const SHUTDOWN = 'orchestrator shutting down';
 
 // ---- global in-flight limit (section 8.6), shared by every task in this process ----
 let inflight = 0;
@@ -75,22 +81,32 @@ const cancelTask = (handle: string, id: string) => call<{ ok: boolean }>(gw('/ca
 
 const authorizedNow = (ledger: Ledger, t: Task, s: Sub) => ledger.view(t.id)?.subtasks.find((x) => x.n === s.n)?.authorized_atomic != null;
 
+const ORDER: TaskStatus[] = ['draft', 'planned', 'approved', 'funded', 'running', 'aggregating', 'closing', 'closed'];
+/** Forward only: a run resumed after a restart passes the steps it already took without repeating their events. */
+const advance = (t: Task, to: TaskStatus) => { if (ORDER.indexOf(t.status) < ORDER.indexOf(to)) setStatus(t, to); };
+
 // ---- task ----
 
+/** Runs the task from approval to closed. Resumable: whatever the ledger and the subtasks already show done is skipped. */
 export async function runTask(ledger: Ledger, t: Task) {
   const signal = t.abort.signal;
+  const run = deferred();
+  t.running = run.promise;
   try {
+    // Books first (local in both modes): a failure from here on can always close the task and refund the funder.
+    if (!ledger.view(t.id)) await ledgerOp(t, 'createTask', null, () => ledger.createTask(t.id, t.funder!, BigInt(t.budget_atomic), t.reserve_share));
     const x402 = await call<X402Config>(gw('/x402'), undefined, { signal });
     signal.throwIfAborted();
     t.allow = x402.recipients ?? [];
-    await ledgerOp(t, 'createTask', null, () => ledger.createTask(t.id, t.funder!, BigInt(t.budget_atomic), t.reserve_share));
-    setStatus(t, 'funded');
+    advance(t, 'funded');
     for (const s of t.subtasks) {
-      if (s.self_do) continue;
+      if (s.self_do || ledger.view(t.id)!.subtasks.some((x) => x.n === s.n)) continue; // funded before a restart
       await ledgerOp(t, 'fundSubtask', s, () => ledger.fundSubtask(t.id, s.n, BigInt(s.cap_atomic)));
       setSub(t, s, 'funded');
     }
-    setStatus(t, 'running');
+    advance(t, 'running');
+    // A candidate being quoted when the services stopped has no hire: quote it again (quotes are free).
+    for (const s of t.subtasks) if (!s.final_outcome && s.tried.length && !s.hires.some((h) => h.agent_handle === s.tried.at(-1))) s.tried.pop();
 
     // One subtask's error (planner /self-do down, evaluator unreachable, a ledger refusal) abandons that subtask
     // only; the others keep their paid work. Only an abort (kill, shutdown) stops the whole task.
@@ -109,7 +125,7 @@ export async function runTask(ledger: Ledger, t: Task) {
     })));
     signal.throwIfAborted();
 
-    setStatus(t, 'aggregating');
+    advance(t, 'aggregating');
     const subtasks = t.subtasks.map((s) => ({
       id: s.id, title: s.title, status: s.final_outcome ?? s.status,
       agent_handle: s.accepted?.agent_handle, deliverable_text: s.accepted?.text,
@@ -128,8 +144,9 @@ export async function runTask(ledger: Ledger, t: Task) {
     signal.throwIfAborted();
     t.llm_calls.push(...(agg.llm_calls ?? []));
 
-    setStatus(t, 'closing');
-    const refunded = await ledgerOp(t, 'closeTask', null, () => ledger.closeTask(t.id));
+    advance(t, 'closing');
+    const before = ledger.view(t.id)!; // closed already when the services stopped right after close_task
+    const refunded = before.closed ? before.refunded_atomic : await ledgerOp(t, 'closeTask', null, () => ledger.closeTask(t.id));
     const view = ledger.view(t.id)!;
     t.final_result = {
       final_markdown: agg.final_markdown, attribution: agg.attribution ?? [],
@@ -138,60 +155,128 @@ export async function runTask(ledger: Ledger, t: Task) {
     emit(t, 'final', { ...t.final_result, spent_atomic: view.spent_atomic, refunded_atomic: refunded, reserve_used_atomic: view.reserve_used_atomic });
     setStatus(t, 'closed');
   } catch (e) {
-    if (t.status === 'killed') return; // kill already released and reported everything
-    emit(t, 'error', { message: msg(e) });
-    await salvage(ledger, t);
+    if (t.status === 'killed') return; // kill() unwinds once this run has stopped
+    if (onChain(ledger) && signal.reason?.message === SHUTDOWN) return; // left as it is: the next start restores and resumes it
     t.error = msg(e);
+    emit(t, 'error', { message: t.error });
     setStatus(t, 'failed');
+    await unwind(ledger, t, 'salvage');
+  } finally {
+    run.resolve();
   }
 }
 
-/** After a failure: cancel A2A tasks, release authorizations, return leftovers and refund, so no funds stay locked. */
-async function salvage(ledger: Ledger, t: Task) {
-  for (const f of t.inflight.values()) {
-    if (f.a2a_task_id) cancelBestEffort(f.handle, f.a2a_task_id);
-    f.hire.state = 'CANCELED'; f.hire.ended_at = now();
-  }
-  t.inflight.clear();
-  if (!ledger.view(t.id)) return;
-  for (const s of t.subtasks) {
-    const v = ledger.view(t.id)!.subtasks.find((x) => x.n === s.n);
-    if (!v) continue;
-    try {
-      if (v.authorized_atomic !== null) await ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n, 'now'));
-      if (v.returned_atomic === null) await ledgerOp(t, 'returnLeftover', s, () => ledger.returnLeftover(t.id, s.n));
-    } catch (e) { emit(t, 'error', { message: `salvage ${s.id}: ${msg(e)}` }, s.id); }
-  }
-  try { await ledgerOp(t, 'closeTask', null, () => ledger.closeTask(t.id)); } catch (e) { emit(t, 'error', { message: `salvage close: ${msg(e)}` }); }
+/** How a stopped hire's authorization can be cleared: `terminal` when its A2A task ended unpaid or took CancelTask. */
+async function unpaidHow(hire: Hire | null): Promise<'terminal' | 'wait'> {
+  if (!hire?.a2a_task_id) return 'wait'; // the header may have reached the agent; its task id never came back
+  const r = await call<GatewayResult<{ task: A2ATask }>>(gw(`/task?handle=${encodeURIComponent(hire.agent_handle)}&id=${encodeURIComponent(hire.a2a_task_id)}`)).catch(() => null);
+  const state = r?.ok ? r.task.state : null;
+  if (state === 'REJECTED' || state === 'FAILED' || state === 'CANCELED') return 'terminal';
+  if (state === 'COMPLETED') return 'wait'; // delivered: its payment settles, so wait for it to land
+  return (await cancelTask(hire.agent_handle, hire.a2a_task_id)) ? 'terminal' : 'wait';
 }
 
-/** Kill switch (section 8.7). Synchronous, so no loop can emit between the ledger kill and the killed status. */
+/**
+ * Returns what a stopped task (killed, failed, or found stopped after a restart) still holds: clears each outstanding
+ * authorization (at once when the agent's task ended unpaid, else once it landed or expired; a payment that landed
+ * gets booked with a receipt), returns every funded sub-account (/return, or mark_empty at 0), then closes the task so
+ * the contract refunds the funder. Its events record after the terminal status. `afterRun`: wait for the run's loops.
+ */
+export async function unwind(ledger: Ledger, t: Task, why: string, afterRun = false): Promise<void> {
+  if (t.unwinding) return t.unwinding;
+  const p = (async () => {
+    await (afterRun ? t.running?.catch(() => {}) : null);
+    if (!ledger.view(t.id)) return;
+    t.salvaging = true;
+    const step = async (op: string, s: Sub | null, fn: () => bigint | object | Promise<bigint | object>) => {
+      try { return await ledgerOp(t, op, s, fn); } catch (e) { // a sim ledger refuses synchronously, so not .catch
+        emit(t, 'error', { message: `${why}, ${op}${s ? ` ${s.id}` : ''}: ${msg(e)}` }, s?.id);
+        return null;
+      }
+    };
+    const chain = onChain(ledger);
+    for (const f of t.inflight.values()) { f.hire.state = t.status === 'killed' ? 'KILLED' : 'CANCELED'; f.hire.ended_at ??= now(); }
+    t.inflight.clear();
+    await Promise.all(t.subtasks.map(async (s) => {
+      if (!authorizedNow(ledger, t, s)) return;
+      const hire = s.hires.at(-1) ?? null;
+      if (!chain && hire?.a2a_task_id) cancelBestEffort(hire.agent_handle, hire.a2a_task_id);
+      const how = chain ? await unpaidHow(hire) : 'now';
+      if (chain) emit(t, 'ledger', { op: 'clearing', n: s.n, how, agent_handle: hire?.agent_handle ?? null, expires_at: hire?.expires_at ?? null }, s.id);
+      const r = await step('release', s, () => ledger.release(t.id, s.n, how));
+      if (r && typeof r === 'object' && 'settled' in r && hire) { // it landed anyway: paid, so it gets a receipt
+        hire.paid = true; hire.state = 'OUTCOME_UNKNOWN'; hire.ended_at ??= now();
+        if (!t.receipts.some((x) => x.hire_id === hire.id)) await writeReceipt(ledger, t, s, hire, null);
+      }
+    }));
+    for (const s of t.subtasks) {
+      if (s.self_do || ledger.view(t.id)!.subtasks.find((x) => x.n === s.n)?.returned_atomic !== null) continue;
+      if ((await step('returnLeftover', s, () => ledger.returnLeftover(t.id, s.n))) !== null) setSub(t, s, 'returned');
+    }
+    if (!ledger.view(t.id)!.closed) await step('closeTask', null, () => ledger.closeTask(t.id));
+  })();
+  t.unwinding = p;
+  try { await p; } finally { t.salvaging = false; if (t.unwinding === p) t.unwinding = undefined; }
+}
+
+/**
+ * Kill switch (section 8.7). Synchronous, so no loop can emit between the ledger kill and the killed status. In chain
+ * mode the funds then come back (unwind); the contract's own kill_task is the owner's call, which the event says.
+ */
 export function kill(ledger: Ledger, t: Task) {
   ledger.kill(t.id);
-  emit(t, 'ledger', { op: 'kill' });
+  const chain = onChain(ledger) && ledger.contractTaskOf(t.id) !== null ? ledger : null;
+  emit(t, 'ledger', { op: 'kill', ...(chain ? {
+    human_action: `Rook signs no more payments for this task and returns what its sub-accounts hold. Stopping it on the contract too is the owner's call: ${chain.ownerKillCommand(t.id)}`,
+  } : {}) });
   t.abort.abort();
   const sending = new Set<number>();
   for (const f of t.inflight.values()) {
-    // A /send still in flight has its payment header out: its hire1 waits for the answer, cancels, then releases.
+    // A /send still in flight has its payment header out: its hire1 waits for the answer and cancels.
     if (!f.a2a_task_id) { sending.add(f.subtask.n); continue; }
     cancelBestEffort(f.handle, f.a2a_task_id); f.hire.state = 'KILLED'; f.hire.ended_at = now();
   }
   t.inflight.clear();
-  for (const v of ledger.view(t.id)?.subtasks ?? []) {
-    if (v.authorized_atomic === null || sending.has(v.n)) continue;
-    const s = t.subtasks.find((x) => x.n === v.n) ?? null;
-    // 'now': released in Rook's books synchronously; on chain the signer keeps refusing until the header expires.
-    ledgerOp(t, 'release', s, () => ledger.release(t.id, v.n, 'now')).catch((e) => console.error('[orchestrator] kill release', e));
+  if (!onChain(ledger)) {
+    for (const v of ledger.view(t.id)?.subtasks ?? []) {
+      if (v.authorized_atomic === null || sending.has(v.n)) continue;
+      const s = t.subtasks.find((x) => x.n === v.n) ?? null;
+      ledgerOp(t, 'release', s, () => ledger.release(t.id, v.n, 'now')).catch((e) => console.error('[orchestrator] kill release', e));
+    }
   }
   setStatus(t, 'killed');
+  if (chain) void unwind(ledger, t, 'after kill', true).catch((e) => console.error('[orchestrator] unwind after kill', e));
+}
+
+/**
+ * Restart, chain mode, step 1 (before the API listens): rebuild Rook's books for `t` from the contract. Returns step 2,
+ * which finishes it: resume the run, or unwind what a killed or failed task still holds. Null: nothing left to do.
+ */
+export async function restoreTask(ledger: ChainLedger, t: Task): Promise<(() => Promise<void>) | null> {
+  const cid = t.chain!.contract_task_id;
+  let r: Awaited<ReturnType<ChainLedger['restore']>>;
+  try {
+    r = await ledger.restore(t.id, t.chain!, { funder: t.funder ?? '', budget: BigInt(t.budget_atomic), reserve_share: t.reserve_share, saved: t.ledger_saved });
+  } catch (e) {
+    emit(t, 'error', { message: `after a restart Rook could not rebuild contract task ${cid}: ${msg(e)}. Nothing was changed; start the services again once the chain gateway answers.` }, undefined, true);
+    return null;
+  }
+  for (const note of r.notes) emit(t, 'error', { message: `restore: ${note}` }, undefined, true);
+  if (isTerminal(t.status)) return r.status === 'Closed' ? null : () => unwind(ledger, t, 'after restart');
+  emit(t, 'ledger', { op: 'restored', contract_task_id: cid, contract_status: r.status });
+  if (r.killed) return async () => kill(ledger, t); // the owner killed it on the contract meanwhile
+  return () => runTask(ledger, t);
 }
 
 // ---- subtask ----
 
 async function runSubtask(ledger: Ledger, t: Task, s: Sub, done: Map<string, Deferred>) {
-  if (s.self_do) await selfDo(t, s, done);
+  if (s.final_outcome) done.get(s.id)!.resolve(); // finished before a restart
+  else if (s.self_do) await selfDo(t, s, done);
   else await hireLoop(ledger, t, s, done);
-  if (!s.self_do) await ledgerOp(t, 'returnLeftover', s, () => ledger.returnLeftover(t.id, s.n));
+  if (!s.self_do && ledger.view(t.id)?.subtasks.find((x) => x.n === s.n)?.returned_atomic === null) {
+    await ledgerOp(t, 'returnLeftover', s, () => ledger.returnLeftover(t.id, s.n));
+  }
   setSub(t, s, 'returned');
 }
 
@@ -210,30 +295,64 @@ function failedVerdict(s: Sub) {
 /** Every paid hire gets a receipt (8.8); verdict and attestation are null when it was never judged. */
 async function writeReceipt(ledger: Ledger, t: Task, s: Sub, hire: Hire, ev: Evaluation | null) {
   hire.verdict = ev?.verdict ?? null;
-  const receipt: Receipt = {
+  const receipt: ReceiptView = {
     id: `rc_${randomUUID().slice(0, 8)}`, task_id: t.id, subtask_id: s.id, hire_id: hire.id, agent_handle: hire.agent_handle,
-    a2a_task_id: hire.a2a_task_id, amount_atomic: hire.amount_atomic, verdict: hire.verdict,
+    a2a_task_id: hire.a2a_task_id, amount_atomic: hire.paid ? hire.amount_atomic : '0', verdict: hire.verdict,
     attestation_hash: ev?.attestation_hash ?? null, payment_hash: hire.payment_hash, payment_tx: null, receipt_tx: null,
+    payment_explorer_url: null, receipt_explorer_url: null,
   };
   t.receipts.push(receipt);
-  if (ledger.recordReceipt) { // chain: record_receipt on the contract fills receipt_tx
+  if (onChain(ledger)) { // record_receipt on the contract fills receipt_tx; the payment's tx comes from the indexer later
     try { Object.assign(receipt, await ledger.recordReceipt(t.id, s.n, receipt)); } catch (e) { emit(t, 'error', { message: `receipt on chain: ${msg(e)}` }, s.id); }
+    if (hire.paid && hire.pay_to) void findPayment(ledger, t, s, hire, receipt);
   }
   emit(t, 'receipt', receipt, s.id);
 }
 
+/** Fills payment_tx once the indexer shows the transfer (it lags); the hire was already booked from the balance. */
+async function findPayment(ledger: ChainLedger, t: Task, s: Sub, hire: Hire, receipt: ReceiptView) {
+  try {
+    const found = await ledger.paymentTx(t.id, s.n, { amount_atomic: receipt.amount_atomic, pay_to: hire.pay_to!, after: hire.started_at });
+    if (found) {
+      Object.assign(receipt, found);
+      emit(t, 'ledger', { op: 'payment_found', receipt_id: receipt.id, agent_handle: hire.agent_handle, ...found }, s.id, true);
+    } else {
+      emit(t, 'error', { message: `${hire.agent_handle}: the indexer does not show the payment transaction yet; the balance already showed the payment, so the receipt stands without payment_tx` }, s.id, true);
+    }
+  } catch (e) { emit(t, 'error', { message: `payment lookup for ${hire.agent_handle}: ${msg(e)}` }, s.id, true); }
+}
+
+/** After a restart: the subtask's last hire when it still needs its payment settled, its verdict or its receipt. */
+function unfinished(ledger: Ledger, t: Task, s: Sub): Hire | null {
+  const h = s.hires.at(-1);
+  if (!h || t.receipts.some((r) => r.hire_id === h.id)) return null;
+  return h.paid || authorizedNow(ledger, t, s) ? h : null;
+}
+
 async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Deferred>) {
   const signal = t.abort.signal;
+  const last = s.hires.at(-1), judged = last && t.receipts.find((r) => r.hire_id === last.id);
+  if (judged?.verdict === 'pass') { // passed just before a restart
+    s.accepted = { hire_id: last!.id, agent_handle: last!.agent_handle, text: last!.deliverable_text ?? '' };
+    return finish(t, s, 'passed', done);
+  }
+  let pending = unfinished(ledger, t, s);
   for (;;) {
     signal.throwIfAborted();
-    const c = s.candidates.find((x) => !s.tried.includes(x.handle)); // plan order = cheapest first
-    if (!c) return finish(t, s, 'abandoned', done);
-    s.tried.push(c.handle);
-    setSub(t, s, 'quoting');
-
-    const row = await quote(ledger, t, s, c);
-    if (!row) continue;
-    const hire = await hire1(ledger, t, s, c, row);
+    let hire: Hire | null;
+    if (pending) {
+      const h = pending;
+      pending = null;
+      hire = h.paid ? h : await resumeHire(ledger, t, s, h);
+    } else {
+      const c = s.candidates.find((x) => !s.tried.includes(x.handle)); // plan order = cheapest first
+      if (!c) return finish(t, s, 'abandoned', done);
+      s.tried.push(c.handle);
+      setSub(t, s, 'quoting');
+      const row = await quote(ledger, t, s, c);
+      if (!row) continue;
+      hire = await hire1(ledger, t, s, c, row);
+    }
     if (!hire) continue;
     if (hire.state === 'OUTCOME_UNKNOWN') { // counted as spent, nothing to judge; counts against the re-hire limit
       await writeReceipt(ledger, t, s, hire, null);
@@ -305,9 +424,8 @@ async function quote(ledger: Ledger, t: Task, s: Sub, c: Candidate): Promise<Acc
   }
   const v = ledger.view(t.id)!;
   const balance = v.subtasks.find((x) => x.n === s.n)!.balance_atomic;
-  const need = amount + (ledger.minLeft ?? 0n); // chain: a payment never empties the sub-account
-  if (need > balance) {
-    const short = need - balance;
+  if (amount > balance) {
+    const short = amount - balance;
     if (short > v.reserve_remaining_atomic) {
       rejectQuote(t, s, c.handle, `price ${formatUsdc(amount)} exceeds balance ${formatUsdc(balance)} and the reserve cannot cover the ${formatUsdc(short)} top-up`);
       return null;
@@ -324,6 +442,18 @@ async function quote(ledger: Ledger, t: Task, s: Sub, c: Candidate): Promise<Acc
     }
   }
   return row;
+}
+
+/** Ends the hire unpaid; true when the chain shows the payment landed anyway, and then it counts as paid. */
+async function endUnpaid(ledger: Ledger, t: Task, s: Sub, hire: Hire, how: 'terminal' | 'wait') {
+  const r = await ledgerOp(t, 'release', s, async () => {
+    const out = await ledger.release(t.id, s.n, how);
+    if (typeof out === 'object' && out.settled) { hire.paid = true; hire.state = 'OUTCOME_UNKNOWN'; hire.ended_at = now(); }
+    return out;
+  });
+  if (typeof r !== 'object' || !r.settled) return false;
+  emit(t, 'error', { message: `${hire.agent_handle}: the payment landed on chain although the hire ended unpaid; counted as spent` }, s.id);
+  return true;
 }
 
 /**
@@ -347,21 +477,13 @@ async function hire1(ledger: Ledger, t: Task, s: Sub, c: Candidate, row: Accepts
       await ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n, 'terminal'));
       throw signal.reason;
     }
-    const authAt = Date.now();
     const hire: Hire = {
       id: `h_${randomUUID().slice(0, 8)}`, subtask_id: s.id, agent_handle: c.handle, amount_atomic: auth.amount.toString(),
       payment_hash: auth.payment_hash, a2a_task_id: null, context_id: null, state: 'SENDING', paid: false,
       deliverable_text: null, parts: [], verdict: null, started_at: now(), ended_at: null,
+      pay_to: row.payTo, expires_at: new Date(Date.now() + row.maxTimeoutSeconds * 1000).toISOString(),
     };
     s.hires.push(hire);
-    /** Ends the hire unpaid; true when the chain shows the payment landed anyway, and then it counts as paid. */
-    const endUnpaid = async (how: 'terminal' | 'wait') => {
-      const r = await ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n, how));
-      if (typeof r !== 'object' || !r.settled) return false;
-      hire.paid = true; hire.state = 'OUTCOME_UNKNOWN'; hire.ended_at = now();
-      emit(t, 'error', { message: `${c.handle}: the payment landed on chain although the hire ended unpaid; counted as spent` }, s.id);
-      return true;
-    };
 
     // No abort signal on /send: once the request leaves, the payment header is out. Waiting for the answer lets a
     // kill still learn the task id, cancel it and record how the payment ended (kill() leaves this one to us).
@@ -376,61 +498,96 @@ async function hire1(ledger: Ledger, t: Task, s: Sub, c: Candidate, row: Accepts
     if (signal.aborted) {
       if (sent.ok) { hire.a2a_task_id = sent.task.id; hire.context_id = sent.task.context_id; cancelBestEffort(c.handle, sent.task.id); }
       hire.state = t.status === 'killed' ? 'KILLED' : 'CANCELED'; hire.ended_at = now();
-      // ponytail: released in Rook's books at once; on chain the header may still settle until it expires.
-      if (authorizedNow(ledger, t, s)) await ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n, 'now'));
+      // sim: released in Rook's books at once. chain: unwind clears it once it can no longer settle.
+      if (!onChain(ledger) && authorizedNow(ledger, t, s)) await ledgerOp(t, 'release', s, () => ledger.release(t.id, s.n, 'now'));
       throw signal.reason;
     }
     if (!sent.ok && sent.error.code === 'outcome_unknown') {
-      // The gateway saw a 502 and cannot tell whether the payment settled: count it as spent, never release it.
-      await ledgerOp(t, 'settle', s, () => ledger.settle(t.id, s.n), { agent_handle: c.handle, payment_hash: hire.payment_hash, outcome: 'unknown' });
-      hire.paid = true; hire.state = 'OUTCOME_UNKNOWN'; hire.ended_at = now();
+      // The gateway saw a 502 and cannot tell whether the payment settled: never release it as unpaid. In chain mode
+      // settle waits for the chain's answer; booked unpaid (0) only when the payment never showed.
+      const paid = await ledgerOp(t, 'settle', s, async () => {
+        const a = await ledger.settle(t.id, s.n);
+        if (a > 0n) { hire.paid = true; hire.state = 'OUTCOME_UNKNOWN'; } else hire.state = 'SEND_FAILED';
+        hire.ended_at = now();
+        return a;
+      }, { agent_handle: c.handle, payment_hash: hire.payment_hash, outcome: 'unknown' });
+      if (paid === 0n) { rejectQuote(t, s, c.handle, `send failed after a 502 and no payment showed on chain: ${sent.error.message}`); return null; }
       emit(t, 'error', { message: `send to ${c.handle}: ${sent.error.message}; counted as spent` }, s.id);
       return hire;
     }
     if (!sent.ok) {
       // A 402 means the agent refused the payment: nothing can settle. Anything else waits for the expiry on chain,
       // and a payment that landed meanwhile (the agent accepted it before the connection failed) counts as paid.
-      if (await endUnpaid(sent.error.code === 402 ? 'terminal' : 'wait')) return hire;
+      if (await endUnpaid(ledger, t, s, hire, sent.error.code === 402 ? 'terminal' : 'wait')) return hire;
       hire.state = 'SEND_FAILED'; hire.ended_at = now();
       rejectQuote(t, s, c.handle, `send failed: ${sent.error.code} ${sent.error.message}`);
       return null;
     }
 
     hire.a2a_task_id = sent.task.id; hire.context_id = sent.task.context_id; hire.state = sent.task.state;
-    t.inflight.set(hire.id, { subtask: s, hire, handle: c.handle, a2a_task_id: sent.task.id });
     emit(t, 'hire_sent', { hire_id: hire.id, agent_handle: c.handle, a2a_task_id: sent.task.id, amount_atomic: hire.amount_atomic, payment_hash: hire.payment_hash }, s.id);
     setSub(t, s, 'working');
-
-    let final = await poll(t, s, c, hire, sent.task, Date.now() + (c.sla_seconds + config.paymentGraceS) * 1000);
-    if (!final) {
-      // Past sla + grace. The header stays redeemable until the authorization expires, so the next candidate is
-      // authorized only once CancelTask is accepted or that expiry has passed (the agent may still complete and charge).
-      const cancelled = await cancelTask(c.handle, sent.task.id);
-      signal.throwIfAborted();
-      const expiresAt = authAt + row.maxTimeoutSeconds * 1000;
-      if (!cancelled && expiresAt - Date.now() > 1000) {
-        final = await poll(t, s, c, hire, { ...sent.task, state: hire.state as A2AState }, expiresAt);
-      }
-    }
-    t.inflight.delete(hire.id);
-    hire.ended_at = now();
-
-    if (!final) {
-      hire.state = 'TIMEOUT';
-      emit(t, 'a2a_state', { hire_id: hire.id, agent_handle: c.handle, a2a_task_id: sent.task.id, state: 'TIMEOUT' }, s.id);
-      return (await endUnpaid('wait')) ? hire : null;
-    }
-    if (final.state !== 'COMPLETED') { // REJECTED, FAILED, CANCELED: terminal and unpaid
-      return (await endUnpaid('terminal')) ? hire : null;
-    }
-    await ledgerOp(t, 'settle', s, () => ledger.settle(t.id, s.n), { agent_handle: c.handle, payment_hash: hire.payment_hash });
-    hire.paid = true;
-    hire.parts = final.artifacts.flatMap((a) => a.parts ?? []);
-    hire.deliverable_text = hire.parts.filter((p) => typeof p.text === 'string').map((p) => p.text).join('\n\n');
-    return hire;
+    return await follow(ledger, t, s, c, hire, sent.task, Date.now() + (c.sla_seconds + config.paymentGraceS) * 1000);
   } finally {
     release();
   }
+}
+
+/** After a restart: finish a hire whose payment header was out, by polling its A2A task again (or waiting out the header). */
+async function resumeHire(ledger: Ledger, t: Task, s: Sub, hire: Hire): Promise<Hire | null> {
+  const c = s.candidates.find((x) => x.handle === hire.agent_handle);
+  await acquire(t.abort.signal);
+  try {
+    if (!hire.a2a_task_id || !c) { // the header may have reached the agent, but its task id never came back
+      if (await endUnpaid(ledger, t, s, hire, 'wait')) return hire;
+      hire.state = 'SEND_FAILED'; hire.ended_at = now();
+      return null;
+    }
+    setSub(t, s, 'working');
+    const state = (['SUBMITTED', 'WORKING', ...TERMINAL] as string[]).includes(hire.state) ? hire.state as A2AState : 'WORKING';
+    const slaEnd = Date.parse(hire.started_at) + (c.sla_seconds + config.paymentGraceS) * 1000;
+    return await follow(ledger, t, s, c, hire, { id: hire.a2a_task_id, context_id: hire.context_id, state, artifacts: [] }, slaEnd);
+  } finally {
+    release();
+  }
+}
+
+/** Polls a sent hire to its end, then settles its payment or ends it unpaid (a fresh hire, or one resumed after a restart). */
+async function follow(ledger: Ledger, t: Task, s: Sub, c: Candidate, hire: Hire, sentTask: A2ATask, slaEnd: number): Promise<Hire | null> {
+  const signal = t.abort.signal;
+  t.inflight.set(hire.id, { subtask: s, hire, handle: c.handle, a2a_task_id: sentTask.id });
+  let final = await poll(t, s, c, hire, sentTask, slaEnd);
+  if (!final) {
+    // Past sla + grace. The header stays redeemable until the authorization expires, so the next candidate is
+    // authorized only once CancelTask is accepted or that expiry has passed (the agent may still complete and charge).
+    const cancelled = await cancelTask(c.handle, sentTask.id);
+    signal.throwIfAborted();
+    const expiresAt = Date.parse(hire.expires_at ?? '');
+    if (!cancelled && expiresAt - Date.now() > 1000) {
+      final = await poll(t, s, c, hire, { ...sentTask, state: hire.state as A2AState }, expiresAt);
+    }
+  }
+  t.inflight.delete(hire.id);
+  hire.ended_at = now();
+
+  if (!final) {
+    hire.state = 'TIMEOUT';
+    emit(t, 'a2a_state', { hire_id: hire.id, agent_handle: c.handle, a2a_task_id: sentTask.id, state: 'TIMEOUT' }, s.id);
+    return (await endUnpaid(ledger, t, s, hire, 'wait')) ? hire : null;
+  }
+  if (final.state !== 'COMPLETED') { // REJECTED, FAILED, CANCELED: terminal and unpaid
+    return (await endUnpaid(ledger, t, s, hire, 'terminal')) ? hire : null;
+  }
+  // Delivered: keep the deliverable before settling, so the settle event stores it with the payment.
+  hire.parts = final.artifacts.flatMap((a) => a.parts ?? []);
+  hire.deliverable_text = hire.parts.filter((p) => typeof p.text === 'string').map((p) => p.text).join('\n\n');
+  const paid = await ledgerOp(t, 'settle', s, async () => {
+    const a = await ledger.settle(t.id, s.n);
+    hire.paid = a > 0n;
+    return a;
+  }, { agent_handle: c.handle, payment_hash: hire.payment_hash });
+  if (paid === 0n) emit(t, 'error', { message: `${c.handle} delivered, but its payment never showed on chain before the authorization expired; booked unpaid` }, s.id);
+  return hire;
 }
 
 const hasContent = (task: A2ATask) => task.artifacts?.some((a) => a.parts?.some((p) => (p.text ?? '').trim() || p.url || p.raw));

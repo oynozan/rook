@@ -2,19 +2,23 @@
 //   rook plan "<prompt>" --budget <usdc> [--reserve 0.2]
 //   rook run "<prompt>" --budget <usdc> [--reserve 0.2] [--yes]
 //   rook approve <id> [--yes] | funded <id> <contract_task_id> | status <id> | watch <id> | kill <id> | list
+//   rook attack <id> [--send-refused-tx] | mode
+// Sends x-rook-token from ROOK_SERVICE_TOKEN when it is set (the orchestrator then requires it).
 import { createInterface } from 'node:readline/promises';
 import { config } from '../src/shared/config.ts';
-import { call } from '../src/shared/http.ts';
+import { call, HttpError } from '../src/shared/http.ts';
 import { formatUsdc } from '../src/shared/money.ts';
 
 const USAGE = `usage:
   rook plan "<prompt>" --budget <usdc> [--reserve 0.2]
   rook run "<prompt>" --budget <usdc> [--reserve 0.2] [--yes]
   rook approve <task_id> [--yes]
-  rook funded <task_id> <contract_task_id>     (ROOK_LEDGER=chain, after your funding transfer)
+  rook funded <task_id> <contract_task_id> [--owner <account>]   (ROOK_LEDGER=chain, after the funding transfer)
   rook status <task_id>
   rook watch <task_id>
   rook kill <task_id>
+  rook attack <task_id> [--send-refused-tx]   (security demo: replays an injected deliverable's demands; every one is refused)
+  rook mode
   rook list`;
 
 // ---- output helpers ----
@@ -52,7 +56,21 @@ function parse(argv: string[]) {
   return { pos, flags };
 }
 
-const api = (path: string, body?: unknown, method?: string) => call(config.urls.orchestrator + path, body, { method });
+const authHeaders = (): Record<string, string> => (process.env.ROOK_SERVICE_TOKEN ? { 'x-rook-token': process.env.ROOK_SERVICE_TOKEN } : {});
+
+/** JSON call to the orchestrator. ponytail: shared/http.ts call() takes no headers, so this repeats it with the token. */
+async function api(path: string, body?: unknown, method?: string): Promise<any> {
+  const m = method ?? (body === undefined ? 'GET' : 'POST');
+  const r = await fetch(config.urls.orchestrator + path, {
+    method: m, headers: { ...authHeaders(), ...(body === undefined ? {} : { 'content-type': 'application/json' }) },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await r.text();
+  let data: any;
+  try { data = text ? JSON.parse(text) : undefined; } catch { data = text; }
+  if (!r.ok) throw new HttpError(r.status, data?.error ?? `${m} ${path} -> HTTP ${r.status}`, data);
+  return data;
+}
 
 // ---- plan printing ----
 function critLine(c: any) {
@@ -141,7 +159,7 @@ async function watch(id: string, skipPlan = false) {
   for (let attempt = 0; ; attempt++) {
     let ended = false;
     try {
-      const r = await fetch(`${config.urls.orchestrator}/tasks/${id}/events`, { headers: last ? { 'last-event-id': String(last) } : {} });
+      const r = await fetch(`${config.urls.orchestrator}/tasks/${id}/events`, { headers: { ...authHeaders(), ...(last ? { 'last-event-id': String(last) } : {}) } });
       if (!r.ok) throw new Error(`events: HTTP ${r.status} ${await r.text()}`);
       const dec = new TextDecoder();
       let buf = '';
@@ -230,11 +248,17 @@ async function create(pos: string[], flags: Record<string, string | true>) {
   if (!prompt || typeof flags.budget !== 'string') throw new Error(USAGE);
   const body: any = { prompt, budget_usdc: flags.budget };
   if (typeof flags.reserve === 'string') body.reserve_share = Number(flags.reserve);
+  printMode(await api('/mode'));
   console.log(dim(`planning against ${config.urls.orchestrator} ...`));
   const task = await api('/tasks', body);
   printPlan(task);
   if (task.status !== 'planned') { process.exitCode = 1; return null; }
   return task;
+}
+
+function printMode(m: any) {
+  if (m.simulated) console.log(yellow(`SIMULATION, no real money moves (market ${m.market}, ledger ${m.ledger}, llm ${m.llm})`));
+  else console.log(`${alert(' LIVE ')} real agents paid in USDC on NEAR ${m.network}, contract ${m.contract_id}`);
 }
 
 /** NEAR AI spend of the simulator's agents (process total), or null when no simulator answers. */
@@ -272,6 +296,94 @@ async function runAndReport(id: string, simBefore: number | null) {
   }
 }
 
+// ---- attack (security demo, docs/x402-payments-plan.md step 5) ----
+type Outcome = { id: string; demand: string; call: string; outcome: 'refused' | 'NOT REFUSED' | 'not sent' | 'error'; reason: string };
+
+function printOutcomes(list: Outcome[]) {
+  for (const a of list) {
+    const tag = a.outcome === 'refused' ? green('REFUSED') : a.outcome === 'NOT REFUSED' ? alert(' NOT REFUSED ') : yellow(a.outcome);
+    console.log(`   (${a.id}) ${a.demand}\n       ${dim(a.call)}\n       ${tag} ${a.reason}`);
+  }
+  return list.every((a) => a.outcome !== 'NOT REFUSED');
+}
+
+async function attack(id: string, flags: Record<string, string | true>) {
+  const mode = await api('/mode');
+  const r = await api(`/tasks/${id}/attack`, {});
+  console.log(`${bold('rook attack')} ${r.task_id} (${r.status}), ledger ${mode.ledger}${mode.simulated ? dim(', simulation') : ''}\n`);
+  const inj = r.injected;
+  if (inj) {
+    console.log(`${bold('1. The injected deliverable')} from ${inj.agent_handle} (${inj.subtask_id})`);
+    // Flags read `<what>: '<quoted text>'`; the scanner quotes overlapping text, so show each kind once and the longest quote.
+    const quote = inj.flags.map((f: string) => f.slice(f.indexOf(':') + 1).trim()).sort((x: string, y: string) => y.length - x.length)[0];
+    console.log(`   ${alert(' SECURITY ALERT ')} ${inj.flags.map((f: string) => f.split(':')[0]).join(', ')}`);
+    console.log(`   ${red(short(quote, 220))}`);
+    console.log(`   evaluator verdict ${verdict(inj.verdict)}${inj.failed_criteria.length ? `, failed: ${inj.failed_criteria.join(', ')}` : ''} ${dim(`evaluation hash ${short(inj.attestation_hash, 16)}`)}`);
+    console.log(dim('   Agent text is data: the orchestrator never acts on it, so Rook itself never tries what it asks.'));
+  } else {
+    console.log(dim("1. No injected deliverable in this task's events (the simulator's sim-wallets-express writes one); replaying the demo's demands anyway."));
+  }
+  console.log(`\n${bold("2. Rook's ledger")} ${dim("(the run's ledger code, on a sandbox copy of this task's books; the task is not touched)")}`);
+  let ok = printOutcomes(r.attempts.map((a: any) => ({ ...a, outcome: a.refused ? 'refused' : 'NOT REFUSED' })));
+  console.log(dim(`   sandbox spent ${usdc(r.sandbox.spent_atomic)}: only ${r.target.agent_handle}'s own payment; invariant ${r.sandbox.invariant_holds ? 'holds' : 'BROKEN'}`));
+  if (mode.ledger === 'chain') ok = (await attackChain(id, r, flags)) && ok;
+  else console.log(dim('\n3. Signer and budget contract: not running (ROOK_LEDGER=sim). With ROOK_LEDGER=chain, rook attack sends these demands to them too.'));
+  if (ok) console.log(green('\nNothing was paid: every attempt was refused or not sent.'));
+  else { console.log(alert(' AN ATTEMPT WAS NOT REFUSED ')); process.exitCode = 1; }
+}
+
+/** ROOK_LEDGER=chain: the same demands to the real signer and contract, each sent only where a refusal is certain. */
+async function attackChain(id: string, r: any, flags: Record<string, string | true>) {
+  console.log(`\n${bold('3. Signer and budget contract')} ${dim('(the real services; nothing is sent where it could be accepted)')}`);
+  const snap = await api(`/tasks/${id}`);
+  const cid = snap.ledger?.contract_task_id, account = snap.ledger?.accounts?.[r.target.n];
+  // A finished task only: a /sign holds the subtask's signing slot, so it must never race a live hire.
+  if (!TERMINAL.includes(snap.task.status)) { console.log(yellow(`   not sent: the task is ${snap.task.status}; attack it once it is closed, failed or killed`)); return true; }
+  if (!cid || !account) { console.log(yellow('   not sent: this task was never funded on chain')); return true; }
+  const gw = config.urls.chainGateway;
+  const [{ task: ct, subtasks }, cfg] = await Promise.all([call(`${gw}/task/${cid}`), call(`${gw}/config`)]);
+  const cs = subtasks.find((s: any) => s.account_id === account);
+  if (!cs) { console.log(yellow(`   not sent: ${account} is not a subtask account of contract task ${cid}`)); return true; }
+  const killed = ct.killed || cfg.killed, out: Outcome[] = [];
+  const row = r.target.row, where = `${r.target.subtask_id} = contract ${cid}/${cs.n}, ${account}`;
+
+  const sign = async (id: string, demand: string, x: any, skip: string | null) => {
+    const o: Outcome = { id, demand, call: `signer /sign ${where}: ${usdc(x.amount)} to ${x.payTo}`, outcome: 'not sent', reason: skip ?? '' };
+    out.push(o);
+    if (skip) return;
+    try {
+      await call(`${config.urls.signer}/sign`, { task_id: cid, n: cs.n, account_id: account, row: x });
+      Object.assign(o, { outcome: 'NOT REFUSED', reason: 'the signer signed it; the header was discarded here, never sent' });
+      await call(`${config.urls.signer}/expire`, { task_id: cid, n: cs.n, terminal_unpaid: true }).catch(() => {});
+    } catch (e: any) {
+      Object.assign(o, e instanceof HttpError && e.status === 409 ? { outcome: 'refused', reason: e.message } : { outcome: 'error', reason: e?.message ?? String(e) });
+    }
+  };
+  await sign('a', `pay ${r.target.agent_handle} again, the same ${usdc(row.amount)}`, row,
+    killed || cs.status !== 'Funded' ? null : `subtask ${cs.n} is still Funded and the task is not killed on chain, so a replay could be a valid payment; kill the task first`);
+  await sign('b', `send ${usdc(row.amount)} to evil-collector.near`, { ...row, payTo: 'evil-collector.near' }, null);
+  // More than the sub-account can ever hold: its cap plus the task's whole reserve.
+  const over = (BigInt(r.target.cap_atomic) + BigInt(r.target.reserve_atomic) + 1n).toString();
+  await sign('c', `pay ${usdc(over)}, above the cap plus the whole reserve`, { ...row, amount: over }, null);
+
+  const d: Outcome = { id: 'd', demand: `fund ${r.target.subtask_id} again after the kill`, call: `chain-gateway /top-up: top_up(${cid}, ${cs.n}, 0.000001 USDC) from the orchestrator key`, outcome: 'not sent', reason: '' };
+  out.push(d);
+  if (!killed) {
+    d.reason = `the contract task is not killed on chain; the owner sends kill_task first: near contract call-function as-transaction ${cfg.contract_id} kill_task json-args '{"task_id":"${cid}"}' prepaid-gas '30 Tgas' attached-deposit '0 NEAR' sign-as ${cfg.owner} network-config ${cfg.network} sign-with-keychain send`;
+  } else if (flags['send-refused-tx'] !== true) {
+    d.reason = 'a real transaction the contract must refuse (gas only, under 0.005 NEAR, no USDC); pass --send-refused-tx to send it';
+  } else {
+    try {
+      await call(`${gw}/top-up`, { task_id: cid, n: cs.n, amount_atomic: '1' });
+      Object.assign(d, { outcome: 'NOT REFUSED', reason: 'top_up succeeded on a killed task' });
+    } catch (e: any) {
+      const tx = e?.body?.details;
+      Object.assign(d, tx?.tx_hash ? { outcome: 'refused', reason: `${e.message} (tx ${tx.tx_hash} ${tx.explorer_url ?? ''})` } : { outcome: 'error', reason: e?.message ?? String(e) });
+    }
+  }
+  return printOutcomes(out);
+}
+
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
   const { pos, flags } = parse(rest);
@@ -293,7 +405,7 @@ async function main() {
     case 'funded': {
       if (!pos[1]) throw new Error(USAGE);
       const simBefore = await simLlmUsd();
-      const t = await api(`/tasks/${needId()}/funded`, { contract_task_id: pos[1] });
+      const t = await api(`/tasks/${needId()}/funded`, { contract_task_id: pos[1], ...(typeof flags.owner === 'string' ? { owner: flags.owner } : {}) });
       console.log(`task ${t.id} funded by contract task ${t.contract_task_id}; running`);
       await runAndReport(id, simBefore);
       break;
@@ -306,6 +418,8 @@ async function main() {
       if (t.human_action) console.log(yellow(t.human_action));
       break;
     }
+    case 'attack': await attack(needId(), flags); break;
+    case 'mode': { const m = await api('/mode'); printMode(m); console.log(JSON.stringify(m, null, 2)); break; }
     case 'list': {
       const { tasks } = await api('/tasks');
       if (!tasks.length) console.log('no tasks');
@@ -320,6 +434,9 @@ async function main() {
 
 main().catch((e: any) => {
   const refused = e?.cause?.code === 'ECONNREFUSED' || /fetch failed/.test(e?.message ?? '');
-  console.error(red(refused ? `cannot reach the orchestrator at ${config.urls.orchestrator}; is \`pnpm dev\` running?` : e?.message ?? String(e)));
+  const msg = refused ? `cannot reach the orchestrator at ${config.urls.orchestrator}; is \`pnpm dev\` running?`
+    : e?.status === 401 ? 'the orchestrator requires its service token: set ROOK_SERVICE_TOKEN in this shell to the value the services run with'
+    : e?.message ?? String(e);
+  console.error(red(msg));
   process.exitCode = 1;
 });

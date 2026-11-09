@@ -132,8 +132,7 @@ export async function start(port = config.ports.signer): Promise<Running> {
         if (amount <= 0n) refuse('amount must be positive');
         const balance = await ftBalance(row.asset, account_id);
         if (amount > balance) refuse(`amount ${amount} exceeds the sub-account balance ${balance}`);
-        // NEP-141 refuses a 0 transfer, so an emptied sub-account could never return and close_task would fail for good.
-        if (amount === balance) refuse(`amount ${amount} would empty the sub-account, which then cannot return; top up first`);
+        // Spending to exactly 0 is fine: the contract's mark_empty closes out an empty sub-account (no 0 `return`).
 
         const public_key = key.getPublicKey().toString();
         const nonce = (await viewAccessKey(account_id, public_key)).nonce + 1n;
@@ -144,7 +143,7 @@ export async function start(port = config.ports.signer): Promise<Running> {
         const payment_hash = createHash('sha256').update(header).digest('hex');
         auths.set(slot, { payment_hash, expires_at_block, account_id, public_key, nonce: nonce.toString() });
         save(); // on disk before the header leaves
-        return { header, payment_hash, expires_at_block };
+        return { header, payment_hash, expires_at_block, nonce: nonce.toString() };
       } finally {
         busy.delete(slot);
       }
@@ -158,6 +157,7 @@ export async function start(port = config.ports.signer): Promise<Running> {
       const slot = `${body?.task_id}/${Number(body?.n)}`;
       const out = auths.get(slot);
       if (!out) return { cleared: false, outstanding: false };
+      // The nonce shows the delegate ran, not that its ft_transfer succeeded: the orchestrator books by the balance.
       const landed = (await viewAccessKey(out.account_id, out.public_key)).nonce >= BigInt(out.nonce);
       if (!landed && body?.terminal_unpaid !== true) {
         const { height } = await latestBlock();
@@ -183,8 +183,8 @@ export async function start(port = config.ports.signer): Promise<Running> {
       if (out && (await latestBlock()).height <= out.expires_at_block) refuse(`subtask ${n} has an outstanding authorization`);
       const { cfg, key } = await subtask(task_id, n, account_id);
       const amount = await ftBalance(cfg.usdc, account_id);
-      // NEP-141 refuses a 0 transfer, so the contract can never mark this subtask Returned (/sign avoids getting here).
-      if (amount === 0n) refuse(`${account_id} is empty: nothing to return, and the subtask stays Funded on the contract`);
+      // NEP-141 refuses a 0 transfer: an empty sub-account is closed out with the contract's mark_empty (chain-gateway).
+      if (amount === 0n) refuse(`${account_id} is empty: nothing to return; chain-gateway /mark-empty marks it returned`);
       const msg = JSON.stringify({ return: { task_id, n } });
       // ponytail: 50 Tgas (0.005 NEAR at 100 Mgas/gas price) fits the sub-account's 0.01 NEAR; measure on testnet (plan step 2).
       const r = await sendTx(account_id, key, cfg.usdc, [functionCall('ft_transfer_call', { receiver_id: contract, amount: amount.toString(), msg }, 50, 1n)]);

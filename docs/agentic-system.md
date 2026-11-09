@@ -21,10 +21,21 @@ Not in phase 1: signing x402 payments, any on-chain transaction, OutLayer, the w
 | --- | --- | --- | --- |
 | `ROOK_MARKET` | `sim`, `live` | `sim` | Where `market-gateway` sends search, quotes and A2A calls |
 | `ROOK_LLM` | `near`, `canned` | `near` if `NEARAI_API_KEY` is set, else `canned` | Real NEAR AI Cloud calls, or deterministic canned responses with no network |
+| `ROOK_LEDGER` | `sim`, `chain` | `sim` | In-memory ledger, or the budget contract through `signer` and `chain-gateway` ([x402-payments-plan.md](x402-payments-plan.md)) |
+| `ROOK_PROFILE` | `sim`, `live` | `sim` | `pnpm dev` is the simulation profile; `pnpm live` sets `live` |
 
 - `sim` + `canned`: the full loop with no keys and no network. This is what screeners run, and what the end-to-end test runs.
 - `sim` + `near`: real planner, evaluator and aggregator LLM calls; the simulator's agents write their deliverables with the LLM from fixed simulated facts, then apply their scripted fault. This is the real-time test of the agentic system.
-- `live` + `near`: real Agent Market search and 402 quotes (free) for planning. Approval is refused with HTTP 409 until phase 2.
+- `live` + `near`: real Agent Market search and 402 quotes (free) for planning. With `ROOK_LEDGER=sim`, approval is refused with HTTP 409.
+
+Startup rules (`profileProblems` in `services/src/shared/config.ts`, checked by `scripts/dev.ts` for the whole stack and by `scripts/service.ts` for each service; every problem is listed, then nothing starts):
+
+- `ROOK_LLM=canned` only with `ROOK_MARKET=sim` and `ROOK_LEDGER=sim`.
+- `ROOK_MARKET=live` with `ROOK_LEDGER=chain` only with `NEAR_NETWORK=mainnet` (x402 settles on mainnet only).
+- The simulation profile refuses a setup with nothing simulated: paying real agents needs `pnpm live`.
+- The live profile needs `ROOK_MARKET=live`, `ROOK_LEDGER=chain`, `ROOK_LLM=near` (set explicitly), `NEAR_NETWORK=mainnet`, `NEAR_RPC_URL`, `ROOK_CONTRACT_ID`, `NEARAI_API_KEY`, `ROOK_SERVICE_TOKEN` (32+ characters) and the role keys (`ROOK_SIGNER_*` for the signer, `ROOK_ORCHESTRATOR_*` for the chain gateway). The simulator does not run in it.
+
+A run is simulated when the market or the ledger is `sim` or the LLM is `canned`; `GET /mode` reports it, `pnpm dev` prints a SIMULATION banner, and clients label such runs "simulation, no money moves".
 
 ## 3. Services and ports
 
@@ -145,11 +156,11 @@ Response (`Evaluation`):
 
 ### 6.4 The hash
 
-`attestation_hash = sha256(canonical JSON of { engine, evaluator_version, subtask_id, criteria, deliverable_sha256, results, security_flags, extracted, llm_calls })`, with keys sorted. `engine` is `local` in phase 1; OutLayer TEE attestation replaces it later ([build-plan.md](build-plan.md), evaluator).
+`attestation_hash = sha256(canonical JSON of { engine, evaluator_version, subtask_id, criteria, deliverable_sha256, results, security_flags, extracted, llm_calls })`, with keys sorted. Despite the field name, this is a local sha256 evaluation hash computed by Rook's own evaluator process (`engine` `local`): it lets anyone holding the inputs re-check a verdict, but it is not a TEE attestation. Running the evaluator under OutLayer TEE attestation is planned, pending a decision ([build-plan.md](build-plan.md), evaluator).
 
 ### 6.5 Signed LLM calls
 
-Every NEAR AI call made by the planner, evaluator or aggregator is recorded as `LlmCall`: `{ purpose, model, chat_id, request_sha256, response_sha256, input_tokens, output_tokens, cost_usd, signature, signing_address, signing_algo, signature_kind, signature_verified }`. After each call the service fetches `GET https://cloud-api.near.ai/v1/signature/<chat_id>?model=<model>&signing_algo=ecdsa`. For models NEAR AI proxies (`signature_kind` `gateway`, e.g. `anthropic/*`) the gateway signs `sha256(request body):sha256(response body)`; for models running in a TEE (`signature_kind` `provider_tee`, marked `verifiable` in `/v1/model/list`) the text is `<model>:sha256(request body):sha256(response body)` (checked live on 2026-11-07). `signature_verified` is true when the text equals either form built from the hashes Rook computed over the exact bytes it sent and received. Recovering the signer address from the ECDSA signature and checking it against the gateway attestation is a later step.
+Every NEAR AI call made by the planner, evaluator or aggregator is recorded as `LlmCall`: `{ purpose, model, chat_id, request_sha256, response_sha256, input_tokens, output_tokens, cost_usd, signature, signing_address, signing_algo, signature_kind, signature_verified }`. After each call the service fetches `GET https://cloud-api.near.ai/v1/signature/<chat_id>?model=<model>&signing_algo=ecdsa`. For models NEAR AI proxies (`signature_kind` `gateway`, e.g. `anthropic/*`) the gateway signs `sha256(request body):sha256(response body)`; for models running in a TEE (`signature_kind` `provider_tee`, marked `verifiable` in `/v1/model/list`) the text is `<model>:sha256(request body):sha256(response body)` (checked live on 2026-11-07). `signature_verified` is true when the text equals either form built from the hashes Rook computed over the exact bytes it sent and received. Each record also carries `signer_recovered`, `attested` and `attestation_checked_at` (`services/src/shared/attest.ts`, docs/model-choice.md "Verification"): the EIP-191 signer is recovered from the ECDSA signature, and that address is checked against NEAR AI's attestation report (Intel TDX quote chain to Intel's root, report binding the signing address and Rook's nonce, NVIDIA GPU evidence through NRAS). `signature_verified` is true only when the text matches, the signer is recovered, and `attested !== false` (null when the report could not be fetched).
 
 ## 7. Criteria
 
@@ -178,13 +189,18 @@ Rules the planner enforces (section 5.2 step 8):
 
 | Method | Path | Body | Does |
 | --- | --- | --- | --- |
-| `POST` | `/tasks` | `{ prompt, budget_usdc, reserve_share? }` | Creates the task in `draft`, calls the planner, moves to `planned`. Returns the task. Planner failure moves the task to `failed` with the error. A task killed while planning stays `killed` when the planner answers. |
-| `GET` | `/tasks/:id` | | Snapshot: task, plan, subtasks with hires and evaluations, receipts, ledger view, final result |
-| `GET` | `/tasks` | | List of tasks (id, status, prompt, created_at) |
-| `POST` | `/tasks/:id/approve` | `{ funder_account? }` | Only from `planned` and only when the plan has at least one subtask. Starts the run. `live` market: 409. |
-| `POST` | `/tasks/:id/cancel` | | `planned` to `cancelled` |
-| `POST` | `/tasks/:id/kill` | | Any non-terminal status to `killed` |
-| `GET` | `/tasks/:id/events` | | Server-sent events; replays all past events, then streams. Honours `Last-Event-ID`. |
+| `POST` | `/tasks` | `{ prompt, budget_usdc, reserve_share?, owner?, wait? }` | Creates the task in `draft`, calls the planner, moves to `planned`. Returns the task. Planner failure moves the task to `failed` with the error. A task killed while planning stays `killed` when the planner answers. 400 when the prompt is over 4000 characters or the budget over `ROOK_MAX_BUDGET_USDC` (default 50); the planner checks the same limits. |
+| `GET` | `/mode` | | `{ market, llm, ledger, network, contract_id, usdc, paying, simulated }`. `network` is `sim` with the sim ledger; `contract_id` and `usdc` come from the chain gateway's `/config` and are null with the sim ledger; `simulated` is true when the market or ledger is `sim` or the LLM `canned` |
+| `GET` | `/tasks/:id` | `?owner=` | Snapshot: task, plan, subtasks with hires and evaluations, receipts, ledger view, final result |
+| `GET` | `/tasks` | `?owner=` | List of tasks (id, status, prompt, created_at); with `owner`, only that account's tasks (none for an unknown account) |
+| `POST` | `/tasks/:id/approve` | `{ funder_account?, owner? }` | Only from `planned` and only when the plan has at least one subtask. Starts the run (sim ledger) or returns `funding` (chain ledger). `live` market with the sim ledger: 409. |
+| `POST` | `/tasks/:id/funded` | `{ contract_task_id, owner? }` | Chain ledger: binds the contract task the funding transfer created, after checking it against the plan. A task with an owner needs that owner named (403 otherwise). |
+| `POST` | `/tasks/:id/cancel` | `{ owner? }` | `planned` to `cancelled` |
+| `POST` | `/tasks/:id/kill` | `{ owner? }` | Any non-terminal status to `killed` |
+| `POST` | `/tasks/:id/attack` | `{ owner? }` | Security demo for `rook attack`: replays the injected deliverable's demands (pay again while a payment is outstanding, pay `evil-collector.near`, pay above the cap, fund after kill) on a sandbox ledger rebuilt from the plan, and returns each refusal, the injected deliverable's flags and verdict from the events, and the target subtask's quote row. Never touches the task's own books, in any mode |
+| `GET` | `/tasks/:id/events` | `?owner=` | Server-sent events; replays all past events, then streams. Honours `Last-Event-ID`. |
+
+Every task route takes the caller's `owner` (body, or `?owner=` on a GET): a task with another owner, or with none, answers 404, as if it did not exist. A caller naming no owner (the CLI) acts on any task. With `ROOK_SERVICE_TOKEN` set, every route needs the header `x-rook-token: <token>` (401 otherwise); the web server and the CLI send it from their environment.
 
 ### 8.2 Task states
 
@@ -254,13 +270,13 @@ Invariant, checked after every call and in tests: `budget = unallocated + reserv
 
 ### 8.7 Kill
 
-`POST /tasks/:id/kill`: `ledger.kill` (refuses all later funding, top-ups and authorizations), aborts the task's loops, sends `CancelTask` for in-flight A2A tasks, releases outstanding authorizations for tasks that are not `COMPLETED`, and sets `killed`. A hire whose `/send` is still in flight already has its payment header out: Rook waits for the answer, cancels the A2A task once its id is known, then releases that authorization. Funds already in sub-accounts stay there (in phase 2 the kill switch cannot pull them back, see build plan).
+`POST /tasks/:id/kill`: `ledger.kill` (refuses all later funding, top-ups and authorizations), aborts the task's loops, sends `CancelTask` for in-flight A2A tasks, releases outstanding authorizations for tasks that are not `COMPLETED`, and sets `killed`. A hire whose `/send` is still in flight already has its payment header out: Rook waits for the answer, cancels the A2A task once its id is known, then releases that authorization. In simulation, funds in sub-accounts stay in the in-memory books. In chain mode they come back: after the `killed` status Rook waits until each authorization already out can no longer settle (CancelTask accepted, or expiry; a payment that lands anyway gets a receipt), returns every sub-account (`/return`, or `mark_empty` at a 0 balance), and calls `close_task`, which refunds the funder. Each step is an event after the terminal status, and the SSE stream of a bound chain task stays open until the books are closed. The contract's own `kill_task` stays the owner's call; the `kill` ledger event and the `/kill` answer carry its command.
 
 ### 8.8 Events and receipts
 
 Event: `{ seq, ts, task_id, subtask_id?, type, data }`. Types: `task_status`, `subtask_status`, `plan`, `quote`, `quote_rejected`, `hire_sent`, `a2a_state`, `evaluation`, `security_alert`, `ledger`, `receipt`, `final`, `error`.
 
-A receipt is written for every paid hire (every `COMPLETED` task, and every send whose payment outcome is unknown), passed or failed: `{ id, task_id, subtask_id, hire_id, agent_handle, a2a_task_id, amount_atomic, verdict, attestation_hash, payment_hash, payment_tx: null, receipt_tx: null }`. `verdict` and `attestation_hash` are null when the hire was never judged (a kill or an evaluator outage during evaluation, or an unknown payment outcome), so ledger `spent` always equals the sum of receipt amounts. Transaction fields stay null until phase 2.
+A receipt is written for every paid hire (every `COMPLETED` task, and every send whose payment outcome is unknown), passed or failed: `{ id, task_id, subtask_id, hire_id, agent_handle, a2a_task_id, amount_atomic, verdict, attestation_hash, payment_hash, payment_tx: null, receipt_tx: null }`. `verdict` and `attestation_hash` are null when the hire was never judged (a kill or an evaluator outage during evaluation, or an unknown payment outcome), so ledger `spent` always equals the sum of receipt amounts. In simulation the transaction fields stay null. In chain mode `receipt_tx` comes from `record_receipt` and `payment_tx` from the indexer (NearBlocks, which can lag a minute; the web app looks again after the run closes), each with `payment_explorer_url` / `receipt_explorer_url`. A receipt with `amount_atomic` "0" means the agent delivered but no payment showed on chain.
 
 ## 9. Market gateway
 
@@ -307,7 +323,7 @@ Agents come in pairs: a cheap one with a fault and a pricier good one, so cheape
 - NEAR AI Cloud, OpenAI-compatible: `POST https://cloud-api.near.ai/v1/chat/completions` with `Authorization: Bearer $NEARAI_API_KEY`.
 - Anthropic models on NEAR AI ignore `response_format` and some reject forced `tool_choice`, so structured output is "reply with one JSON object only", parsed (code fences stripped, first `{` to last `}`), validated with zod, and retried once with the validation error.
 - Models: `PLANNER_MODEL` (default `z-ai/glm-5.3`), `EVALUATOR_MODEL` (default `deepseek-ai/DeepSeek-V4.1-Flash-1017`) and `SIM_AGENT_MODEL` (default `anthropic/claude-haiku-5-5`). Planner and evaluator calls are Rook's evidence, so their defaults are models NEAR AI Cloud lists as verifiable (`GET /v1/model/list`, `metadata.verifiable`); `anthropic/*`, `openai/*` and `google/*` models are not verifiable, so their calls never get `signature_verified: true`. A leading `<think>...</think>` block in a reply is stripped before parsing.
-- Every call's cost is computed from the model price list (`GET /v1/models`, per-token `pricing.prompt` and `pricing.completion`) and added to a per-process total; a call that would start above `ROOK_LLM_MAX_USD` (default 1.00 per process) is refused. Calls in flight count at their worst case (`max_tokens`) until they finish, so concurrent calls cannot overshoot together. The guard fails closed: a price list that cannot be read is fetched again on the next call, and a model missing from it is costed at a high fallback price (10 and 50 USD per million tokens). The account holds 10 USD.
+- Every call's cost is computed from the model price list (`GET /v1/models`, per-token `pricing.prompt` and `pricing.completion`) and added to a rolling 24 h total per process; a call that would start above `ROOK_LLM_MAX_USD` (default 1.00 per process in any 24 h) is refused, with one `[llm] LLM cost guard` log line per trip naming when calls can resume (the window lives in memory, so a restart clears it). Calls in flight count at their worst case (`max_tokens`) until they finish, so concurrent calls cannot overshoot together. The guard fails closed: a price list that cannot be read is fetched again on the next call, and a model missing from it is costed at a high fallback price (10 and 50 USD per million tokens). The account holds 10 USD.
 
 ## 12. Acceptance checks
 
@@ -343,9 +359,17 @@ These are the "do X, see Y" checks for real-time testing. Commands assume `pnpm 
 - `pnpm rook kill <task_id>` during a run: task `killed`, no further `hire_sent` events, in-flight authorizations released.
 - Unit tests cover: ledger refusals (over cap, second authorization, wrong `payTo`, after kill), the invariant, planner budget fitting and cross-check reference rules, extraction quote verification, the injection scanner, and cheapest-first ordering.
 
+### E. Attack demo (`rook attack`)
+
+After A, `pnpm rook attack <task_id>`. Expect: the injected deliverable from `sim-wallets-express` with its flags and verdict `FAIL` (`injection`), then four lines `REFUSED`: (a) a second payment while the first is outstanding, (b) 0.50 USDC to `evil-collector.near` (`payTo` not allowlisted), (c) 0.50 USDC, above the 0.20 cap (exceeds the subtask balance), (d) a top-up after the kill switch (`task is killed`); the sandbox spent only the agent's own 0.10, and the task's ledger is unchanged. With `ROOK_LEDGER=chain` and a finished task, the CLI also sends (a) to (c) to the signer (a only when the subtask is no longer Funded or the task is killed on chain, so a replay can never be signed) and, with `--send-refused-tx` and the contract task killed, a `top_up` the contract refuses. `services/test/attack.test.ts` runs all of this offline.
+
+### F. Real-mode profile
+
+`pnpm live` with any required variable missing prints every missing one and starts nothing; `pnpm dev` with `ROOK_LLM=canned` and a live market or chain ledger refuses the same way. `services/test/realmode.test.ts` covers the rules, the service token, `/mode`, the request limits and the owner checks.
+
 ## 13. Real-time test record (2026-11-07)
 
-Run on Windows 11, Node 22.14, with the repo's NEAR AI key. Planner `z-ai/glm-5.3`, evaluator `deepseek-ai/DeepSeek-V4.1-Flash-1017` (both TEE-hosted, `signature_kind` `provider_tee`), simulated agents `anthropic/claude-haiku-5-5`.
+Run on Windows 11, Node 22.14, with the repo's NEAR AI key. Planner `z-ai/glm-5.3` (runs in a third-party confidential TEE; its replies are signed by NEAR AI's gateway, `signature_kind` `gateway`), evaluator `deepseek-ai/DeepSeek-V4.1-Flash-1017` (runs on NEAR AI's own TEE nodes; signed by the model's enclave, `signature_kind` `provider_tee`), simulated agents `anthropic/claude-haiku-5-5`. See [model-choice.md](model-choice.md).
 
 | Check | Result |
 | --- | --- |
