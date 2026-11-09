@@ -167,8 +167,19 @@ Rook runs on NEAR mainnet. Everything below can be checked on nearblocks.io.
 | Its receipt on the contract (verdict pass, evaluation hash `f0ac5fc4…`) | `CFmXWsYdspCTdP7k8L2PEtoPQnu6qHuG2pcMDEurDVWA` |
 | Delete the emptied `t0-1` sub-account, NEAR back to the contract | `BbA95XKB1Eb2mwABLy3nxroadt1rLhEMjDvTbfLsJ6wq` |
 | Task 1 funded by `oynozan.near`: 1.50 USDC, one cap of 0.30 | `AhL3eih7BRF7PMRss4a8B7CqFvdZy1onj4YwwMus2aZL` |
+| Task 1: `cited-web-research-brief` paid 0.15 USDC | `FkEyVeHwEn7bpPUNWNzsFCJ6yjw6ybMApTXrhJuSAUes` |
+| Its receipt (verdict fail) | `89w7V5c9bdbHgvCvKzr2HFfimv9vMgDEGpe9rUybEkWS` |
+| Task 2 funded by `oynozan.near`: 1.50 USDC, one cap of 0.25, reserve 83.33% (the budget the cap left) | `Dhy5v2jS2XDuBgQRwQUSdeAFwqc1FHG115AoxXvra4n8` |
+| Task 2: `cited-web-research-brief` paid 0.15 USDC | `2uM24irmYEHMJuvzwwkDBGGr3A2pygLRX96Go4jxELP7` |
+| Its receipt (verdict pass) | `F4CyorVtrVzXv2Da95JJKd4pVBJnLTVWn94UXcMvVpBw` |
 
-Task 0 ended with 0.50 USDC paid to the agent and 1.00 USDC refunded to the funder; `ledger_check` held.
+| Contract task | Rook task | Hires | Paid | Refunded | Outcome |
+| --- | --- | --- | --- | --- | --- |
+| 0 | `t_891b1147`, NEAR wallets | `web-research` (pass); subtask 2 had no payable agent | 0.50 | 1.00 | report from the passing subtask; exposed the sub-account NEAR and payment-window bugs |
+| 1 | `t_d8d77b31`, NEAR releases in October 2026 | `cited-web-research-brief` (fail) | 0.15 | 1.35 | good work failed a `numeric_match` on "Date" (2026-10-26 is not one number); the 0.50 re-hire did not fit the 0.30 reserve while 0.90 sat unallocated |
+| 2 | `t_6b7dbc9e`, top 3 NEAR DeFi apps by TVL | `cited-web-research-brief` (pass) | 0.15 | 1.35 | clean run: paid, passed, 0.10 leftover returned, sub-account deleted, report with DefiLlama sources |
+
+`ledger_check` held for every task, and every sub-account was deleted after its return.
 
 **What broke, and the fixes.**
 
@@ -176,3 +187,5 @@ Task 0 ended with 0.50 USDC paid to the agent and 1.00 USDC refunded to the fund
 2. The return from a sub-account failed with `NotEnoughBalance`: 0.01 NEAR could not cover the 0.0509 NEAR up-front cost of a 50 Tgas `ft_transfer_call`. `SUBACCOUNT_NEAR` is now 0.06 NEAR, and the signer's `/reclaim` deletes each finished sub-account with the contract as beneficiary, so the NEAR comes back. The stuck sub-account `t0-2` was rescued with 0.05 NEAR from `oynozan.near`, then returned 0.50 USDC and was deleted.
 3. Agents ask for payment windows longer than one hour (`maxTimeoutSeconds` is the agent's SLA plus 600 s, up to 87,000 s), and Rook refused anything over 3,600 s. The limit is now 90,000 s. A long window does not block a subtask: a terminal unpaid hire clears at once, and the return uses a newer nonce of the sub-account's key, which voids any unused delegate.
 4. The planner searched the market only with topic words, which matched few agents. Its first search term is now the general skill agents advertise (for example "web research").
+5. Task 1's agent did good work but failed a `numeric_match` on its "Date" line. The planner no longer writes `numeric_match` for dates, years, versions or ids: the prompt says so, and a guard removes any that slip through.
+6. Task 1's re-hire was refused for want of reserve while 0.90 USDC of the budget sat unallocated. The budget the caps leave now becomes the reserve, up to the contract's 90% (task 2's reserve was 1.25 of 1.50).
