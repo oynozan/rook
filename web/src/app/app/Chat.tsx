@@ -1634,6 +1634,9 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
     const edited = prompt.trim() !== old.prompt.trim() || !b.ok || b.atomic !== BigInt(old.budget_atomic);
     placed(out.id, prompt, budget, old.parent_id, old.id);
     setSending({ prompt: prompt.trim(), budget, id: out.id, note: edited ? 'Edited' : 'Sent again' });
+    // Focus was on the editor or the Send again button, both gone now: on to the composer (not on a phone, where that
+    // would open the keyboard over the plan being drafted).
+    if (!window.matchMedia('(max-width: 639px)').matches) requestAnimationFrame(() => document.querySelector<HTMLElement>('textarea[name="prompt"]')?.focus());
     return null;
   };
 
