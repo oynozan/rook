@@ -1,4 +1,4 @@
-// What a conversation offers on its messages: sending the newest one again, or editing it, in its place. Pure
+// What a conversation offers: sending its newest message again, or editing it, in its place; and deleting it. Pure
 // functions, so the tests use them. Run: npx tsx --test src/app/app/*.test.ts
 import { currentTask, waitReason } from './conversations';
 import type { TaskSummary } from './orchestrator';
@@ -69,4 +69,42 @@ export function redoRefusal(status: number, message: string): string | null {
   if (/^Only the newest message/.test(message)) return 'This conversation has a newer message now, so only that one can be edited or sent again.';
   if (/^This message's plan was approved/.test(message)) return message;
   return null;
+}
+
+/**
+ * Every task of the conversation `id` is in, as the orchestrator deletes it (services/src/orchestrator/store.ts
+ * conversationTasks): along parent links both ways, and across messages sent again or edited.
+ */
+export function conversationIds(tasks: TaskSummary[], id: string): string[] {
+  const byId = new Map(tasks.map((t) => [t.id, t]));
+  const linked = new Map<string, TaskSummary[]>(); // id -> the tasks that follow it or supersede it
+  for (const t of tasks) for (const to of [t.parent_id, t.supersedes]) if (to) linked.set(to, [...(linked.get(to) ?? []), t]);
+  const start = byId.get(id);
+  if (!start) return [];
+  const out = new Set([start]);
+  for (const t of out) {
+    for (const to of [t.parent_id, t.supersedes, t.superseded_by]) { const x = to ? byId.get(to) : undefined; if (x) out.add(x); }
+    for (const x of linked.get(t.id) ?? []) out.add(x);
+  }
+  return [...out].map((t) => t.id);
+}
+
+/**
+ * A funding transfer this web server remembers for a task that never ran (approved and waiting, or stopped before Rook
+ * took the funding), whose USDC hasn't come back: its refund is on that task's page (api/tasks/[id] shows it there).
+ */
+export const fundingHeld = (status: string, hasLedger: boolean, sent: { refunded: boolean } | null) =>
+  !!sent && !sent.refunded && (status === 'approved' || (status === 'killed' && !hasLedger));
+
+/** Why the chat can't be deleted while a task of it holds its funding: the page links that task. */
+export const FUNDING_HELD = "Your wallet's funding for a task in this chat hasn't come back yet. Open that task and refund it to your wallet first, then delete the chat.";
+
+/**
+ * Rook refused to delete a conversation, in plain words. `gone`: it was deleted already (from another tab, say), so
+ * there is nothing left to do. The orchestrator's 409s are written for people and shown as they are.
+ */
+export function deleteRefusal(status: number | null, message: string): { gone: true } | { gone: false; message: string; known: boolean } {
+  if (status === 404 && /^no task /.test(message)) return { gone: true };
+  if (status === 409 && /delete the chat\.$|Delete the chat once/.test(message)) return { gone: false, message, known: true };
+  return { gone: false, message: "Rook couldn't delete this chat right now. Try again in a moment.", known: false };
 }

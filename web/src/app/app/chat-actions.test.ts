@@ -2,7 +2,9 @@
 // Run: npx tsx --test src/app/app/*.test.ts
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { attemptNote, canEdit, canSendAgain, messageProblem, redoRefusal, redoWait, shownInstead, shownTasks } from './chat-actions';
+import {
+  attemptNote, canEdit, canSendAgain, conversationIds, deleteRefusal, fundingHeld, messageProblem, redoRefusal, redoWait, shownInstead, shownTasks,
+} from './chat-actions';
 import { conversationOf, conversations } from './conversations';
 import type { TaskSummary } from './orchestrator';
 
@@ -70,4 +72,34 @@ test('the newest message waits like any message for the task above it, and refus
   assert.equal(redoRefusal(409, approved), approved);
   assert.equal(redoRefusal(409, 'Wait for this run to finish, or stop it, before sending more.'), null); // followUpRefusal's
   assert.equal(redoRefusal(500, 'boom'), null);
+});
+
+test('deleting a chat takes every task of it, the replaced ones too; refused while its funding is out, and in plain words', () => {
+  const list = [
+    task('a0', 0, { status: 'failed', has_plan: false, superseded_by: 'a1' }), // its first message, sent again
+    task('a1', 1, { supersedes: 'a0' }),
+    task('a2', 2, { parent_id: 'a1', status: 'failed', has_plan: false, superseded_by: 'a3' }),
+    task('a3', 3, { parent_id: 'a1', supersedes: 'a2', status: 'planned' }),
+    task('b1', 4),
+  ];
+  // Any of its tasks names it.
+  for (const id of ['a0', 'a1', 'a3']) assert.deepEqual(conversationIds(list, id).sort(), ['a0', 'a1', 'a2', 'a3']);
+  assert.deepEqual(conversationIds(list, 'b1'), ['b1']);
+  assert.deepEqual(conversationIds(list, 'zz'), []);
+
+  // A transfer for a task that never ran and isn't back yet holds the chat: its refund is on that task's page.
+  assert.ok(fundingHeld('approved', false, { refunded: false }));
+  assert.ok(fundingHeld('killed', false, { refunded: false }));
+  assert.ok(!fundingHeld('killed', false, { refunded: true }));
+  assert.ok(!fundingHeld('killed', true, { refunded: false })); // Rook took the funding: its own books brought it back
+  assert.ok(!fundingHeld('closed', true, { refunded: false }));
+  assert.ok(!fundingHeld('approved', false, null));
+
+  const run = 'A run in this chat is still under way. Stop it or let it finish, then delete the chat.';
+  assert.deepEqual(deleteRefusal(409, run), { gone: false, message: run, known: true });
+  const back = 'Rook is still returning the unspent USDC of a task in this chat. Delete the chat once it is back in your wallet.';
+  assert.deepEqual(deleteRefusal(409, back), { gone: false, message: back, known: true });
+  assert.deepEqual(deleteRefusal(404, 'no task t_1'), { gone: true }); // deleted from another tab already
+  assert.deepEqual(deleteRefusal(500, 'boom'), { gone: false, message: "Rook couldn't delete this chat right now. Try again in a moment.", known: false });
+  assert.equal(deleteRefusal(null, '').gone, false);
 });

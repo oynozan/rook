@@ -142,7 +142,10 @@ export const getMode = () => request<Mode>('/mode');
 // parent_id: the conversation's newest task, which this message follows; none starts a conversation. supersedes: the
 // newest message, sent again or edited, whose place this one takes (it follows that one's parent).
 export const createTask = (prompt: string, budget_usdc: string, owner: string, parent_id?: string, supersedes?: string) =>
-  post<TaskView>('/tasks', { prompt, budget_usdc, owner, wait: false, ...(parent_id ? { parent_id } : {}), ...(supersedes ? { supersedes } : {}) });const taskPath = (id: string) => `/tasks/${encodeURIComponent(id)}`;
+  post<TaskView>('/tasks', { prompt, budget_usdc, owner, wait: false, ...(parent_id ? { parent_id } : {}), ...(supersedes ? { supersedes } : {}) });
+/** Deletes the conversation task `id` is in, every task of it at once; answers with their ids. */
+export const deleteConversation = (id: string, owner: string) =>
+  post<{ deleted: string[] }>(`/conversations/${encodeURIComponent(id)}/delete`, { owner });const taskPath = (id: string) => `/tasks/${encodeURIComponent(id)}`;
 /** With `owner`, the orchestrator answers 404 for anyone else's task (the routes check the owner again). */
 export const getTask = (id: string, owner?: string) => request<TaskSnapshot>(taskPath(id) + (owner ? `?owner=${encodeURIComponent(owner)}` : ''));
 export const eventsUrl = (id: string, owner: string) => `${ORCHESTRATOR}${taskPath(id)}/events?owner=${encodeURIComponent(owner)}`;

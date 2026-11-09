@@ -3,12 +3,13 @@
 import { AnimatePresence, motion } from 'motion/react';
 import { useTheme } from 'next-themes';
 import { usePathname, useRouter } from 'next/navigation';
-import { useEffect, useRef, useState, type MouseEvent, type ReactNode, type Ref } from 'react';
+import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode, type Ref } from 'react';
 import { Mark } from '@/components/Navbar';
 import { useSmoothScroll } from '@/components/SmoothScroll';
 import { ThemeToggle } from '@/components/ui/theme-toggle';
-import { shownTasks } from './chat-actions';
+import { conversationIds, shownTasks } from './chat-actions';
 import { conversations } from './conversations';
+import { DeleteChatDialog, TrashIcon, type ChatRef } from './DeleteChat';
 import { useMode } from './mode';
 import type { TaskSummary } from './orchestrator';
 import { useEase } from './useEase';
@@ -66,8 +67,11 @@ function PanelToggle({ label, onClick }: { label: string; onClick: () => void })
   );
 }
 
-/** One entry per conversation: its first request, and the state of the task a new message would act on. Links to its newest task. */
-function TaskList({ tasks, onNavigate }: { tasks: TaskSummary[] | null; onNavigate: () => void }) {
+/**
+ * One entry per conversation: its first request, and the state of the task a new message would act on. Links to its
+ * newest task. Its delete button shows on hover and focus, and always on touch screens.
+ */
+function TaskList({ tasks, onNavigate, onDelete }: { tasks: TaskSummary[] | null; onNavigate: () => void; onDelete: (chat: ChatRef) => void }) {
   const pathname = usePathname();
   const { chain } = useMode(); // chain mode: an approved task waits for the owner's funding transfer
   const label = (s: string) => (chain && s === 'approved' ? 'Needs funding' : STATUS[s] ?? s);
@@ -80,12 +84,12 @@ function TaskList({ tasks, onNavigate }: { tasks: TaskSummary[] | null; onNaviga
         const current = c.tasks.some((t) => pathname === `/app/${t.id}`); // any of its tasks' pages shows it
         const status = c.current.status;
         return (
-          <li key={c.id}>
+          <li key={c.id} className="group/row relative">
             <a
               href={href}
               aria-current={current ? 'page' : undefined}
               onClick={(e) => { go(href, e); onNavigate(); }}
-              className={`block rounded-lg px-3 py-2 transition-colors motion-reduce:transition-none ${current ? 'bg-ink/10' : 'hover:bg-ink/5'}`}
+              className={`block rounded-lg py-2 pr-3 pl-3 transition-colors group-focus-within/row:pr-11 group-hover/row:pr-11 pointer-coarse:pr-12 motion-reduce:transition-none ${current ? 'bg-ink/10' : 'hover:bg-ink/5'}`}
             >
               <span className="block truncate" title={c.title}>{c.title}</span>
               <span className={`mt-0.5 flex items-center gap-1.5 text-sm ${ACTIVE.has(status) ? 'text-accent-ink' : 'text-ink/65'}`}>
@@ -93,6 +97,15 @@ function TaskList({ tasks, onNavigate }: { tasks: TaskSummary[] | null; onNaviga
                 {label(status)}
               </span>
             </a>
+            <button
+              type="button"
+              aria-label={`Delete chat: ${c.title.length > 60 ? `${c.title.slice(0, 60)}…` : c.title}`}
+              title="Delete chat"
+              onClick={() => onDelete({ id: c.id, title: c.title })}
+              className="absolute top-1/2 right-1 grid size-9 -translate-y-1/2 cursor-pointer place-items-center rounded-lg text-ink/55 opacity-0 transition-[opacity,background-color,color] group-focus-within/row:opacity-100 group-hover/row:opacity-100 hover:bg-ink/10 hover:text-alert focus-visible:opacity-100 pointer-coarse:size-11 pointer-coarse:opacity-100 motion-reduce:transition-none"
+            >
+              <TrashIcon className="size-4" />
+            </button>
           </li>
         );
       })}
@@ -114,6 +127,7 @@ type SidebarProps = {
   onNavigate: () => void;
   onExpand?: () => void;
   avatarRef?: Ref<HTMLButtonElement>;
+  onDelete: (chat: ChatRef) => void;
 };
 
 /**
@@ -130,7 +144,7 @@ function ComposeIcon({ className }: { className: string }) {
   );
 }
 
-function SidebarContent({ tasks, rail = false, toggleLabel = 'Close sidebar', onToggle, onNavigate, onExpand, avatarRef }: SidebarProps) {
+function SidebarContent({ tasks, rail = false, toggleLabel = 'Close sidebar', onToggle, onNavigate, onExpand, avatarRef, onDelete }: SidebarProps) {
   const wallet = useWallet();
   const fade = `transition-opacity ${GLIDE} ${rail ? 'opacity-0' : ''}`;
   const busy = !!tasks && conversations(shownTasks(tasks)).some((c) => ACTIVE.has(c.current.status));
@@ -143,6 +157,7 @@ function SidebarContent({ tasks, rail = false, toggleLabel = 'Close sidebar', on
 
       <a
         href="/app"
+        data-new-task
         title={rail ? 'New task' : undefined}
         onClick={(e) => { go('/app', e); onNavigate(); }}
         className={`ml-3.5 flex min-h-11 shrink-0 items-center gap-2.5 overflow-hidden rounded-lg bg-ink/5 pl-3.5 font-medium whitespace-nowrap transition-[width,background-color] ${GLIDE} hover:bg-ink/10 active:translate-y-px ${rail ? 'w-11' : 'w-[calc(100%-1.75rem)]'}`}
@@ -168,7 +183,7 @@ function SidebarContent({ tasks, rail = false, toggleLabel = 'Close sidebar', on
         )}
       </div>
       <div inert={rail} className={`flex min-h-0 flex-1 flex-col ${fade}`}>
-        <TaskScroller><TaskList tasks={tasks} onNavigate={onNavigate} /></TaskScroller>
+        <TaskScroller><TaskList tasks={tasks} onNavigate={onNavigate} onDelete={onDelete} /></TaskScroller>
       </div>
 
       <div inert={!rail} className={`grid shrink-0 transition-[grid-template-rows] ${GLIDE} ${rail ? 'grid-rows-[1fr]' : 'grid-rows-[0fr]'}`}>
@@ -212,6 +227,24 @@ export function AppShell({ tasks, children }: { tasks: TaskSummary[] | null; chi
   const pathname = usePathname();
   const visible = !collapsed || peek;
   const topBarHidden = !!wallet.account; // wide screens: nothing is left up there but the theme toggle, which sits clear of the thread
+
+  // Deleting a chat: the one being asked about, and the tasks of chats deleted here, which leave the sidebar at once
+  // (the list from the server follows).
+  const [deleting, setDeleting] = useState<ChatRef | null>(null);
+  const [gone, setGone] = useState<ReadonlySet<string>>(new Set());
+  const listed = tasks && gone.size ? tasks.filter((t) => !gone.has(t.id)) : tasks;
+  const closeDelete = useCallback(() => setDeleting(null), []);
+  const onDeleted = (chat: ChatRef, deleted: string[]) => {
+    const ids = new Set([...deleted, ...conversationIds(tasks ?? [], chat.id)]);
+    setGone((g) => new Set([...g, ...ids]));
+    setDeleting(null);
+    // The open chat was this one: on to a new task, with no way back to a chat that is gone.
+    if ([...ids].some((t) => window.location.pathname === `/app/${t}`)) window.history.replaceState(null, '', '/app');
+    requestAnimationFrame(() => {
+      const next = [...document.querySelectorAll<HTMLElement>('a[data-new-task]')].find((a) => a.offsetParent !== null && !a.closest('[inert]'));
+      next?.focus();
+    });
+  };
 
   const peekAfter = (next: boolean, ms: number) => {
     clearTimeout(peekTimer.current);
@@ -275,13 +308,14 @@ export function AppShell({ tasks, children }: { tasks: TaskSummary[] | null; chi
       >
         <div style={{ width: SIDEBAR_WIDTH }} className="flex h-full flex-col">
           <SidebarContent
-            tasks={tasks}
+            tasks={listed}
             rail={collapsed && !peek}
             toggleLabel={peek ? 'Keep sidebar open' : 'Close sidebar'}
             onToggle={() => setSidebar(collapsed ? false : true)}
             onNavigate={() => {}}
             onExpand={() => setSidebar(false)}
             avatarRef={avatar}
+            onDelete={setDeleting}
           />
         </div>
       </motion.aside>
@@ -312,10 +346,13 @@ export function AppShell({ tasks, children }: { tasks: TaskSummary[] | null; chi
             transition={ease}
             className="fixed inset-y-0 left-0 z-30 flex w-72 max-w-[85vw] flex-col border-r border-ink/10 bg-panel md:hidden"
           >
-            <SidebarContent tasks={tasks} onToggle={() => setDrawer(false)} onNavigate={() => setDrawer(false)} />
+            <SidebarContent tasks={listed} onToggle={() => setDrawer(false)} onNavigate={() => setDrawer(false)} onDelete={setDeleting} />
           </motion.aside>
         )}
       </AnimatePresence>
+
+      <DeleteChatDialog key={deleting?.id ?? ''} chat={deleting} onClose={closeDelete} onDeleted={onDeleted}
+        onOpenTask={(task) => { setDeleting(null); setDrawer(false); go(`/app/${task}`); }} />
 
       <div className="rook-glow relative flex min-w-0 flex-1 flex-col">
         {wallet.account && <ThemeToggle className="absolute top-2.5 right-3 z-10 sm:top-3 md:right-5" />}
