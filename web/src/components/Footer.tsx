@@ -29,7 +29,7 @@ export function Footer() {
   return (
     <footer className="mt-4">
       {/* Full width like the hero, which it mirrors: the hero rounds its bottom corners, the footer its top ones. */}
-      <div className="@container overflow-hidden rounded-t-[clamp(1.5rem,3vw,3rem)] bg-ink text-white [&_:focus-visible]:outline-white">
+      <div className="@container overflow-hidden rounded-t-[clamp(1.5rem,3vw,3rem)] bg-ink text-white **:focus-visible:outline-white">
         <div className={`relative z-10 pt-14 md:pt-20 ${INSET}`}>
           <div className="flex flex-col gap-8 md:flex-row md:items-end md:justify-between">
             <p className="max-w-[16ch] text-[clamp(2rem,4.2vw,3.75rem)] leading-[1.05] tracking-[-0.03em]">
@@ -76,7 +76,7 @@ export function Footer() {
 
         {/* The wordmark as the slab's foot, ink touching both sides and cropped by the bottom edge. Measured in Host Grotesk:
             "rook" inks across 1.744em starting 0.050em in, so 100cqw / 1.744 fills the width and -0.050em cancels the left bearing. */}
-        <p aria-hidden="true" className="pointer-events-none mt-6 -mb-[0.22em] md:mt-8 ml-[-0.05em] text-[57.35cqw] leading-[0.8] font-medium tracking-[-0.06em] whitespace-nowrap text-white select-none">
+        <p aria-hidden="true" className="pointer-events-none mt-6 mb-[-0.22em] md:mt-8 ml-[-0.05em] text-[57.35cqw] leading-[0.8] font-medium tracking-[-0.06em] whitespace-nowrap text-white select-none">
           rook
         </p>
       </div>
