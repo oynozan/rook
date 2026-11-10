@@ -2,8 +2,9 @@
 // services word these for logs and the CLI (runner.ts); the page shows these sentences and keeps the raw text as a
 // tooltip. Also the parts a run delivered. Pure functions, so the page and the tests both use them.
 import { detail } from '@/lib/errors';
+import { usdc } from '@/lib/funding';
 import { plannerReason } from '@/lib/planner';
-import type { SubtaskView } from '@/lib/server/orchestrator';
+import type { RookEvent, SubtaskView } from '@/lib/server/orchestrator';
 
 export type DeliveredPart = { id: string; title: string; agent: string | null; text: string };
 
@@ -51,8 +52,7 @@ export const alertLine = (flag: string, agent?: string) => /is not the marketpla
   ? `Security alert: ${agent ?? 'an agent'} asked to be paid to an account that isn't the marketplace's.`
   : `Security alert on ${agent ?? 'an agent'}: ${flag}`;
 
-/** `ended`: the agent whose work on the part this line ends, so the run's status stops waiting on it. */
-export type ProblemLine = { text: string; tone: 'muted' | 'alert'; label: string; ended?: string };
+export type ProblemLine = { text: string; tone: 'muted' | 'alert'; label: string };
 
 /**
  * Infers the kind of an error event stored before the services named one, from runner.ts's messages; `agent` is the
@@ -81,10 +81,9 @@ function inferKind(message: string): { kind?: string; agent?: string } {
 
 /**
  * One of Rook's own error events as a line for people (null: nothing to show, another line already says it). Retries
- * and notes are muted; real problems show as alerts but are Rook's, never an agent's flag. `part`: the subtask's title;
- * `hired`: the agent its latest hire went to, which a part given up on is no longer waiting for.
+ * and notes are muted; real problems show as alerts but are Rook's, never an agent's flag. `part`: the subtask's title.
  */
-export function problemLine(data: { kind?: string; message?: string; agent_handle?: string }, part?: string, hired?: string): ProblemLine | null {
+export function problemLine(data: { kind?: string; message?: string; agent_handle?: string }, part?: string): ProblemLine | null {
   const message = data.message ?? '';
   const guess = data.kind ? {} : inferKind(message);
   const kind = data.kind ?? guess.kind;
@@ -92,7 +91,7 @@ export function problemLine(data: { kind?: string; message?: string; agent_handl
   const it = part ?? 'this part';
   const note = (text: string): ProblemLine => ({ text, tone: 'muted', label: 'Note' });
   const retry = (text: string): ProblemLine => ({ text, tone: 'muted', label: 'Retrying' });
-  const problem = (text: string, ended?: string): ProblemLine => ({ text, tone: 'alert', label: 'Problem', ...(ended ? { ended } : {}) });
+  const problem = (text: string): ProblemLine => ({ text, tone: 'alert', label: 'Problem' });
   // What the event says went wrong, after the prefix that names its kind: " (why)", or nothing when it says nothing.
   const why = (prefix?: RegExp) => { const d = detail(prefix ? message.replace(prefix, '') : message); return d ? ` (${d})` : ''; };
   switch (kind) {
@@ -107,8 +106,8 @@ export function problemLine(data: { kind?: string; message?: string; agent_handl
     case 'unreachable_retry': return retry(`${who ?? 'The agent'} couldn't take the job just now, so Rook asks it again in a few minutes.`);
     case 'rook_writes': return note(`No agent could deliver ${it}, so Rook writes it itself. That part's USDC goes back to you.`);
     case 'restore_note': return note("Rook restarted and found its records differ from the contract's, so it goes by the contract.");
-    case 'abandoned': return problem(`Rook couldn't finish ${it} because of a problem on its side${why(/^\S+ abandoned: /)}.`, hired);
-    case 'unchecked': return problem(`Rook couldn't check ${who ? `${who}'s` : 'the'} work on ${it}${why(/^evaluation of \S+ failed, subtask abandoned unjudged: /)}, so that part is left out.`, who ?? hired);
+    case 'abandoned': return problem(`Rook couldn't finish ${it} because of a problem on its side${why(/^\S+ abandoned: /)}.`);
+    case 'unchecked': return problem(`Rook couldn't check ${who ? `${who}'s` : 'the'} work on ${it}${why(/^evaluation of \S+ failed, subtask abandoned unjudged: /)}, so that part is left out.`);
     case 'close': return problem(`Sending the unspent USDC back hit a problem${why()}. Rook is still finishing the refund.`);
     case 'unwind': return problem(`Rook couldn't send all the unspent USDC back yet${why(/^(salvage|after kill|after restart), /)}. It will try again.`);
     case 'run': return problem(`The run stopped because of a problem on Rook's side${why()}.`);
@@ -120,4 +119,80 @@ export function problemLine(data: { kind?: string; message?: string; agent_handl
     case 'no_plan': return problem(message);
     default: return problem(`Rook hit a problem on its side${why()}.`);
   }
+}
+
+/** What the run's status says a line means, while the page replays the lines one by one. */
+export type Now = { state: string; label: string; detail?: string };
+/** detail: the raw text behind a reworded line, as a tooltip. flag: an agent's delivery or quote was flagged (what "flagged" counts). */
+export type FeedLine = {
+  key: number; text: string; tone: 'normal' | 'muted' | 'alert'; now: Now; paid?: number; fromReserve?: number; detail?: string; flag?: true;
+};
+/** What the feed needs from the plan: titles by subtask, the self_do ones, and whether no agent is hired at all. */
+export type FeedContext = { titles: Map<string, string>; selfDo: Set<string>; free: boolean; simNote: string };
+
+/**
+ * Turns the run's events into plain lines. Agent text is never shown as instructions: only handles and Rook's verdicts.
+ * With more than one part, a line about an agent names its part: parts run side by side, and one agent can be hired
+ * for two of them.
+ */
+export function feedFrom(events: RookEvent[], ctx: FeedContext): FeedLine[] {
+  const lines: FeedLine[] = [];
+  let receipt = 0;
+  const hired = new Map<string | undefined, string>(); // subtask -> the agent its payment authorization is for
+  const tries = new Map<string, number>(); // self_do subtask -> times Rook started on it
+  const part = (id?: string) => (id && ctx.titles.get(id)) || 'this part';
+  const named = (id?: string) => (ctx.titles.size > 1 && id && ctx.titles.get(id)) || '';
+  for (const { seq: key, type, data, subtask_id } of events) {
+    const agent = data?.agent_handle;
+    const self = !!subtask_id && ctx.selfDo.has(subtask_id);
+    const title = named(subtask_id);
+    const on = title ? ` on ${title}` : '', fore = title ? ` for ${title}` : '';
+    if (agent && (type === 'hire_sent' || (type === 'ledger' && data.op === 'clearing'))) hired.set(subtask_id, agent);
+    if (type === 'hire_sent') lines.push({ key, text: `Hired ${agent}${fore}, quoted ${usdc(data.amount_atomic)} USDC.`, tone: 'normal', now: { state: 'researching', label: 'Hired', detail: agent } });
+    // Rook does a self_do part with its own model: no hire, so never "rook:self-do" or a hire's wording.
+    else if (type === 'subtask_status' && self && data.to === 'working') {
+      const n = (tries.get(subtask_id!) ?? 0) + 1;
+      tries.set(subtask_id!, n);
+      const it = part(subtask_id);
+      lines.push({ key, text: n === 1 ? `Rook is doing ${it} itself.` : `Rook is trying ${it} again.`, tone: 'normal', now: { state: 'writing', label: 'Rook is working on', detail: it } });
+    }
+    else if (type === 'evaluation' && (self || agent === 'rook:self-do')) {
+      const it = part(subtask_id), pass = data.verdict === 'pass';
+      lines.push({ key, text: `Rook's own work on ${it} ${pass ? 'passed every check' : 'failed a check'}.`, tone: 'normal', now: { state: 'analyzing', label: pass ? 'Passed' : 'Failed a check', detail: it } });
+    }
+    // Whether an unpaid hire cost anything is known only once its authorization is released (it can still land).
+    else if (type === 'a2a_state' && ['FAILED', 'REJECTED', 'CANCELED'].includes(data.state)) lines.push({ key, text: `${agent} didn't deliver${on}.`, tone: 'normal', now: { state: 'analyzing', label: 'No delivery', detail: agent } });
+    else if (type === 'a2a_state' && data.state === 'TIMEOUT') lines.push({ key, text: `${agent} timed out${on}.`, tone: 'normal', now: { state: 'analyzing', label: 'Timed out', detail: agent } });
+    else if (type === 'ledger' && data.op === 'release' && data.settled === false) {
+      const who = agent ?? hired.get(subtask_id);
+      lines.push({ key, text: `No charge${who ? ` for ${who}` : ''}${on}: its payment authorization was released unpaid.`, tone: 'muted', now: { state: 'analyzing', label: 'No charge', detail: who } });
+    }
+    else if (type === 'evaluation') {
+      if (data.verdict === 'pass') lines.push({ key, text: `${agent} passed every check${on}.`, tone: 'normal', now: { state: 'analyzing', label: 'Passed', detail: agent } });
+      else if (data.failed_criteria?.includes('injection')) lines.push({ key, text: `${agent}'s delivery${fore} tried to give Rook instructions. Flagged and rejected.`, tone: 'alert', flag: true, now: { state: 'analyzing', label: 'Flagged', detail: agent } });
+      else lines.push({ key, text: `${agent} failed a check${on}.`, tone: 'alert', flag: true, now: { state: 'analyzing', label: 'Failed a check', detail: agent } });
+    } else if (type === 'security_alert' && data.source === 'quote') lines.push({ key, text: alertLine(data.flag, agent), detail: data.flag, tone: 'alert', flag: true, now: { state: 'analyzing', label: 'Security alert' } });
+    else if (type === 'quote_rejected') lines.push({ key, text: `Skipped ${agent}${fore}: ${skipReason(data.reason)}.`, detail: data.reason, tone: 'muted', now: { state: 'researching', label: 'Skipped', detail: agent } });
+    else if (type === 'ledger' && data.op === 'topUp') lines.push({ key, text: `Topped up ${usdc(data.amount_atomic)} USDC from the reserve${fore}.`, tone: 'muted', fromReserve: Number(data.amount_atomic), now: { state: 'analyzing', label: 'Topped up', detail: `${usdc(data.amount_atomic)} USDC` } });
+    else if (type === 'receipt' && data.amount_atomic === '0') lines.push({ key, text: `Receipt ${++receipt}: ${agent} delivered${on}, but no payment showed on chain, so nothing was paid.`, tone: 'muted', now: { state: 'analyzing', label: 'Unpaid', detail: agent } });
+    else if (type === 'receipt') lines.push({ key, text: `Receipt ${++receipt}: paid ${usdc(data.amount_atomic)} USDC to ${agent}${fore}.`, tone: 'muted', paid: Number(data.amount_atomic), now: { state: 'analyzing', label: 'Paid', detail: agent } });
+    // What happens to the money after a kill, a failure or a restart (runner.ts unwind and restoreTask). Older kill
+    // events carried a near-cli command (human_action) for the funder: never shown, the unwind refunds on its own.
+    else if (type === 'ledger' && data.op === 'kill') {
+      const text = ctx.free ? 'Stopped.' : data.returning || data.human_action
+        ? "Stopped. Rook pays no more agents and is sending what's left back to your wallet."
+        : 'Stopped. Rook pays no more agents.';
+      lines.push({ key, text, tone: 'muted', now: { state: 'analyzing', label: 'Stopped' } });
+    }
+    else if (type === 'ledger' && data.op === 'clearing') lines.push({ key, text: data.how === 'void' ? `Cancelling the unused payment to ${data.agent_handle ?? 'an agent'} on NEAR before returning its funds.` : `Waiting for ${data.agent_handle ?? 'an agent'}'s payment authorization to ${data.how === 'terminal' ? 'clear' : 'settle or expire'} before returning its funds.`, tone: 'muted', now: { state: 'analyzing', label: 'Clearing', detail: data.agent_handle ?? undefined } });
+    else if (type === 'ledger' && data.op === 'restored') lines.push({ key, text: `Rook restarted and picked this task up again from contract task ${data.contract_task_id}.`, tone: 'muted', now: { state: 'analyzing', label: 'Restored' } });
+    // A plan that hires no agent held no money: no budget to close, nothing refunded.
+    else if (type === 'ledger' && data.op === 'closeTask' && data.amount_atomic != null && !ctx.free) lines.push({ key, text: `Closed the budget: ${usdc(data.amount_atomic)} USDC went back to your wallet${ctx.simNote}.`, tone: 'muted', now: { state: 'analyzing', label: 'Closed' } });
+    // Rook's own errors: plain words, the raw text as a tooltip, never counted as an agent's flag.
+    else if (type === 'error') {
+      const p = problemLine(data ?? {}, subtask_id && ctx.titles.get(subtask_id));
+      if (p) lines.push({ key, text: p.text, tone: p.tone, detail: data?.message, now: { state: 'analyzing', label: p.label } });
+    }
+  }
+  return lines;
 }

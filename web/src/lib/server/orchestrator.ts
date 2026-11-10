@@ -81,14 +81,30 @@ export type LedgerSub = {
 };
 
 /**
+ * One hire of a subtask. state: the agent's A2A state (SUBMITTED, WORKING, COMPLETED, FAILED, REJECTED, CANCELED), or
+ * Rook's own: SENDING, TIMEOUT, SEND_FAILED, OUTCOME_UNKNOWN, KILLED. ended_at is null while it runs. Older
+ * orchestrators send only id, agent_handle and deliverable_text.
+ */
+export type HireView = {
+  id: string; agent_handle: string; deliverable_text: string | null;
+  state?: string; started_at?: string; ended_at?: string | null; amount_atomic?: string; paid?: boolean; verdict?: 'pass' | 'fail' | null;
+};
+
+/**
  * A subtask as the run left it. A passed one's deliverable is its accepted hire's deliverable_text, or, for a part Rook
- * did itself (no hire), accepted.text. Older orchestrators send only id, n and status.
+ * did itself (no hire), accepted.text. tried: the agents Rook got to, in order. Older orchestrators send only id, n
+ * and status.
  */
 export type SubtaskView = {
   id: string; n: number; status: string; title?: string; self_do?: boolean; final_outcome?: 'passed' | 'abandoned' | null;
+  cap_atomic?: string; deadline_s?: number; tried?: string[];
   accepted?: { hire_id: string | null; agent_handle: string; text?: string } | null;
-  hires?: { id: string; agent_handle: string; deliverable_text: string | null }[];
+  hires?: HireView[];
+  evaluations?: { hire_id: string | null; verdict: 'pass' | 'fail'; failed_criteria: string[] }[];
 };
+
+/** A file a hired agent delivered (a web page, a script), kept apart from the report text. Older results have none. */
+export type ReportFile = { subtask_id: string; agent_handle: string; name: string; mime: string; text: string };
 
 export type TaskSnapshot = {
   task: Omit<TaskView, 'plan'>;
@@ -102,7 +118,7 @@ export type TaskSnapshot = {
     closed?: boolean;
     contract_id?: string | null; contract_task_id?: string; subtasks?: LedgerSub[];
   } | null;
-  final_result: { final_markdown: string; abandoned: string[] } | null;
+  final_result: { final_markdown: string; abandoned: string[]; files?: ReportFile[] } | null;
   /**
    * Added by this web server (api/tasks/[id]): a funding transfer the browser reported for a task not yet running.
    * contract_task_id is null while only its hash is known; refunded once the funder's close_task took the USDC back.
@@ -110,7 +126,8 @@ export type TaskSnapshot = {
   funding_sent?: { contract_task_id: string | null; tx_hash: string | null; refunded: boolean; refund_tx: string | null } | null;
 };
 
-export type RookEvent = { seq: number; type: string; subtask_id?: string; data: any };
+/** ts: when Rook emitted it (ISO, Rook's clock). */
+export type RookEvent = { seq: number; ts?: string; type: string; subtask_id?: string; data: any };
 
 export class OrchestratorDown extends Error {}
 
