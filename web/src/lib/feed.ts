@@ -47,6 +47,16 @@ export function skipReason(reason: string): string {
   return "Rook couldn't use its quote";
 }
 
+/**
+ * A send that never reached the agent (a "send failed" reason), as one line: what happened, then that nothing was paid.
+ * `fore`: " for <part>" when the run has more than one part.
+ */
+export function sendFailedLine(agent: string, reason: string, fore = ''): string {
+  if (/^send failed: 402\b/.test(reason)) return `${agent} turned down the payment${fore}, so nothing was paid.`;
+  if (/^send failed: unreachable\b/.test(reason)) return `${agent} didn't answer when Rook sent the job${fore}, so nothing was paid.`;
+  return `The job${fore} didn't reach ${agent}, so nothing was paid.`;
+}
+
 /** A security alert raised on an agent's quote (runner.ts checkQuote), as a line for people. */
 export const alertLine = (flag: string, agent?: string) => /is not the marketplace treasury/.test(flag)
   ? `Security alert: ${agent ?? 'an agent'} asked to be paid to an account that isn't the marketplace's.`
@@ -142,8 +152,12 @@ export function feedFrom(events: RookEvent[], ctx: FeedContext): FeedLine[] {
   const tries = new Map<string, number>(); // self_do subtask -> times Rook started on it
   const part = (id?: string) => (id && ctx.titles.get(id)) || 'this part';
   const named = (id?: string) => (ctx.titles.size > 1 && id && ctx.titles.get(id)) || '';
+  // A failed send and its release say the same thing: the newest "No charge" line, and a failed send with no release yet.
+  let released: { at: number; who: string } | null = null;
+  let unsent: string | null = null;
   for (const { seq: key, type, data, subtask_id } of events) {
     const agent = data?.agent_handle;
+    if ((type === 'quote' || type === 'hire_sent') && unsent === `${subtask_id}:${agent}`) unsent = null; // asked again: a new hire
     const self = !!subtask_id && ctx.selfDo.has(subtask_id);
     const title = named(subtask_id);
     const on = title ? ` on ${title}` : '', fore = title ? ` for ${title}` : '';
@@ -165,7 +179,20 @@ export function feedFrom(events: RookEvent[], ctx: FeedContext): FeedLine[] {
     else if (type === 'a2a_state' && data.state === 'TIMEOUT') lines.push({ key, text: `${agent} timed out${on}.`, tone: 'normal', now: { state: 'analyzing', label: 'Timed out', detail: agent } });
     else if (type === 'ledger' && data.op === 'release' && data.settled === false) {
       const who = agent ?? hired.get(subtask_id);
+      // A send that failed already said nothing was paid: its release says it again.
+      if (unsent === `${subtask_id}:${who}`) { unsent = null; continue; }
       lines.push({ key, text: `No charge${who ? ` for ${who}` : ''}${on}: its payment authorization was released unpaid.`, tone: 'muted', now: { state: 'analyzing', label: 'No charge', detail: who } });
+      released = { at: lines.length - 1, who: `${subtask_id}:${who}` };
+      continue;
+    }
+    // The job never reached the agent (runner.ts hire1): cause first, then that nothing was paid, in one line in
+    // place of its release's "No charge" line. Not "Skipped": Rook did try it.
+    else if (type === 'quote_rejected' && /^send failed/.test(data.reason ?? '')) {
+      const line: FeedLine = { key, text: sendFailedLine(agent, data.reason, fore), detail: data.reason, tone: 'muted', now: { state: 'researching', label: 'Not reached', detail: agent } };
+      if (released?.who === `${subtask_id}:${agent}` && released.at === lines.length - 1) lines[released.at] = line;
+      else { lines.push(line); unsent = `${subtask_id}:${agent}`; }
+      released = null;
+      continue;
     }
     else if (type === 'evaluation') {
       if (data.verdict === 'pass') lines.push({ key, text: `${agent} passed every check${on}.`, tone: 'normal', now: { state: 'analyzing', label: 'Passed', detail: agent } });
@@ -185,7 +212,8 @@ export function feedFrom(events: RookEvent[], ctx: FeedContext): FeedLine[] {
       lines.push({ key, text, tone: 'muted', now: { state: 'analyzing', label: 'Stopped' } });
     }
     else if (type === 'ledger' && data.op === 'clearing') lines.push({ key, text: data.how === 'void' ? `Cancelling the unused payment to ${data.agent_handle ?? 'an agent'} on NEAR before returning its funds.` : `Waiting for ${data.agent_handle ?? 'an agent'}'s payment authorization to ${data.how === 'terminal' ? 'clear' : 'settle or expire'} before returning its funds.`, tone: 'muted', now: { state: 'analyzing', label: 'Clearing', detail: data.agent_handle ?? undefined } });
-    else if (type === 'ledger' && data.op === 'restored') lines.push({ key, text: `Rook restarted and picked this task up again from contract task ${data.contract_task_id}.`, tone: 'muted', now: { state: 'analyzing', label: 'Restored' } });
+    // The contract's own task id means nothing to the user; the line keeps it as its tooltip.
+    else if (type === 'ledger' && data.op === 'restored') lines.push({ key, text: 'Rook restarted and picked this task up again.', ...(data.contract_task_id != null ? { detail: `contract task ${data.contract_task_id}` } : {}), tone: 'muted', now: { state: 'analyzing', label: 'Restored' } });
     // A plan that hires no agent held no money: no budget to close, nothing refunded.
     else if (type === 'ledger' && data.op === 'closeTask' && data.amount_atomic != null && !ctx.free) lines.push({ key, text: `Closed the budget: ${usdc(data.amount_atomic)} USDC went back to your wallet${ctx.simNote}.`, tone: 'muted', now: { state: 'analyzing', label: 'Closed' } });
     // Rook's own errors: plain words, the raw text as a tooltip, never counted as an agent's flag.

@@ -127,6 +127,8 @@ test('each part: its status, the agent on it now, every agent tried and what cam
   ];
   const [p1, p2, p3] = partViews(plan, subtasks, events, clock(3790 + 125), false);
   assert.equal(p1.status, 'Not started yet');
+  // Its brief hasn't gone out yet; the others' has.
+  assert.deepEqual([p1.sent, p2.sent, p3.sent], [false, true, true]);
   assert.equal(p1.tone, 'idle');
   assert.equal(p2.status, 'dev-tools-agent is working on it');
   assert.equal(p2.brief, 'Brief for Build one-page portfolio website');
@@ -178,4 +180,19 @@ test('spans and previews read as people say them', () => {
   assert.equal(preview('aaaa bbbb cccc', 10), 'aaaa bbbb…');
   // A delivered web page previews as its note, its code as a count (mainnet: the preview began "# index.html ```html <!DOCTYPE").
   assert.equal(preview('# index.html\n\n```html\n<!DOCTYPE html>\n<html>\n</html>\n```\n\nA dark portfolio.'), 'index.html (html, 3 lines) A dark portfolio.');
+});
+
+test('the run header says when a part delivered nothing, never just "Finished."', async () => {
+  const { runHeadline } = await import('@/lib/run-view');
+  const done = { live: false, status: 'closed', report: true, missing: [] as string[], parts: 3 };
+  assert.equal(runHeadline({ ...done, live: true }), 'Running.');
+  assert.equal(runHeadline({ ...done, status: 'killed' }), 'Stopped.');
+  assert.equal(runHeadline({ ...done, status: 'failed', report: false }), 'This run hit a problem.');
+  assert.equal(runHeadline({ ...done, status: 'failed' }), 'Finished.'); // the work finished, only the refund hit a problem
+  assert.equal(runHeadline(done), 'Finished.');
+  // t_c08f6e29: the website part couldn't be done, and the header said "Finished.".
+  assert.equal(runHeadline({ ...done, missing: ['Build one-page portfolio website'] }), 'Finished without “Build one-page portfolio website”.');
+  assert.equal(runHeadline({ ...done, missing: ['A', 'B'] }), 'Finished without 2 of its 3 parts.');
+  assert.equal(runHeadline({ ...done, missing: ['A', 'B', 'C'] }), 'Finished, but no part was delivered.');
+  assert.equal(runHeadline({ ...done, parts: 1, missing: ['Build the site'] }), 'Finished without “Build the site”: nothing was delivered.');
 });

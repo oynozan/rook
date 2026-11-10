@@ -3,7 +3,7 @@
 // publish no progress while they work (A2A GetTask gives only a state), so between a hire and its delivery all Rook can
 // say is who is working and for how long. Pure functions, so the page and the tests both use them.
 import { skipReason } from '@/lib/feed';
-import { lineCount, reportBlocks } from '@/lib/report';
+import { plainText } from '@/lib/report';
 import { usdc } from '@/lib/funding';
 import type { HireView, PlanView, RookEvent, SubtaskView } from '@/lib/server/orchestrator';
 
@@ -137,6 +137,8 @@ export type TriedRow = { key: string; agent: string; outcome: string; money?: st
 
 export type PartView = {
   id: string; title: string; brief: string | null; self: boolean;
+  /** Rook hired an agent for it, so its brief went out (a quote it turned down sent nothing). */
+  sent: boolean;
   status: string; tone: 'active' | 'idle' | 'passed' | 'failed';
   /** The agent working on it now: since when, and when Rook gives up on it. */
   working: { agent: string; since: number; until: number } | null;
@@ -191,13 +193,12 @@ function liveHires(hires: HireView[], events: RookEvent[], id: string): HireView
 }
 
 /**
- * Text cut to about `max` characters at a word, on one line. A fenced code block shows as "(code, N lines)": the code
- * itself is in the report's files, and its first lines say nothing (a web page opened with "<!DOCTYPE html>").
+ * Text cut to about `max` characters at a word, as one line of plain words (report.ts plainText): no Markdown marks or
+ * rules, a table's cells side by side, and a fenced code block as "(code, N lines)": the code itself is in the report's
+ * files, and its first lines say nothing (a web page opened with "<!DOCTYPE html>").
  */
 export function preview(text: string, max = 280): string {
-  const flat = reportBlocks(text)
-    .map((b) => (b.kind === 'code' ? `(${b.lang || 'code'}, ${lineCount(b.text)} lines)` : b.text.replace(/^#{1,6}\s+/, '')))
-    .join(' ').replace(/\s+/g, ' ').trim();
+  const flat = plainText(text);
   if (flat.length <= max) return flat;
   const cut = flat.slice(0, max);
   return `${cut.slice(0, cut.lastIndexOf(' ') > max * 0.6 ? cut.lastIndexOf(' ') : max).trimEnd()}…`;
@@ -242,7 +243,7 @@ export function partViews(plan: PlanView, subtasks: SubtaskView[] | undefined, e
     const text = a ? (a.hire_id === null ? a.text : hires.find((h) => h.id === a.hire_id)?.deliverable_text) : null;
     const passed = phase.kind === 'done' && phase.outcome === 'passed';
     return {
-      id: p.id, title: p.title, brief: p.brief?.trim() || null, self: p.self_do,
+      id: p.id, title: p.title, brief: p.brief?.trim() || null, self: p.self_do, sent: hires.length > 0,
       status: words.status,
       tone: phase.kind === 'done' ? (phase.outcome === 'passed' ? 'passed' : 'failed') : phase.kind === 'waiting' ? 'idle' : 'active',
       working: phase.kind === 'working' ? { agent: phase.agent, since: phase.since, until: phase.until } : null,
@@ -251,6 +252,22 @@ export function partViews(plan: PlanView, subtasks: SubtaskView[] | undefined, e
       at, line: words.line,
     };
   });
+}
+
+/**
+ * The run's header, in its own words: running, stopped, a problem, or finished, and when finished, which parts
+ * delivered nothing (`missing`: their titles, of `parts`), so a run without its website never just says "Finished.".
+ */
+export function runHeadline(o: { live: boolean; status: string; report: boolean; missing: string[]; parts: number }): string {
+  if (o.live) return 'Running.';
+  if (o.status === 'killed') return 'Stopped.';
+  // Failed with a report: the work finished and only the refund hit a problem, which the money card says.
+  if (o.status === 'failed' && !o.report) return 'This run hit a problem.';
+  const n = o.missing.length;
+  if (n && n >= o.parts) return o.parts === 1 ? `Finished without “${o.missing[0]}”: nothing was delivered.` : 'Finished, but no part was delivered.';
+  if (n === 1) return `Finished without “${o.missing[0]}”.`;
+  if (n > 1) return `Finished without ${n} of its ${o.parts} parts.`;
+  return 'Finished.';
 }
 
 /**

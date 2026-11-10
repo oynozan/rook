@@ -67,9 +67,12 @@ export function budgetToHire(plan: Pick<PlanView, 'subtasks' | 'budget'>, upTo?:
     }
     if (s.id === upTo) break;
   }
-  if (!any) return null;
-  const total = caps + needs;
-  const budget = (total * 10_000n + (10_000n - RESERVE_BPS) - 1n) / (10_000n - RESERVE_BPS); // the least that leaves `total`
+  return any ? budgetFor(caps + needs) : null;
+}
+
+/** The least budget that leaves `caps` (atomic USDC) to allocate after the reserve, rounded up to a cent. */
+export function budgetFor(caps: bigint): bigint {
+  const budget = (caps * 10_000n + (10_000n - RESERVE_BPS) - 1n) / (10_000n - RESERVE_BPS);
   return ((budget + 9_999n) / 10_000n) * 10_000n;
 }
 
@@ -77,11 +80,14 @@ export function budgetToHire(plan: Pick<PlanView, 'subtasks' | 'budget'>, upTo?:
  * The largest budget this Rook takes (GET /mode max_budget_atomic, atomic USDC) when `budget` is above it, so no draft
  * can hire what `budget` would; null otherwise, or when the services don't say.
  */
-function aboveLargest(budget: bigint | null | undefined, max: string | null | undefined): bigint | null {
+export function aboveLargest(budget: bigint | null | undefined, max: string | null | undefined): bigint | null {
   const largest = typeof max === 'string' && /^\d+$/.test(max) ? BigInt(max) : null;
   return budget && largest !== null && budget > largest ? largest : null;
 }
-const tooSmall = (largest: bigint, whom: string) => `Even the largest budget Rook takes, ${usdc(largest)} USDC, is too small to hire ${whom}.`;
+export const tooSmall = (largest: bigint, whom: string) => `Even the largest budget Rook takes, ${usdc(largest)} USDC, is too small to hire ${whom}.`;
+
+/** A small edit of delivered files (a rename, a colour): Rook makes it at once, so no agent is paid or waited for. */
+const ROOK_EDIT = 'Rook makes this change itself now, with no agent fee.';
 
 /**
  * Why Rook does this part with its own model; `budget`: what would hire one (budgetToHire); `afterHired`: a hired part
@@ -89,6 +95,7 @@ const tooSmall = (largest: bigint, whom: string) => `Even the largest budget Roo
  * suggested past. Older plans don't say why, so that wording claims no reason.
  */
 export function selfDoWhy(s: Pick<Subtask, 'self_do_reason' | 'self_do_need_atomic'>, budget?: bigint | null, afterHired = true, max?: string | null): string {
+  if (s.self_do_reason === 'rook_edit') return ROOK_EDIT;
   if (s.self_do_reason === 'no_agent') return 'No agent on the market fits this part, so Rook does it with its own model.';
   if (s.self_do_reason === 'over_budget') {
     const left = `this budget has left for it after the reserve${afterHired ? ' and the parts before it' : ''}, so Rook does it with its own model.`;
@@ -109,6 +116,7 @@ export function allSelfDoWhy(reasons: SelfDoReason[], budget?: bigint | null, ma
   const largest = aboveLargest(budget, max);
   const hire = (whom: string) => largest !== null ? tooSmall(largest, whom)
     : `Draft it again with ${budget ? `a budget of about ${usdc(budget)} USDC` : 'a larger budget'} to hire ${whom}.`;
+  if (every('rook_edit')) return reasons.length === 1 ? ROOK_EDIT : 'Rook makes these changes itself now, with no agent fee.';
   if (every('no_agent')) return 'No agent on the market fits these parts, so Rook does them all itself with its own model.';
   if (every('over_budget')) {
     return `The agents Rook found for these parts cost more than this budget allows, so Rook does them all itself with its own model. ${hire('them')}`;

@@ -65,7 +65,7 @@ test('with more than one part, a line about an agent names its part: one agent h
     'quill-writer passed every check on Write portfolio copy.',
     'quill-writer failed a check on Design brief.',
     'codex-engineer-01 timed out on Build one-page portfolio website.',
-    "Skipped dev-tools-agent for Build one-page portfolio website: the job didn't reach it, so nothing was paid.",
+    "The job for Build one-page portfolio website didn't reach dev-tools-agent, so nothing was paid.",
     'No charge for codex-engineer-01 on Build one-page portfolio website: its payment authorization was released unpaid.',
     'Receipt 1: paid 0.02 USDC to quill-writer for Write portfolio copy.',
   ]);
@@ -97,4 +97,31 @@ test("delivered parts: a hire's text from its accepted hire, Rook's own from the
   ]);
   // An older orchestrator sends only id, n and status: nothing to show, nothing breaks.
   assert.deepEqual(deliveredParts([{ id: 's1', n: 1, status: 'returned' }], titles), []);
+});
+
+test('a send that never reached the agent is one line, cause first, never "Skipped"; no internal ids show', () => {
+  const one = ctx([['s1', 'Site']]);
+  // t_3ad45053: the release came first, then the failed send. One line says both.
+  const sent = feedFrom([
+    ev(1, 'ledger', { op: 'release', agent_handle: 'dev-tools-agent', settled: false }, 's1'),
+    ev(2, 'quote_rejected', { agent_handle: 'dev-tools-agent', reason: 'send failed: -32603 internal error' }, 's1'),
+    // The other order says it once too.
+    ev(3, 'quote_rejected', { agent_handle: 'dev-tools-agent', reason: 'send failed: unreachable after 3 tries' }, 's1'),
+    ev(4, 'ledger', { op: 'release', agent_handle: 'dev-tools-agent', settled: false }, 's1'),
+    // Asked again later, that hire's release is its own line.
+    ev(5, 'hire_sent', { agent_handle: 'dev-tools-agent', amount_atomic: '80000' }, 's1'),
+    ev(6, 'ledger', { op: 'release', agent_handle: 'dev-tools-agent', settled: false }, 's1'),
+    ev(7, 'quote_rejected', { agent_handle: 'quill', reason: 'send failed: 402 payment refused' }, 's1'),
+    ev(8, 'ledger', { op: 'restored', contract_task_id: 'e' }),
+  ], one);
+  assert.deepEqual(sent.map((l) => l.text), [
+    "The job didn't reach dev-tools-agent, so nothing was paid.",
+    "dev-tools-agent didn't answer when Rook sent the job, so nothing was paid.",
+    'Hired dev-tools-agent, quoted 0.08 USDC.',
+    'No charge for dev-tools-agent: its payment authorization was released unpaid.',
+    'quill turned down the payment, so nothing was paid.',
+    'Rook restarted and picked this task up again.',
+  ]);
+  assert.equal(sent[0].detail, 'send failed: -32603 internal error'); // the raw reason stays as the tooltip
+  assert.equal(sent.at(-1)!.detail, 'contract task e');
 });

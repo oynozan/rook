@@ -94,7 +94,7 @@ function PartRow({ part: p, n, now, live }: { part: PartView; n: number; now: nu
       {p.delivered && (
         <div className="mt-2 text-sm">
           <p className="text-ink/60">{p.delivered.by ? <>Delivered by <span className="font-mono break-all">{p.delivered.by}</span></> : 'Rook wrote it'}</p>
-          {/* The agent's own words, as plain text. */}
+          {/* The agent's own words, as plain text with no Markdown marks (run-view.ts preview). */}
           <p className="mt-0.5 wrap-break-word text-ink/80">{p.delivered.preview}</p>
         </div>
       )}
@@ -103,7 +103,8 @@ function PartRow({ part: p, n, now, live }: { part: PartView; n: number; now: nu
         <div className="mt-1">
           <RowButton onClick={() => setBrief((b) => !b)} expanded={brief} controls={brief ? briefId : undefined}>
             <span className={`mr-1.5 inline-block transition-transform duration-200 motion-reduce:transition-none ${brief ? 'rotate-90' : ''}`} aria-hidden="true">›</span>
-            {p.self ? 'Brief' : 'Brief Rook sent'}
+            {/* Sent once Rook hired an agent (a quote it turned down sent nothing); until then it is what Rook will send. */}
+            {p.self ? 'Brief' : p.sent ? 'Brief Rook sent' : 'Brief for the agent'}
           </RowButton>
           <Reveal open={brief}>
             {/* The planner's own words for the agent; plain text, never markup. */}

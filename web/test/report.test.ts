@@ -46,3 +46,54 @@ test("the services' file marker reads as plain words; Rook's own work is from Ro
   assert.equal(fileMarker('A paragraph.'), null);
   assert.deepEqual([madeBy('rook:self-do'), madeBy('quill-writer')], ['Rook', 'quill-writer']);
 });
+
+test('a file marker inside a line reads as plain words, and a dotfile keeps its name for a download', async () => {
+  const { inlineMarkers } = await import('@/lib/report');
+  assert.equal(inlineMarkers('- **next.config.mjs** [file next.config.mjs, 6 lines, attached below the report]'), '- **next.config.mjs** next.config.mjs (6 lines), under Files');
+  assert.equal(inlineMarkers('See [file a.js, 1 line, not attached: too big] and [file b.css, 2 lines, attached below the report].'),
+    'See a.js (1 line, not attached: too big) and b.css (2 lines), under Files.');
+  assert.equal(inlineMarkers('[file] is a word'), '[file] is a word');
+  assert.equal(downloadName('.env.example'), '.env.example');
+  assert.equal(downloadName('app/.gitignore'), '.gitignore');
+});
+
+test('the report renders tables, rules, numbered lists, quotes and headings, not raw marks', async () => {
+  const { markdownBlocks } = await import('@/lib/report');
+  const md = [
+    '## Routes', '', '| Method | Path | Does |', '|---|:---:|---:|', '| GET | `/todos` | lists them |', '| POST | /todos | adds one \\| two |', '| DELETE |', '',
+    'Not | a table', '---', '1. Install', '2) Run', '> Quoted', '  - nested', '* star', '***',
+    '[file index.html, 4 lines, attached below the report]', '```sh', 'npm start', '```',
+  ].join('\n');
+  assert.deepEqual(markdownBlocks(md), [
+    { kind: 'heading', level: 2, text: 'Routes' },
+    { kind: 'table', head: ['Method', 'Path', 'Does'], rows: [['GET', '`/todos`', 'lists them'], ['POST', '/todos', 'adds one | two'], ['DELETE', '', '']] },
+    { kind: 'para', text: 'Not | a table' }, // a rule of one cell under two is no table
+    { kind: 'rule' },
+    { kind: 'number', n: '1', text: 'Install' }, { kind: 'number', n: '2', text: 'Run' },
+    { kind: 'quote', text: 'Quoted' },
+    { kind: 'bullet', depth: 1, text: 'nested' }, { kind: 'bullet', depth: 0, text: 'star' },
+    { kind: 'rule' },
+    { kind: 'note', text: 'index.html (4 lines) is under Files below.' },
+    { kind: 'code', lang: 'sh', text: 'npm start' },
+  ]);
+});
+
+test('inline Markdown splits into plain parts; only an http(s) link stays a link', async () => {
+  const { inlineParts } = await import('@/lib/report');
+  assert.deepEqual(inlineParts('As of **9 November 2026**, `NEAR` is *up*, per [CoinGecko](https://coingecko.com/x) and [this](javascript:alert(1)).'), [
+    { kind: 'text', text: 'As of ' }, { kind: 'strong', text: '9 November 2026' }, { kind: 'text', text: ', ' }, { kind: 'code', text: 'NEAR' },
+    { kind: 'text', text: ' is ' }, { kind: 'em', text: 'up' }, { kind: 'text', text: ', per ' },
+    { kind: 'link', text: 'CoinGecko', href: 'https://coingecko.com/x' }, { kind: 'text', text: ' and ' }, { kind: 'text', text: 'this' },
+    { kind: 'text', text: ').' },
+  ]);
+  // A star in arithmetic or a snake_case name is no emphasis.
+  assert.deepEqual(inlineParts('2 * 3 * 4 and my_var_name'), [{ kind: 'text', text: '2 * 3 * 4 and my_var_name' }]);
+  assert.deepEqual(inlineParts('see [file a.js, 3 lines, attached below the report]'), [{ kind: 'text', text: 'see a.js (3 lines), under Files' }]);
+});
+
+test("a part's preview is plain words: no marks, rules or pipes", async () => {
+  const { plainText } = await import('@/lib/report');
+  const { preview } = await import('@/lib/run-view');
+  assert.equal(plainText('As of **9 November 2026** the [price](https://x.io) is `1.2`.\n\n---\n\n| A | B |\n|---|---|\n| 1 | 2 |'), 'As of 9 November 2026 the price is 1.2. A · B; 1 · 2');
+  assert.equal(preview('# Report\n\n- **One** thing\n1. Two\n> three\n***'), 'Report One thing 1. Two three');
+});
