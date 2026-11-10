@@ -228,7 +228,7 @@ function reserveOf(budget: bigint, allocated: bigint): { reserve_bps: number; re
 
 /**
  * Step 4: keep agents whose quote succeeded with a row matching a /x402 recipient, ranked by expected cost (lowest
- * first), then higher p_pass, more delivered jobs, handle.
+ * first), then higher p_pass, more delivered jobs, handle; agents with recent stalls in Rook's history after the rest.
  */
 function quotedCandidates(agents: AgentSummary[], quotes: Record<string, QuoteResult>, recipients: X402Config['recipients'], history: Record<string, AgentHistory>, title: string, notes: string[]): Candidate[] {
   const out: Candidate[] = [];
@@ -259,7 +259,10 @@ function quotedCandidates(agents: AgentSummary[], quotes: Record<string, QuoteRe
       ...rank(a, r.amount, Object.hasOwn(history, a.handle) ? history[a.handle] : undefined),
     });
   }
+  const stalled = (c: Candidate) => (Object.hasOwn(history, c.handle) ? history[c.handle].stalled ?? 0 : 0) > 0;
   return out.sort((x, y) => {
+    // An agent whose recent hires never reached work goes after those that did: it is a fallback, not banned.
+    if (stalled(x) !== stalled(y)) return stalled(x) ? 1 : -1;
     const de = BigInt(x.expected_cost_atomic) - BigInt(y.expected_cost_atomic);
     if (de !== 0n) return de < 0n ? -1 : 1;
     return (y.p_pass - x.p_pass) || (y.delivered_jobs - x.delivered_jobs) || (x.handle < y.handle ? -1 : x.handle > y.handle ? 1 : 0);
@@ -283,9 +286,11 @@ function rank(a: AgentSummary, price: string, own: AgentHistory | undefined): Pi
   const expected = (BigInt(price) * BigInt(n + 2) + BigInt(s)) / BigInt(s + 1);
   const p_pass = Math.min(1, Math.round(((s + 1) * 1000) / (n + 2)) / 1000); // 201 / 400 = 0.5025 -> 0.503, same reason
   const record = [mJobs > 0 && `market ${mPass} of ${mJobs}`, rJobs > 0 && `Rook ${rPass} of ${rJobs}`].filter(Boolean).join(', ') || 'no record yet';
+  const stalls = own?.stalled ?? 0;
+  const after = stalls > 0 ? `; ranked after the others: ${stalls} recent ${stalls === 1 ? 'hire' : 'hires'} by Rook failed to send or timed out` : '';
   return {
     p_pass, expected_cost_atomic: expected.toString(),
-    rank_reason: `${formatUsdc(price)} USDC / ${p_pass} pass chance (${record}) = ${formatUsdc(expected)} USDC expected`,
+    rank_reason: `${formatUsdc(price)} USDC / ${p_pass} pass chance (${record}) = ${formatUsdc(expected)} USDC expected${after}`,
   };
 }
 

@@ -173,5 +173,9 @@ export async function json<T>(purpose: string, model: string, schema: z.ZodType<
   throw Object.assign(new Error(`LLM ${purpose} returned invalid JSON twice: ${lastErr.slice(0, 500)}`), { calls });
 }
 
-/** Neutralise any <deliverable ...> or </deliverable> tag (any case or spacing) in untrusted text quoted inside one. */
-export const escapeDelimiters = (text: string) => text.replace(/<(?=\s*\/?\s*deliverable\b)/gi, '&lt;');
+/**
+ * Neutralise any <deliverable ...> or </deliverable> tag (any case or spacing) in untrusted text quoted inside one.
+ * `tag`: another delimiter of that shape (letters, digits and _ only), such as the planner's reference_page.
+ */
+export const escapeDelimiters = (text: string, tag = 'deliverable') =>
+  text.replace(new RegExp(`<(?=\\s*\\/?\\s*${tag}\\b)`, 'gi'), '&lt;');

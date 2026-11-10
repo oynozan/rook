@@ -684,14 +684,68 @@ test("verdictHistory counts Rook's judged receipts per handle and keeps the 500 
   const { verdictHistory } = await import('../src/orchestrator/store.ts');
   const rc = (agent_handle: string, verdict: 'pass' | 'fail' | null) => ({ agent_handle, verdict });
   const tasks: any[] = [
-    { receipts: [rc('a', 'pass'), rc('a', 'fail'), rc('b', null)] },
-    { receipts: [rc('a', 'pass'), rc('c', 'fail')] },
+    { receipts: [rc('a', 'pass'), rc('a', 'fail'), rc('b', null)], subtasks: [] },
+    { receipts: [rc('a', 'pass'), rc('c', 'fail')], subtasks: [] },
   ];
   assert.deepEqual(verdictHistory(tasks), { a: { pass: 2, fail: 1 }, c: { pass: 0, fail: 1 } }); // b was never judged
-  const crowd = [{ receipts: [...Array.from({ length: 500 }, (_, i) => [rc(`h${i}`, 'pass'), rc(`h${i}`, 'pass')]).flat(), rc('once', 'fail')] }];
+  const crowd = [{ receipts: [...Array.from({ length: 500 }, (_, i) => [rc(`h${i}`, 'pass'), rc(`h${i}`, 'pass')]).flat(), rc('once', 'fail')], subtasks: [] }];
   const h = verdictHistory(crowd as any);
   assert.equal(Object.keys(h).length, 500);
   assert.ok(!('once' in h));
+});
+
+test('verdictHistory counts recent hires that failed to send or timed out since the agent last delivered', async () => {
+  const { verdictHistory, STALL_WINDOW_MS } = await import('../src/orchestrator/store.ts');
+  const now = Date.parse('2026-11-10T12:00:00Z');
+  const ago = (min: number) => new Date(now - min * 60_000).toISOString();
+  const hire = (agent_handle: string, state: string, endedMinAgo: number | null) => ({ agent_handle, state, ended_at: endedMinAgo === null ? null : ago(endedMinAgo) });
+  const task = (...hires: any[]) => ({ receipts: [], subtasks: [{ hires }] });
+  const h = verdictHistory([
+    // dev-tools-agent on mainnet: -32603 on every paid send, two runs.
+    task(hire('dev-tools', 'SEND_FAILED', 120), hire('codex', 'TIMEOUT', 60), hire('writer', 'COMPLETED', 50)),
+    task(hire('dev-tools', 'SEND_FAILED', 10), hire('dev-tools', 'SEND_FAILED', null)), // one still open: not ended, not counted
+    task(hire('codex', 'COMPLETED', 30)), // delivered since its timeout: cleared
+    task(hire('old', 'TIMEOUT', STALL_WINDOW_MS / 60_000 + 1)), // older than the window
+    task(hire('quitter', 'FAILED', 5), hire('killed', 'KILLED', 5), hire('cancelled', 'CANCELED', 5)), // not stalls
+  ] as any, now);
+  assert.deepEqual(h, { 'dev-tools': { pass: 0, fail: 0, stalled: 2 } });
+  // A delivery after the stalls clears them; one before does not, in whatever order the tasks list them.
+  const later = verdictHistory([{ receipts: [{ agent_handle: 'a', verdict: 'pass' }], subtasks: [{ hires: [hire('a', 'TIMEOUT', 20), hire('a', 'COMPLETED', 90), hire('b', 'COMPLETED', 30), hire('b', 'SEND_FAILED', 40)] }] }] as any, now);
+  assert.deepEqual(later, { a: { pass: 1, fail: 0, stalled: 1 } });
+});
+
+test('an agent whose recent hires stalled ranks after the others, cheapest or not, and stays as a fallback', async () => {
+  const plan = (history?: Record<string, { pass: number; fail: number; stalled?: number }>) => buildPlan(input({
+    draft: [sub('site')],
+    selected: [[agent('dev-tools'), agent('codex'), agent('patchforge')]], // 90% of 10 jobs each
+    quotes: { 'dev-tools': row('80000'), codex: row('200000'), patchforge: row('150000') },
+    history,
+  })).subtasks[0];
+  assert.deepEqual(plan().candidates.map((c) => c.handle), ['dev-tools', 'patchforge', 'codex']);
+  const s = plan({ 'dev-tools': { pass: 0, fail: 0, stalled: 2 }, codex: { pass: 1, fail: 0 } });
+  assert.deepEqual(s.candidates.map((c) => c.handle), ['patchforge', 'codex', 'dev-tools']);
+  assert.match(s.candidates[2].rank_reason, /; ranked after the others: 2 recent hires by Rook failed to send or timed out$/);
+  assert.doesNotMatch(s.candidates[0].rank_reason, /ranked after/);
+  // Only stalled agents: they keep their order by expected cost.
+  const all = plan({ 'dev-tools': { pass: 0, fail: 0, stalled: 1 }, codex: { pass: 0, fail: 0, stalled: 1 }, patchforge: { pass: 0, fail: 0, stalled: 3 } });
+  assert.deepEqual(all.candidates.map((c) => c.handle), ['dev-tools', 'patchforge', 'codex']);
+  const { PlanRequest } = await import('../src/shared/types.ts');
+  assert.ok(PlanRequest.safeParse({ task_id: 't', prompt: 'p', budget_atomic: '1', reserve_share: 0.2, history: { a: { pass: 0, fail: 0, stalled: 2 } } }).success);
+  assert.ok(!PlanRequest.safeParse({ task_id: 't', prompt: 'p', budget_atomic: '1', reserve_share: 0.2, history: { a: { pass: 0, fail: 0, stalled: -1 } } }).success);
+});
+
+test('the draft prompt plans one artifact as one subtask, lets Rook write what a model can, and never invents a named site', async () => {
+  const { DRAFT_SYSTEM } = await import('../src/planner/prompts.ts');
+  // On mainnet "make me a portfolio websites like oynozan.com" became a design brief, a build (self_do_ok false) and the
+  // copy, run in parallel: the builder never saw the other two, its agents failed, and the report had no website.
+  assert.match(DRAFT_SYSTEM, /when the user wants a single artifact \(a website, a page, an app, a script, one document\), plan ONE subtask that delivers the whole thing, with the design, structure, copy and content requirements written into its brief/);
+  assert.match(DRAFT_SYSTEM, /Never split an artifact into parts whose results would have to be put together/);
+  assert.match(DRAFT_SYSTEM, /Return 1 to 5 subtasks, at most 5: one per artifact or independent deliverable/);
+  assert.doesNotMatch(DRAFT_SYSTEM, /Return 3 to 5 subtasks|Keep each subtask narrow/);
+  assert.match(DRAFT_SYSTEM, /"self_do_ok"[^\n]*true when a language model alone can produce it from its brief: writing, copy, translation, design briefs, code \(a complete web page or a script included\)/);
+  assert.match(DRAFT_SYSTEM, /false only when it needs live, current, on-chain or market data, media a model cannot write as text \(images, audio, video\), or acting in the world/);
+  assert.match(DRAFT_SYSTEM, /never invent facts about a site, person or product/);
+  assert.match(DRAFT_SYSTEM, /When Rook could not read a page the task names, the brief gives the URL and asks the agent to look at it, and does not describe it/);
 });
 
 test('numeric_match on a date, year, version or id is removed; quantities (durations too) stay', () => {

@@ -7,6 +7,7 @@ import { budgetBacked, formatUsdc, namedBudgetProblem, share } from '../shared/m
 import { MAX_CATEGORY_LISTED, applySelection, buildPlan, filterSearch, hireable, marketCategory, type QuoteResult } from './plan.ts';
 import { aggregate, draft, select, selfDo } from './prompts.ts';
 import { agentOf, isMerged } from './canned.ts';
+import { readReferences } from './reference.ts';
 
 const gw = () => config.urls.marketGateway;
 
@@ -26,7 +27,10 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
   if (req.conversation?.earlier.some((m) => m.length > MAX_PROMPT_CHARS)) throw new HttpError(400, `an earlier message is over ${MAX_PROMPT_CHARS} characters`);
   const calls: LlmCall[] = [];
 
-  const { draft: d, notATask, budgetAtomic: drafted } = await llmStep(calls, () => draft(req.prompt, sent, sent - share(sent, req.reserve_share), req.conversation));
+  // Pages the message names (or, in a conversation, an earlier message: a revision keeps its reference), read first so
+  // the draft describes what they show. A page that can't be read is a note, never a failed plan.
+  const refs = await readReferences([req.prompt, ...[...(req.conversation?.earlier ?? [])].reverse()]);
+  const { draft: d, notATask, budgetAtomic: drafted } = await llmStep(calls, () => draft(req.prompt, sent, sent - share(sent, req.reserve_share), req.conversation, refs));
   if (!d.length) throw new HttpError(422, notATask || 'This does not read as a task Rook can plan: say what you want done.', { llm_calls: calls });
   // A total the message names ("make it 1 USDC") replaces the budget sent with it, within the same limits, refused
   // before the market is searched; the orchestrator checks it again. One the model read into a message that names no
@@ -68,7 +72,7 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
   })));
 
   const out = buildPlan({ draft: d, selected, quotes, recipients: x402.recipients ?? [], budget_atomic: budget, reserve_share: req.reserve_share, history: req.history });
-  return { ...out, notes: [...ignored, ...out.notes], ...(named !== undefined ? { budget: { ...out.budget, from_message: true } } : {}), llm_calls: calls };
+  return { ...out, notes: [...refs.notes, ...ignored, ...out.notes], ...(named !== undefined ? { budget: { ...out.budget, from_message: true } } : {}), llm_calls: calls };
 }
 
 /** An LLM failure is a 502 carrying the calls already paid for, so the orchestrator can fail the task with a trace. */
