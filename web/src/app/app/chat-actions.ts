@@ -2,6 +2,7 @@
 // functions, so the tests use them. Run: npx tsx --test src/app/app/*.test.ts
 import { currentTask, waitReason } from './conversations';
 import type { TaskSummary } from './orchestrator';
+import { olderNotATask } from './planner';
 
 /**
  * The tasks a conversation shows: a message sent again or edited takes the place of the one it supersedes, which is
@@ -46,9 +47,15 @@ export const canSendAgain = (t: MessageFacts) => t.status === 'failed' && t.subt
 
 /**
  * The failure is about the message, not Rook: the planner's own sentence (not a task, a budget out of range), stored
- * without the "planner: " prefix of its errors. Editing helps there; sending it again as it was rarely does.
+ * without the "planner: " prefix of its errors, or with it by older services (planner.ts plannerReason shows that one
+ * as the user's sentence too). Editing helps there; sending it again as it was rarely does. Rook's own trouble is not:
+ * the services restarted, or its planner read a budget into a message that names none (the orchestrator's
+ * BUDGET_NOT_NAMED, which says to send the message again).
  */
-export const messageProblem = (error: string | null | undefined) => !!error && !error.startsWith('planner: ') && !/^Rook's services restarted/.test(error);
+export function messageProblem(error: string | null | undefined): boolean {
+  if (!error || /^Rook's services restarted|^Rook's planner set a budget your message doesn't name/.test(error)) return false;
+  return !error.startsWith('planner: ') || olderNotATask(error.slice('planner: '.length));
+}
 
 /** The quiet note on a message that took another's place. */
 export const attemptNote = (t: { supersedes?: string | null; edited?: boolean }) => (t.supersedes ? (t.edited ? 'Edited' : 'Sent again') : null);

@@ -27,10 +27,15 @@ export function plannerReason(error: string): string {
   if (/^(fetch failed|terminated|other side closed|planner ended without a plan|planner answered HTTP 5)|ECONNREFUSED|ECONNRESET/.test(why)) {
     return "Rook's planner could not be reached. Try again in a minute.";
   }
-  // Services from before the not-a-task sentence was kept as is stored it with the prefix too: still the user's sentence.
-  if (!why.startsWith('planner LLM failed: ') && /not a task|read as a task Rook can plan/.test(why)) return why;
+  if (olderNotATask(why)) return why;
   return "Rook's planner hit a problem. Try again in a moment.";
 }
+
+/**
+ * `why`, a planner failure stored as "planner: <why>", is the planner's sentence about a message that isn't a task:
+ * services from before that sentence was kept as is stored it with the prefix too. Still the user's sentence.
+ */
+export const olderNotATask = (why: string) => !why.startsWith('planner LLM failed: ') && /not a task|read as a task Rook can plan/.test(why);
 
 type Subtask = PlanView['subtasks'][number];
 type SelfDoReason = Subtask['self_do_reason'];

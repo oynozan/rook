@@ -52,6 +52,12 @@ test('the newest message can be edited until its plan is approved; it can be sen
   assert.ok(!messageProblem("Rook's services restarted while this task was draft, so it stopped there. It hired no agent, so nothing was paid."));
   assert.ok(messageProblem('That reads like a go-ahead for the plan above. Use its button to start it.'));
   assert.ok(messageProblem('Your message asks for a budget of 60.00 USDC, but the most Rook takes is 50.00 USDC.'));
+  // The planner's model read a budget into a message that names none: Rook's mistake, and its sentence says to send it again.
+  assert.ok(!messageProblem("Rook's planner set a budget your message doesn't name, so this plan wasn't kept. Send your message again."));
+  // Older services stored the not-a-task sentence with the prefix: still about the message, as plannerReason shows it.
+  assert.ok(messageProblem('planner: That reads like a reply, not a task: to run a plan, use its button; to start something new, say what you want done.'));
+  assert.ok(messageProblem('planner: This does not read as a task Rook can plan: say what you want done.'));
+  assert.ok(!messageProblem('planner: planner LLM failed: NEAR AI 400 for plan.draft: not a task'));
 
   assert.equal(attemptNote({ supersedes: 'a1', edited: true }), 'Edited');
   assert.equal(attemptNote({ supersedes: 'a1', edited: false }), 'Sent again');
