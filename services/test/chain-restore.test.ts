@@ -402,6 +402,36 @@ test('after a restart an older unpaid hire never stands in for an outstanding au
   } finally { await orch.close(); }
 });
 
+test('after a restart, a hire Rook had already given up on (TIMEOUT, payment not yet cleared) is voided at once, not polled or reported again', async () => {
+  process.env.ROOK_DB = join(dir, 'timedout.sqlite');
+  const account = acct('to', 1);
+  openContractTask('to', ['200000']);
+  contract.get('to')!.subs.push(fundedSub('to', 1, '200000'));
+  bal.set(account, 200_000n);
+  a2a.set('a2a-tout', { handle: 'stubborn', state: 'WORKING' });
+  auths.set(account, { amount: 100_000n, landed: false, until: Date.now() + 60_000 }); // a minute left: waiting it out would fail the test
+  const ts = new Date(Date.now() - 3_600_000).toISOString();
+  const gaveUp = {
+    id: 'h_tout', subtask_id: 's1', agent_handle: 'stubborn', amount_atomic: '100000', payment_hash: `ph-${account}`, a2a_task_id: 'a2a-tout', context_id: 'ctx',
+    state: 'TIMEOUT', paid: false, deliverable_text: null, parts: [], verdict: null, started_at: ts, ended_at: ts, pay_to: X402.payTo, expires_at: new Date(Date.now() + 60_000).toISOString(),
+  };
+  storeTask('t_tout', 'running', 'to', { cap_atomic: '200000', candidates: [cand('stubborn'), cand('next')], tried: ['stubborn'], hires: [gaveUp] },
+    { 1: { payment_hash: `ph-${account}`, amount: '100000', expires_at_block: 1, nonce: '1' } }, '200000');
+  const orch = await start(0);
+  try {
+    const [nextId] = await until(async () => [...a2a].find(([, x]) => x.handle === 'next' && x.state === 'WORKING') ?? false);
+    assert.ok(calls.includes(`expire ${account} landed=false void`));
+    a2a.get(nextId)!.state = 'COMPLETED';
+    auths.get(account)!.landed = true;
+    bal.set(account, 100_000n);
+    const s = await until(async () => { const x = await snap(orch, 't_tout'); return ['closed', 'failed'].includes(x.task.status) ? x : false; });
+    assert.equal(s.task.status, 'closed', s.task.error);
+    assert.deepEqual(s.subtasks[0].hires.map((h: any) => [h.agent_handle, h.state, h.paid]), [['stubborn', 'TIMEOUT', false], ['next', 'COMPLETED', true]]);
+    assert.deepEqual((await events(orch, 't_tout')).filter((e) => e.type === 'a2a_state' && e.data.hire_id === 'h_tout'), []);
+    assert.deepEqual([s.ledger.spent_atomic, s.ledger.refunded_atomic], ['100000', '900000']);
+  } finally { await orch.close(); }
+});
+
 test('a killed task the owner closed on chain with a sub-account still Funded: Rook returns it and closes the task again', async () => {
   process.env.ROOK_DB = join(dir, 'owner-closed.sqlite');
   const account = acct('g', 1);

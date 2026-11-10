@@ -736,8 +736,10 @@ async function resumeHire(ledger: Ledger, t: Task, s: Sub, hire: Hire): Promise<
       return null;
     }
     setSub(t, s, 'working');
+    // TIMEOUT: Rook had given up on it before the restart (its payment not yet cleared): straight to the void, no new poll.
+    const timedOut = hire.state === 'TIMEOUT';
     const state = (['SUBMITTED', 'WORKING', ...TERMINAL] as string[]).includes(hire.state) ? hire.state as A2AState : 'WORKING';
-    return await follow(ledger, t, s, c, hire, { id: hire.a2a_task_id, context_id: hire.context_id, state, artifacts: [] }, slaEnd(c, hire));
+    return await follow(ledger, t, s, c, hire, { id: hire.a2a_task_id, context_id: hire.context_id, state, artifacts: [] }, timedOut ? 0 : slaEnd(c, hire), timedOut);
   } finally {
     release();
   }
@@ -748,10 +750,10 @@ const slaEnd = (c: Candidate, hire: Hire) =>
   Date.parse(hire.started_at) + Math.min(c.sla_seconds + config.paymentGraceS, config.hirePatienceS) * 1000;
 
 /** Polls a sent hire to its end, then settles its payment or ends it unpaid (a fresh hire, or one resumed after a restart). */
-async function follow(ledger: Ledger, t: Task, s: Sub, c: Candidate, hire: Hire, sentTask: A2ATask, slaEnd: number): Promise<Hire | null> {
+async function follow(ledger: Ledger, t: Task, s: Sub, c: Candidate, hire: Hire, sentTask: A2ATask, slaEnd: number, timedOut = false): Promise<Hire | null> {
   const signal = t.abort.signal;
   t.inflight.set(hire.id, { subtask: s, hire, handle: c.handle, a2a_task_id: sentTask.id });
-  let final = await poll(t, s, c, hire, sentTask, slaEnd);
+  let final = timedOut ? null : await poll(t, s, c, hire, sentTask, slaEnd);
   if (!final) {
     // Past sla + grace (at most ROOK_HIRE_PATIENCE_S): Rook stops waiting, whether or not the agent accepts CancelTask.
     // One last look catches a delivery that landed meanwhile; otherwise the payment is voided (the signer spends its
@@ -767,7 +769,7 @@ async function follow(ledger: Ledger, t: Task, s: Sub, c: Candidate, hire: Hire,
 
   if (!final) {
     hire.state = 'TIMEOUT';
-    emit(t, 'a2a_state', { hire_id: hire.id, agent_handle: c.handle, a2a_task_id: sentTask.id, state: 'TIMEOUT' }, s.id);
+    if (!timedOut) emit(t, 'a2a_state', { hire_id: hire.id, agent_handle: c.handle, a2a_task_id: sentTask.id, state: 'TIMEOUT' }, s.id);
     return (await endUnpaid(ledger, t, s, hire, 'void')) ? hire : null;
   }
   if (final.state !== 'COMPLETED') { // REJECTED, FAILED, CANCELED: terminal and unpaid
