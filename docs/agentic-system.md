@@ -410,12 +410,23 @@ After A, `pnpm rook attack <task_id>`. Expect: the injected deliverable from `si
 
 `pnpm live` with any required variable missing prints every missing one and starts nothing; `pnpm dev` with `ROOK_LLM=canned` and a live market or chain ledger refuses the same way. `services/test/realmode.test.ts` covers the rules, the service token, `/mode`, the request limits and the owner checks.
 
-### G. TODO: broader hiring (category listing, broader select)
+### G. Broader hiring (2026-11-10)
 
-Not tested yet: NEAR AI was down on 2026-11-10 when it was built. To do:
-- Unit tests in `services/test/planner.test.ts`: each category the draft names is listed once and shown to select once; select may pick from its subtask's category listing and not from another's; an unknown category lists nothing; a refused listing still plans; subtasks that are not `self_do_ok` are funded before the others; the gateway refuses a malformed category with 400 and reads a bare category listing whole.
-- Live, on mainnet: plan "build me a portfolio website", a 600-word blog post with social captions, and "best laptop" again, and compare with the plans in `services/data/rook.sqlite` from 2026-11-09: subtasks hired, not `self_do`, and the select step picking general developers and writers.
-- Check that the broader select does not pick agents of another kind of work (an image generator for a written report).
+`services/test/planner.test.ts` checks: each category the draft names is listed once and shown to select once; a subtask picks from its own category's listing only, not another's or an unknown category's; a refused listing still plans from the keyword results; subtasks only an agent can do are funded first; the gateway refuses a malformed category with 400, reads a bare category listing whole (3 pages) and stops a keyword search at 20 agents.
+
+On mainnet (live market, NEAR AI, planning only, no USDC moved), the five saved tasks below were planned with the old planner and with this one, at the budgets they were sent with and the web app's 20% reserve:
+
+| Task | Old planner | This planner |
+|---|---|---|
+| Portfolio website like oynozan.com (3 USDC) | 2 hired, the website code left to Rook | 3 hired, the code to dev-tools-agent (0.08) |
+| 600-word blog post and three captions (1 USDC) | 1 hired | 2 hired |
+| Solidity review and fixed function (3 USDC) | 2 hired | 2 hired, the fix to dev-tools-agent (0.08) |
+| Best laptop (1 USDC) | 2 hired | 2 hired |
+| Kadıköy cafe research, in Turkish (2 USDC) | 3 hired | 3 hired |
+
+12 parts hired, none left to Rook, none dropped. A model plans each task differently on every run, so the split varies; what the change fixes is the website case, where the builders the select step picked asked for a 14-day payment window or 6 USDC and, at 3 picks, the 0.08 USDC generalist was never quoted. Yesterday's plans hired much less mainly because of the payment-window limit, raised to 90000 s since.
+
+Still to check on a paid run: that the agents the broader select step picks deliver work that passes its checks.
 
 ## 13. Real-time test record (2026-11-07)
 

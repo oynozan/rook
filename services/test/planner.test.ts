@@ -704,3 +704,86 @@ test('numeric_match on a date, year, version or id is removed; quantities (durat
   for (const c of ['c1', 'c2', 'c3', 'c4']) assert.ok(p.notes.some((n) => n.startsWith(`criterion s1.${c} removed`) && n.includes('date or id')), c);
   assert.deepEqual(p.subtasks[0].criteria.map((c: any) => c.spec.label), ['Active users', 'Days until launch']); // durations are quantities
 });
+
+test("each category the draft names is listed once for select; a subtask picks from its own category's listing only; a refused listing still plans", async (t) => {
+  const { serve, call } = await import('../src/shared/http.ts');
+  const listed: string[] = [];
+  let refuse = false;
+  const gw = await serve('fake-gateway', {
+    'GET /search': ({ query }) => {
+      const c = query.get('category');
+      if (!c) return { agents: [agent(`kw-${query.get('q')}`)] };
+      listed.push(c);
+      if (refuse) throw Object.assign(new Error('market search: HTTP 500'), { status: 502 });
+      return { agents: [agent('builder'), agent('offline-dev', { available_now: false })] };
+    },
+    'GET /x402': () => ({ x402Version: 2, recipients: [RECIPIENT] }),
+    'POST /quote': () => row('100000'),
+  }, 0);
+  const saved = process.env.MARKET_GATEWAY_URL;
+  process.env.MARKET_GATEWAY_URL = gw.url;
+  const { start } = await import('../src/planner/index.ts');
+  const planner = await start(0);
+  t.after(async () => { await planner.close(); await gw.close(); if (saved === undefined) delete process.env.MARKET_GATEWAY_URL; else process.env.MARKET_GATEWAY_URL = saved; });
+
+  const draft = [sub('site', { category: 'dev_tools' }), sub('api', { category: 'dev_tools' }), sub('copy', { category: 'Bogus' })];
+  // Every subtask asks for the builder: only the two of the dev_tools kind may have it.
+  const answer = (system: string) => system.includes('Split the user') ? { subtasks: draft }
+    : system.includes('For each subtask below') ? { selections: [1, 2, 3].map((i) => ({ subtask_index: i, handles: ['builder', `kw-${draft[i - 1].title}`] })) } : undefined;
+  const body = { task_id: 't', prompt: 'Build a site, an API and its copy', budget_atomic: '3000000', reserve_share: 0.2 };
+  let plan: any, fallback: any;
+  const sent = await promptsSent(async () => {
+    plan = await call(`${planner.url}/plan`, body);
+    refuse = true;
+    fallback = await call(`${planner.url}/plan`, body);
+  }, answer);
+  assert.deepEqual(listed, ['dev_tools', 'dev_tools']); // once per plan, whatever the number of its subtasks; Bogus is no category
+  const select = sent.find((m) => m[0].content.includes('For each subtask below'))![1].content;
+  assert.equal(select.split('Category listing "dev_tools"').length - 1, 1);
+  assert.equal(select.split('Also pick from: the "dev_tools" category listing').length - 1, 2);
+  assert.ok(!select.includes('offline-dev')); // only agents that can be hired now
+  assert.deepEqual(plan.subtasks.map((s: any) => s.candidates.map((c: any) => c.handle).sort()), [['builder', 'kw-site'], ['builder', 'kw-api'], ['kw-copy']]);
+  // The listing refused: the keyword results plan, and select is not offered the listing.
+  assert.deepEqual(fallback.subtasks.map((s: any) => s.candidates.map((c: any) => c.handle)), [['kw-site'], ['kw-api'], ['kw-copy']]);
+  const select2 = sent.filter((m) => m[0].content.includes('For each subtask below'))[1][1].content;
+  assert.ok(!select2.includes('Category listing'));
+});
+
+test('subtasks only an agent can do are funded first: a part Rook can write itself does not take their money', () => {
+  // 1.25 USDC: 1.00 allocatable. Each part costs 0.90, so only one is hired.
+  const p = buildPlan(input({
+    budget_atomic: 1_250_000n,
+    draft: [sub('write', { self_do_ok: true }), sub('live data')],
+    selected: [[agent('writer')], [agent('data')]],
+    quotes: { writer: row('900000'), data: row('900000') },
+  }));
+  assert.deepEqual(p.subtasks.map((s) => [s.title, s.self_do, s.self_do_reason ?? null]), [['write', true, 'over_budget'], ['live data', false, null]]);
+  assert.deepEqual(p.dropped, []);
+  assert.equal(p.subtasks[0].self_do_need_atomic, '900000');
+});
+
+test('gateway search: a malformed category is refused; a bare category listing is read whole, a keyword search stops at 20', async (t) => {
+  const { serve, call } = await import('../src/shared/http.ts');
+  const asked: string[] = [];
+  const page = (offset: number, n: number) => Array.from({ length: n }, (_, i) => ({
+    handle: `a${offset + i}`, name: 'A', description: 'd', tags: [], available_now: true, listing_status: 'live', payable_with: ['USDC'],
+  }));
+  const market = await serve('fake-market', {
+    'GET /v1/agents': ({ query }) => {
+      asked.push(`${query.get('q')}|${query.get('category') ?? ''}|${query.get('offset')}`);
+      const offset = Number(query.get('offset'));
+      return { agents: page(offset, offset < 100 ? 50 : 10) };
+    },
+    'GET /.well-known/x402': () => ({ x402Version: 2, recipients: [RECIPIENT] }),
+  }, 0);
+  const saved = process.env.SIMULATOR_URL;
+  process.env.SIMULATOR_URL = market.url;
+  const { start } = await import('../src/market-gateway/index.ts');
+  const gw = await start(0);
+  t.after(async () => { await gw.close(); await market.close(); if (saved === undefined) delete process.env.SIMULATOR_URL; else process.env.SIMULATOR_URL = saved; });
+
+  await assert.rejects(call(`${gw.url}/search?q=&category=${encodeURIComponent('dev tools&x=1')}`), (e: any) => e.status === 400);
+  assert.equal((await call(`${gw.url}/search?q=&category=dev_tools`)).agents.length, 110); // 3 pages
+  assert.equal((await call(`${gw.url}/search?q=web`)).agents.length, 50); // one page holds 20 or more
+  assert.deepEqual(asked, ['|dev_tools|0', '|dev_tools|50', '|dev_tools|100', 'web||0']);
+});
