@@ -8,7 +8,7 @@
 // unchecked, return, close, unwind, run, restore (problems). Agent-related ones name `agent_handle`.
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { cannedAggregate, agentOf, isMerged } from '../planner/canned.ts';
+import { attach, cannedAggregate, agentOf, isMerged } from '../planner/canned.ts';
 import { config } from '../shared/config.ts';
 import { call } from '../shared/http.ts';
 import { formatUsdc } from '../shared/money.ts';
@@ -152,13 +152,14 @@ export async function runTask(ledger: Ledger, t: Task) {
         signal.throwIfAborted();
         t.llm_calls.push(...paidCalls(e));
         emit(t, 'error', { kind: 'aggregate', message: `aggregate failed, using the deterministic merge: ${msg(e)}` });
-        agg = { final_markdown: cannedAggregate(req), attribution: subtasks.filter(isMerged).map((s) => ({ subtask_id: s.id, agent_handle: agentOf(s) })), llm_calls: [] };
+        const attached = attach(subtasks); // the delivered files too: a web page an agent built stays a file
+        agg = { final_markdown: cannedAggregate(req, attached), attribution: subtasks.filter(isMerged).map((s) => ({ subtask_id: s.id, agent_handle: agentOf(s) })), files: attached.files, llm_calls: [] };
       }
       signal.throwIfAborted();
       t.llm_calls.push(...(agg.llm_calls ?? []));
       // Stored before the close: the report is paid for, so a close that fails (or a restart) never loses it.
       t.final_result = {
-        final_markdown: agg.final_markdown, attribution: agg.attribution ?? [],
+        final_markdown: agg.final_markdown, attribution: agg.attribution ?? [], files: agg.files ?? [],
         abandoned: t.subtasks.filter((s) => s.final_outcome === 'abandoned').map((s) => s.id),
       };
       saveTask(t);
@@ -190,7 +191,10 @@ export async function runTask(ledger: Ledger, t: Task) {
 /** The books are closed: the run ends with its report and what it spent and refunded. */
 function closed(ledger: Ledger, t: Task) {
   const v = ledger.view(t.id)!;
-  emit(t, 'final', { ...t.final_result, spent_atomic: v.spent_atomic, refunded_atomic: v.refunded_atomic, reserve_used_atomic: v.reserve_used_atomic });
+  // The files (up to 3 MB) stay out of the event, which every reconnect replays and the task doc keeps: a client
+  // reads them from the snapshot, as it does the report.
+  const { files: _, ...result } = t.final_result!;
+  emit(t, 'final', { ...result, spent_atomic: v.spent_atomic, refunded_atomic: v.refunded_atomic, reserve_used_atomic: v.reserve_used_atomic });
   setStatus(t, 'closed');
 }
 

@@ -10,6 +10,7 @@ process.env.ROOK_UNREACHABLE_RETRY_S = '0.2';
 
 const { serve, call, HttpError } = await import('../src/shared/http.ts');
 const { start } = await import('../src/orchestrator/index.ts');
+const { attach } = await import('../src/planner/canned.ts');
 type Running = Awaited<ReturnType<typeof start>>;
 
 const X402 = { network: 'near:mainnet', asset: 'usdc.sim', payTo: 'treasury.sim' };
@@ -34,6 +35,7 @@ const PROFILES: Record<string, Profile> = {
   late: { price: '100000', state: 'COMPLETED', text: 'Late but complete', polls: 40, noCancel: true },
   'down-once': { price: '100000', state: 'COMPLETED', text: 'Total supply: 1,250,000,000 NEAR', down: 1 },
   'down-always': { price: '100000', state: 'COMPLETED', text: 'never delivered', down: 99 },
+  'site-good': { price: '100000', state: 'COMPLETED', text: 'Here is the site.\n\nindex.html\n```html\n<!doctype html>\n<html><body>Ozan</body></html>\n```' },
 };
 const downs = new Map<string, number>();
 let planGate: Promise<void> = Promise.resolve();
@@ -65,6 +67,7 @@ before(async () => {
       return {
       final_markdown: body.subtasks.map((s: any) => `## ${s.title} (${s.agent_handle})\n${s.deliverable_text}`).join('\n'),
       attribution: body.subtasks.map((s: any) => ({ subtask_id: s.id, agent_handle: s.agent_handle })),
+      files: attach(body.subtasks).files, // as the planner does
       llm_calls: [],
     }; },
   }, 0);
@@ -376,6 +379,25 @@ test('a plan with every part dropped ends the task as failed, with the reason in
     assert.deepEqual(created.plan.dropped.map((d: any) => d.reason), reasons);
     await assert.rejects(call(`${orch.url}/tasks/${created.id}/approve`, {}), /approve needs planned/);
   }
+});
+
+test("a delivered web page reaches the snapshot's final_result as a file, also through the deterministic merge; the final event leaves it out", async () => {
+  const page = '<!doctype html>\n<html><body>Ozan</body></html>';
+  for (const prompt of ['make me a portfolio website like oynozan.com', 'AGG-DOWN portfolio']) {
+    const s = await runToEnd({ subtasks: [sub('s1', 'Build one-page portfolio website', '200000', [cand('site-good', '100000')])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] }, prompt);
+    assert.equal(s.task.status, 'closed', s.task.error);
+    assert.deepEqual(s.final_result.files, [{ subtask_id: 's1', agent_handle: 'site-good', name: 'index.html', mime: 'text/html', text: page }], prompt);
+    const evs = (await fetch(`${orch.url}/tasks/${s.task.id}/events`).then((r) => r.text())).split('\n').filter((l) => l.startsWith('data: ')).map((l) => JSON.parse(l.slice(6)));
+    const final = evs.find((e) => e.type === 'final').data;
+    assert.deepEqual([typeof final.final_markdown, 'files' in final], ['string', false]); // the snapshot carries them
+    if (prompt.startsWith('AGG-DOWN')) {
+      assert.match(s.final_result.final_markdown, /index\.html\n\[file index\.html, 2 lines, attached below the report\]/);
+      assert.doesNotMatch(s.final_result.final_markdown, /<!doctype/);
+    }
+  }
+  // A plan with nothing delivered still has a list.
+  const none = await runToEnd({ subtasks: [sub('s1', 'Down', '200000', [cand('check-fails', '100000')])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] });
+  assert.deepEqual(none.final_result.files, []);
 });
 
 test("a self_do subtask is 'working' while Rook writes it, and its text is in the snapshot (it has no hire)", async () => {

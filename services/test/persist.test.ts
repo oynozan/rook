@@ -108,6 +108,27 @@ test('a sim-ledger task restarted while closing with its report ends closed: the
   assert.equal(doc.ledger_saved, null);
 });
 
+test("a report's files survive a restart in the task doc; a report stored before files shows an empty list", async () => {
+  const path = freshDb();
+  const ts = new Date().toISOString();
+  const file = { subtask_id: 's1', agent_handle: 'codex-engineer-01', name: 'index.html', mime: 'text/html', text: '<!doctype html>\n<html></html>' };
+  const doc = (id: string, final_result: any) => ({
+    id, prompt: 'p', budget_atomic: '1000000', reserve_share: 0.2, funder: 'funder.sim', owner: null, status: 'closed' as const, error: null,
+    created_at: ts, updated_at: ts, plan: null, subtasks: [], receipts: [], llm_calls: [], final_result,
+    events: [{ seq: 1, ts, task_id: id, type: 'task_status' as const, data: { from: 'closing', to: 'closed' } }],
+  });
+  const store = openStore(path);
+  store.save(doc('t_files', { final_markdown: '# Report', attribution: [], files: [file], abandoned: [] }));
+  store.save(doc('t_old', { final_markdown: '# Old', attribution: [], abandoned: [] }));
+  store.close();
+
+  const orch = await start(0);
+  const [withFiles, old] = await Promise.all(['t_files', 't_old'].map((id) => call(`${orch.url}/tasks/${id}`)));
+  await orch.close();
+  assert.deepEqual(withFiles.final_result.files, [file]);
+  assert.deepEqual(old.final_result, { final_markdown: '# Old', attribution: [], abandoned: [], files: [] });
+});
+
 test('a stopped or failed sim-ledger task saved while its books were still open shows no books after a restart, never a refund under way', async () => {
   freshDb();
   const ts = new Date().toISOString();

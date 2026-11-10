@@ -2,7 +2,7 @@
 // orchestrator runs; with ROOK_DB set, every change is also written to SQLite (db.ts) and reloaded on start.
 import { randomUUID } from 'node:crypto';
 import {
-  MAX_HISTORY_HANDLES, type AgentHistory, type EventType, type Evaluation, type LlmCall, type Part, type Plan, type PlanSubtask,
+  MAX_HISTORY_HANDLES, type AgentHistory, type DeliveredFile, type EventType, type Evaluation, type LlmCall, type Part, type Plan, type PlanSubtask,
   type Receipt, type RookEvent, type SubtaskStatus, type TaskStatus,
 } from '../shared/types.ts';
 import type { ChainBinding } from './chain-ledger.ts';
@@ -42,7 +42,8 @@ export type Task = {
   deleted_at?: string | null; // its owner deleted its conversation: gone for the owner, kept for the record (8.9)
   status: TaskStatus; error: string | null; created_at: string; updated_at: string;
   plan: Plan | null; subtasks: Sub[]; receipts: ReceiptView[]; events: RookEvent[];
-  final_result: { final_markdown: string; attribution: { subtask_id: string; agent_handle: string }[]; abandoned: string[] } | null;
+  // files: the code files taken out of the deliveries (planner 5.4); absent on reports stored before Rook attached files.
+  final_result: { final_markdown: string; attribution: { subtask_id: string; agent_handle: string }[]; files?: DeliveredFile[]; abandoned: string[] } | null;
   llm_calls: LlmCall[]; // self-do and aggregate calls (plan and evaluation calls live on the plan and evaluations)
   ledger_saved?: unknown; // the ledger's last view, kept so a reloaded task still shows what it spent
   chain?: ChainBinding | null; // ROOK_LEDGER=chain: its contract task, sub-accounts and outstanding authorizations
@@ -267,7 +268,7 @@ export function snapshot(t: Task, ledger: Ledger) {
     // a2a_task_id, attestation_hash, payment_tx and receipt_tx with their explorer links (null until known, and in simulation)
     receipts: t.receipts.map((r) => ({ payment_explorer_url: null, receipt_explorer_url: null, ...r })),
     ledger: ledger.view(t.id) ?? t.ledger_saved ?? null,
-    final_result: t.final_result,
+    final_result: t.final_result && { ...t.final_result, files: t.final_result.files ?? [] }, // always a list for clients
     llm_cost: {
       total_usd: Number(calls.reduce((x, c) => x + (c.cost_usd ?? 0), 0).toFixed(6)),
       calls: calls.length,

@@ -117,9 +117,9 @@ export function start(port = config.ports.planner): Promise<Running> {
     'POST /aggregate': async ({ body }): Promise<AggregateResult> => {
       const req = AggregateRequest.parse(body);
       const calls: LlmCall[] = [];
-      const { final_markdown } = await llmStep(calls, () => aggregate(req));
+      const { final_markdown, files } = await llmStep(calls, () => aggregate(req));
       const attribution = req.subtasks.filter(isMerged).map((s) => ({ subtask_id: s.id, agent_handle: agentOf(s) }));
-      return { final_markdown, attribution, llm_calls: calls };
+      return { final_markdown, attribution, files, llm_calls: calls };
     },
   }, port);
 }

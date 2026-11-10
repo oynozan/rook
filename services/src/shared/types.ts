@@ -122,7 +122,13 @@ export const AggregateRequest = z.object({
     agent_handle: z.string().optional(), deliverable_text: z.string().optional(),
   })),
 });
-export type AggregateResult = { final_markdown: string; attribution: { subtask_id: string; agent_handle: string }[]; llm_calls: LlmCall[] };
+/** A code file taken out of a merged delivery as written (5.4): the web app offers it to open or save. */
+export type DeliveredFile = { subtask_id: string; agent_handle: string; name: string; mime: string; text: string };
+export type AggregateResult = {
+  final_markdown: string; attribution: { subtask_id: string; agent_handle: string }[];
+  files: DeliveredFile[]; // always present, possibly empty
+  llm_calls: LlmCall[];
+};
 
 // ---- Evaluator (section 6) ----
 export const EvaluateRequest = z.object({
