@@ -237,6 +237,9 @@ test('kill releases the authorization, cancels the A2A task and stops hiring', a
   const evs = (await fetch(`${orch.url}/tasks/${created.id}/events`).then((r) => r.text())).split('\n\n').filter(Boolean);
   const killAt = evs.findIndex((e) => e.includes('"op":"kill"'));
   assert.ok(killAt > 0 && !evs.slice(killAt).some((e) => e.includes('event: hire_sent')));
+  // The release names its hire's agent: without it the page kept "Quoted" on a hire that was never paid.
+  const releases = evs.filter((e) => e.includes('"op":"release"'));
+  assert.ok(releases.length > 0 && releases.every((e) => e.includes('"agent_handle":"hang"')), releases.join(' | '));
   // After the killed status only the unwind: the sim books close too, so the refund shows.
   const killedAt = evs.findIndex((e) => /"to":"killed"/.test(e));
   assert.deepEqual(evs.slice(killedAt + 1).map((e) => e.match(/"op":"(\w+)"|"to":"(\w+)"/)!.slice(1).join('')), ['returnLeftover', 'returned', 'closeTask']);

@@ -262,8 +262,8 @@ export async function unwind(ledger: Ledger, t: Task, why: string, afterRun = fa
     t.salvaging = true;
     const stop = t.shutdown.signal;
     const said = new Map<string, string>(); // each step's last reported problem
-    const step = async (op: string, s: Sub | null, fn: () => bigint | object | Promise<bigint | object>) => {
-      try { return await ledgerOp(t, op, s, fn); } catch (e) { // a sim ledger refuses synchronously, so not .catch
+    const step = async (op: string, s: Sub | null, fn: () => bigint | object | Promise<bigint | object>, extra: object = {}) => {
+      try { return await ledgerOp(t, op, s, fn, extra); } catch (e) { // a sim ledger refuses synchronously, so not .catch
         if (stop.aborted) return null; // cut short by a shutdown: the next start resumes it
         const key = `${op} ${s?.id ?? ''}`, message = `${why}, ${op}${s ? ` ${s.id}` : ''}: ${msg(e)}`;
         if (said.get(key) !== message) emit(t, 'error', { kind: 'unwind', op, message }, s?.id);
@@ -287,7 +287,8 @@ export async function unwind(ledger: Ledger, t: Task, why: string, afterRun = fa
             clearing.add(s.n);
             emit(t, 'ledger', { op: 'clearing', n: s.n, how, agent_handle: hire?.agent_handle ?? null, expires_at: hire?.expires_at ?? null }, s.id);
           }
-          const r = await step('release', s, () => ledger.release(t.id, s.n, how, stop));
+          // Named, so a client says which agent's payment ended (and whether it was charged).
+          const r = await step('release', s, () => ledger.release(t.id, s.n, how, stop), hire ? { agent_handle: hire.agent_handle } : {});
           if (r && typeof r === 'object' && 'settled' in r && hire) { // it landed anyway: paid, so it gets a receipt
             hire.paid = true; hire.state = 'OUTCOME_UNKNOWN'; hire.ended_at ??= now();
             if (!t.receipts.some((x) => x.hire_id === hire.id)) await writeReceipt(ledger, t, s, hire, null);
@@ -329,7 +330,8 @@ export function kill(ledger: Ledger, t: Task) {
     for (const v of ledger.view(t.id)?.subtasks ?? []) {
       if (v.authorized_atomic === null || sending.has(v.n)) continue;
       const s = t.subtasks.find((x) => x.n === v.n) ?? null;
-      ledgerOp(t, 'release', s, () => ledger.release(t.id, v.n, 'now')).catch((e) => console.error('[orchestrator] kill release', e));
+      const h = s && authHire(ledger, t, s); // looked up while the authorization is still outstanding
+      ledgerOp(t, 'release', s, () => ledger.release(t.id, v.n, 'now'), h ? { agent_handle: h.agent_handle } : {}).catch((e) => console.error('[orchestrator] kill release', e));
     }
   }
   setStatus(t, 'killed');
@@ -774,7 +776,17 @@ async function follow(ledger: Ledger, t: Task, s: Sub, c: Candidate, hire: Hire,
   if (!final) {
     hire.state = 'TIMEOUT';
     if (!timedOut) emit(t, 'a2a_state', { hire_id: hire.id, agent_handle: c.handle, a2a_task_id: sentTask.id, state: 'TIMEOUT' }, s.id);
-    return (await endUnpaid(ledger, t, s, hire, 'void')) ? hire : null;
+    if (!(await endUnpaid(ledger, t, s, hire, 'void'))) return null;
+    // It landed: x402 settles only on delivery, so the agent delivered in the gap. Its work is read and judged like any
+    // delivery (the release already booked the payment), not thrown away while the next candidate is paid.
+    const late = await lateDelivery(c.handle, sentTask.id, signal);
+    if (late) {
+      hire.state = 'COMPLETED';
+      hire.parts = late.artifacts.flatMap((a) => a.parts ?? []);
+      hire.deliverable_text = hire.parts.filter((p) => typeof p.text === 'string').map((p) => p.text).join('\n\n');
+      emit(t, 'a2a_state', { hire_id: hire.id, agent_handle: c.handle, a2a_task_id: sentTask.id, state: 'COMPLETED' }, s.id);
+    }
+    return hire;
   }
   if (final.state !== 'COMPLETED') { // REJECTED, FAILED, CANCELED: terminal and unpaid
     return (await endUnpaid(ledger, t, s, hire, 'terminal')) ? hire : null;
@@ -790,6 +802,21 @@ async function follow(ledger: Ledger, t: Task, s: Sub, c: Candidate, hire: Hire,
   }, { agent_handle: c.handle, payment_hash: hire.payment_hash });
   if (paid === 0n) emit(t, 'error', { kind: 'unpaid', agent_handle: c.handle, message: `${c.handle} delivered, but its payment never showed on chain before the authorization expired; booked unpaid` }, s.id);
   return hire;
+}
+
+/**
+ * A paid hire's delivery, read after Rook had given up on it: three looks a second apart (COMPLETED may land before its
+ * artifacts). Null when none shows, or on a kill: the hire then stays counted as spent with an unknown outcome.
+ */
+async function lateDelivery(handle: string, id: string, signal: AbortSignal): Promise<A2ATask | null> {
+  try {
+    for (let i = 0; i < 3; i++) {
+      if (i) await sleep(1000, undefined, { signal });
+      const task = await getTask(handle, id, signal);
+      if (task?.state === 'COMPLETED' && hasContent(task)) return task;
+    }
+  } catch (e) { if (!signal.aborted) throw e; }
+  return null;
 }
 
 const hasContent = (task: A2ATask) => task.artifacts?.some((a) => a.parts?.some((p) => (p.text ?? '').trim() || p.url || p.raw));
