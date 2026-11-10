@@ -11,7 +11,7 @@ import { createLedger, type Ledger } from './ledger.ts';
 import { contractTaskOf, kill, restoreTask, runTask, SHUTDOWN } from './runner.ts';
 import { openStore } from './db.ts';
 import {
-  ancestors, emit, fromDoc, headOf, isFree, isTerminal, newTask, openPlan, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task,
+  ancestors, attempts, emit, fromDoc, headOf, isFree, isTerminal, newTask, openPlan, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task,
 } from './store.ts';
 import { conversationTasks, supersedeRefusal } from './store.ts';
 
@@ -233,11 +233,11 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       const parentId = old ? old.parent_id : b.parent_id;
       const parent = parentId == null ? null : owned(parentId, b.owner);
       const above = parent ? ancestors(parent, tasks) : []; // the parent and the tasks above it, nearest first
-      if (parent) {
+      // What the message acts on: the parent, or the task above replies that never got a plan (a run under way, say).
+      const head = headOf(above);
+      if (parent && head) {
         if (parent.deleted_at) throw new HttpError(409, DELETED);
         if (parent.owner !== (b.owner ?? null)) throw new HttpError(409, `task ${parent.id} has another owner: a follow-up keeps its owner`);
-        // What the message acts on: the parent, or the task above replies that never got a plan (a run under way, say).
-        const head = headOf(above)!;
         if (head.status === 'draft') throw new HttpError(409, 'Wait for the plan to be ready before sending more.');
         // Chain mode, approved and not funded yet: no run has started, the funding step waits for the wallet.
         if (head.status === 'approved' && chain && !isFree(head) && !chain.contractTaskOf(head.id)) throw new HttpError(409, 'Fund or cancel the plan above before sending more.');
@@ -248,7 +248,10 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         const newer = parent.superseded_by || [...tasks.values()].some((x) => x.parent_id === parent.id && x !== old && !x.superseded_by);
         if (newer) throw new HttpError(409, 'This conversation has a newer message: send after the newest one.');
       }
-      const revises = openPlan(above);
+      // A message sent again or edited in the place of a revision whose plan already replaced the plan above (or of a
+      // message sent in such a revision's place) revises that plan too: cancelled as replaced, it never ran.
+      const replaced = old && head?.status === 'cancelled' && head.replaced_by && attempts(old, tasks).some((x) => x.id === head.replaced_by) ? head : null;
+      const revises = openPlan(above) ?? replaced;
       const conversation = parent ? conversationFor(above, revises) : undefined;
       const t = newTask(b.prompt, budget, b.reserve_share ?? 0.2, b.owner ?? null, parent?.id ?? null);
       if (conversation) t.earlier_prompts = conversation.earlier;
@@ -290,10 +293,14 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
           }
           setStatus(t, 'planned');
           // The revised plan replaces the one it changes, unless that one was approved or cancelled meanwhile. A
-          // revision that fails leaves it as it was.
+          // revision that fails leaves it as it was. A plan already replaced by the revision this message took the place
+          // of names this one now, the revision the conversation shows.
           if (revises?.status === 'planned') {
             revises.replaced_by = t.id;
             setStatus(revises, 'cancelled');
+          } else if (replaced) {
+            replaced.replaced_by = t.id;
+            saveTask(replaced);
           }
         } catch (e: any) {
           if (isTerminal(t.status)) return; // killed while planning: stays killed

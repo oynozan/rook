@@ -171,6 +171,13 @@ export function ancestors(t: Task, byId: Map<string, Task>): Task[] {
   return out;
 }
 
+/** The message `t` and the messages it was sent again or edited in the place of (8.9), newest first. */
+export function attempts(t: Task, byId: Map<string, Task>): Task[] {
+  const out: Task[] = [];
+  for (let x: Task | undefined = t; x && !out.includes(x); x = x.supersedes ? byId.get(x.supersedes) : undefined) out.push(x);
+  return out;
+}
+
 /** A message that never got a plan to run: a reply that is not a task, a planner failure, a draft stopped while planning. */
 export const planless = (t: Task) => isTerminal(t.status) && !t.subtasks.length;
 

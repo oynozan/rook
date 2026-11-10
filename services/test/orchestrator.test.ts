@@ -657,6 +657,53 @@ test('the newest message can be edited until its plan is approved: its draft sto
   await assert.rejects(send({ prompt: 'x', supersedes: next.id }), refusedWith(409, "This message's plan was approved, so it can't be changed now. Send a new message instead."));
 });
 
+test('a revision whose plan replaced the plan above, edited, still revises that plan, which names the edit in its place', async () => {
+  const { send } = as('ivy.near');
+  const replacedBy = async (id: string) => { const x = (await snap(id)).task; return [x.status, x.replaced_by]; };
+  plan = holdersPlan();
+  const first = await send({ prompt: 'Holders of NEAR' });
+  const revision = await send({ prompt: 'Only the top 10', parent_id: first.id });
+  assert.deepEqual(await replacedBy(first.id), ['cancelled', revision.id]);
+
+  // The plan above never ran: the edit is planned as a revision of it, as the message it replaces was.
+  const edit = await send({ prompt: 'Only the top 20', supersedes: revision.id });
+  assert.deepEqual([edit.status, edit.parent_id, edit.edited], ['planned', first.id, true]);
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Holders of NEAR'], revising: true });
+  assert.deepEqual([(await snap(revision.id)).task.status, (await snap(revision.id)).task.superseded_by], ['cancelled', edit.id]);
+  assert.deepEqual(await replacedBy(first.id), ['cancelled', edit.id]);
+
+  // An edit whose planning fails leaves that plan naming the last revision that got a plan; sent again, it revises it still.
+  planDown = true;
+  const failed = await send({ prompt: 'Only the top 5', supersedes: edit.id });
+  planDown = false;
+  assert.equal(failed.status, 'failed');
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Holders of NEAR'], revising: true });
+  assert.deepEqual(await replacedBy(first.id), ['cancelled', edit.id]);
+  const again = await send({ prompt: 'Only the top 5', supersedes: failed.id });
+  assert.deepEqual([again.status, again.edited], ['planned', false]);
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Holders of NEAR'], revising: true });
+  assert.deepEqual(await replacedBy(first.id), ['cancelled', again.id]);
+
+  // Below a failed reply the plan above it is still what the revision changed, so an edit of the revision revises it too.
+  const base = await send({ prompt: 'Due diligence on Aurora' });
+  const nod = await send({ prompt: 'go ahead', parent_id: base.id });
+  const shorter = await send({ prompt: 'Make it shorter', parent_id: nod.id });
+  assert.deepEqual(await replacedBy(base.id), ['cancelled', shorter.id]);
+  const shorter2 = await send({ prompt: 'Make it much shorter', supersedes: shorter.id });
+  assert.deepEqual([shorter2.status, shorter2.parent_id], ['planned', nod.id]);
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Due diligence on Aurora', 'go ahead'], revising: true });
+  assert.deepEqual(await replacedBy(base.id), ['cancelled', shorter2.id]);
+
+  // A follow-up on work that ended is no revision, edited or not.
+  await call(`${orch.url}/tasks/${shorter2.id}/cancel`, {});
+  const after = await send({ prompt: 'Start over', parent_id: shorter2.id });
+  const after2 = await send({ prompt: 'Start over, top 3 only', supersedes: after.id });
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Due diligence on Aurora', 'go ahead', 'Make it much shorter'], revising: false });
+  assert.deepEqual(await replacedBy(shorter2.id), ['cancelled', null]);
+  await call(`${orch.url}/tasks/${after2.id}/cancel`, {});
+  await call(`${orch.url}/tasks/${again.id}/cancel`, {});
+});
+
 test('deleting a conversation leaves all its tasks out for their owner, refused while one holds money; the CLI still sees them', async () => {
   const { send, approve, del } = as('hal.near');
   planDown = true;
