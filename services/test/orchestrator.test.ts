@@ -365,6 +365,19 @@ test("a self_do subtask is 'working' while Rook writes it, and its text is in th
   assert.deepEqual([s.ledger.budget_atomic, s.ledger.closed], ['0', true]); // a plan that hires no agent holds nothing
 });
 
+test('no hired agent delivers: a part Rook may write is written by Rook and its cap goes back; one it may not is left out', async () => {
+  const s = await runToEnd({
+    subtasks: [{ ...sub('s1', 'Copy', '200000', [cand('pricey', '100000')]), self_do_ok: true }, sub('s2', 'Live data', '200000', [cand('pricey', '100000')])],
+    dropped: [], budget: budget('400000'), notes: [], llm_calls: [],
+  });
+  assert.equal(s.task.status, 'closed', s.task.error);
+  assert.deepEqual(s.subtasks.map((x: any) => x.final_outcome), ['passed', 'abandoned']);
+  assert.deepEqual(s.subtasks[0].accepted, { hire_id: null, agent_handle: 'rook:self-do', text: 'Rook wrote this part.' });
+  assert.deepEqual([s.ledger.spent_atomic, s.ledger.closed], ['0', true]); // both caps went back
+  const evs = (await fetch(`${orch.url}/tasks/${s.task.id}/events`).then((r) => r.text())).split('\n').filter((l) => l.startsWith('data: ')).map((l) => JSON.parse(l.slice(6)));
+  assert.deepEqual(evs.filter((e) => e.type === 'error' && e.data.kind === 'rook_writes').map((e) => e.subtask_id), ['s1']);
+});
+
 // ---- conversations ----
 
 const holdersPlan = () => ({ subtasks: [sub('s1', 'Holders', '300000', [cand('holders-good', '300000')])], dropped: [], budget: budget('300000'), notes: [], llm_calls: [] });

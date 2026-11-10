@@ -4,7 +4,7 @@
 // skipping what is done and polling hires whose payment header was out; unwind() returns what a stopped task, or a
 // closing one whose close failed, still holds, and keeps trying until the books close.
 // Error events carry `message` (for logs and the CLI) and `kind`, which a client words for people: eval_retry,
-// close_retry (retried); payment_lookup, receipt, paid_anyway, unpaid, aggregate, restore_note (notes); abandoned,
+// close_retry (retried); payment_lookup, receipt, paid_anyway, unpaid, aggregate, restore_note, rook_writes (notes); abandoned,
 // unchecked, return, close, unwind, run, restore (problems). Agent-related ones name `agent_handle`.
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -504,7 +504,7 @@ async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Defer
     } else {
       // The plan's order (lowest expected cost first, docs 5.2 step 4), never re-sorted by price here.
       const c = s.candidates.find((x) => !s.tried.includes(x.handle));
-      if (!c) return finish(t, s, 'abandoned', done);
+      if (!c) return giveUp(t, s, done);
       s.tried.push(c.handle);
       setSub(t, s, 'quoting');
       const row = await quote(ledger, t, s, c);
@@ -514,7 +514,7 @@ async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Defer
     if (!hire) continue;
     if (hire.state === 'OUTCOME_UNKNOWN') { // counted as spent, nothing to judge; counts against the re-hire limit
       await writeReceipt(ledger, t, s, hire, null);
-      if (failedVerdict(s)) return finish(t, s, 'abandoned', done);
+      if (failedVerdict(s)) return giveUp(t, s, done);
       continue;
     }
 
@@ -533,8 +533,19 @@ async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Defer
       s.accepted = { hire_id: hire.id, agent_handle: hire.agent_handle, text: hire.deliverable_text ?? '' };
       return finish(t, s, 'passed', done);
     }
-    if (failedVerdict(s)) return finish(t, s, 'abandoned', done);
+    if (failedVerdict(s)) return giveUp(t, s, done);
   }
+}
+
+/**
+ * No hired agent delivered work that passed (none could be hired, or the re-hire limit was reached). A part Rook may
+ * write itself (self_do_ok) is written by Rook, at least once, rather than left out of the report: on mainnet a market
+ * error on the only affordable agent left a one-part task with an empty report. Its cap still goes back as unspent.
+ */
+function giveUp(t: Task, s: Sub, done: Map<string, Deferred>) {
+  if (!s.self_do_ok || t.abort.signal.aborted) return finish(t, s, 'abandoned', done);
+  emit(t, 'error', { kind: 'rook_writes', message: `${s.id}: no hired agent delivered, Rook writes it itself` }, s.id);
+  return selfDo(t, s, done);
 }
 
 function rejectQuote(t: Task, s: Sub, handle: string, reason: string) {

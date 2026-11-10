@@ -184,6 +184,7 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
       // Rook waits for a hire at most ROOK_HIRE_PATIENCE_S, whatever SLA the agent advertises.
       deadline_s: k.self_do ? 0 : Math.min(Math.max(...k.candidates.map((c) => c.sla_seconds)), config.hirePatienceS),
       self_do: k.self_do,
+      self_do_ok: k.d.self_do_ok,
       ...(k.self_do ? { self_do_reason: k.self_do_reason } : {}),
       ...(k.need !== undefined ? { self_do_need_atomic: k.need.toString() } : {}),
       candidates: k.candidates,

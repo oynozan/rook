@@ -70,6 +70,7 @@ export type PlanSubtask = {
   criteria: Criterion[]; cap_atomic: string; deadline_s: number; self_do: boolean;
   self_do_reason?: SelfDoReason; // set on every self_do subtask
   self_do_need_atomic?: string; // over_budget only: the cheapest quoted price, what one hire would have cost
+  self_do_ok?: boolean; // Rook may write it itself when no hired agent delivers (absent in older plans: it may not)
   candidates: Candidate[];
 };
 export type Plan = {

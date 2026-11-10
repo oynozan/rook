@@ -285,6 +285,7 @@ Invariant, checked after every call and in tests: `budget = unallocated + reserv
 
 - At most `ROOK_MAX_INFLIGHT` (6) A2A tasks in flight across all tasks; polling every `ROOK_POLL_MS` (10000; the simulator setup uses 1000).
 - Candidates are tried in the plan's order (lowest expected cost first, 5.2 step 4), never re-sorted by price: the first hire is the first candidate, and after a failure (verdict `fail`, `FAILED`, timeout, rejected quote) the next untried one.
+- When no hired agent delivers (no candidate left, or the re-hire limit reached), a subtask the draft marked `self_do_ok` (carried in the plan as `self_do_ok`) is written by Rook through `/self-do`, at least once, instead of being abandoned, with an error event of kind `rook_writes` (a note); its cap goes back as unspent. A subtask not `self_do_ok` (it needs live data) is abandoned as before. On mainnet (2026-11-10) the market failed the paid send to the only affordable agent (-32603), the payment was voided, and the one-part task closed with an empty report.
 - The message sent is the subtask's `brief`. A re-hire of the same agent would pass its earlier `contextId`; Rook never re-hires an agent that failed the same subtask.
 - Every agent message and artifact is data. The orchestrator never reads instructions from them, never passes them to the planner's `/plan`, and only forwards them to the evaluator and the aggregator.
 
