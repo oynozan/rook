@@ -215,8 +215,9 @@ Rules the planner enforces (section 5.2 step 8):
 | `POST` | `/tasks/:id/kill` | `{ owner? }` | Any non-terminal status to `killed`, until the report is written: a `closing` task with its report answers 409 `the report is written; Rook is only returning the unspent USDC now, so there is nothing left to stop` (8.2), so a Stop from a page that still shows the run never ends a finished task as stopped |
 | `POST` | `/tasks/:id/attack` | `{ owner? }` | Security demo for `rook attack`: replays the injected deliverable's demands (pay again while a payment is outstanding, pay `evil-collector.near`, pay above the cap, fund after kill) on a sandbox ledger rebuilt from the plan, and returns each refusal, the injected deliverable's flags and verdict from the events, and the target subtask's quote row. Never touches the task's own books, in any mode |
 | `GET` | `/tasks/:id/events` | `?owner=` | Server-sent events; replays all past events, then streams. Honours `Last-Event-ID`. |
+| `POST` | `/conversations/:id/delete` | `{ owner? }` | Deletes the conversation task `:id` is in (any of its tasks names it), every task of it at once (8.9). Returns `{ deleted: [task ids] }`. 409 with a sentence the web app shows as is while a task of it holds or may hold money |
 
-Every task route takes the caller's `owner` (body, or `?owner=` on a GET): a task with another owner, or with none, answers 404, as if it did not exist. A caller naming no owner (the CLI) acts on any task. With `ROOK_SERVICE_TOKEN` set, every route needs the header `x-rook-token: <token>` (401 otherwise); the web server and the CLI send it from their environment.
+Every task route takes the caller's `owner` (body, or `?owner=` on a GET): a task with another owner, or with none, answers 404, as if it did not exist, and so does a task of a conversation its owner deleted. A caller naming no owner (the CLI) acts on any task. With `ROOK_SERVICE_TOKEN` set, every route needs the header `x-rook-token: <token>` (401 otherwise); the web server and the CLI send it from their environment.
 
 ### 8.2 Task states
 

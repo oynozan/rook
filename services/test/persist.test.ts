@@ -200,6 +200,25 @@ test("a conversation survives a restart: each task's parent and a replaced plan'
   await orch.close();
 });
 
+test('an edited message and a deleted conversation stay so after a restart', async () => {
+  freshDb();
+  let orch = await start(0);
+  const first = await call(`${orch.url}/tasks`, { prompt: 'Check NEAR holders', budget_usdc: '1', owner: 'ann.near' });
+  const edit = await call(`${orch.url}/tasks`, { prompt: 'Check Aurora holders', budget_usdc: '1', owner: 'ann.near', supersedes: first.id });
+  const gone = await call(`${orch.url}/tasks`, { prompt: 'Another chat', budget_usdc: '1', owner: 'ann.near' });
+  await call(`${orch.url}/conversations/${gone.id}/delete`, { owner: 'ann.near' });
+  await orch.close();
+
+  orch = await start(0);
+  const rows = (await call(`${orch.url}/tasks?owner=ann.near`)).tasks;
+  const row = (id: string) => rows.find((t: any) => t.id === id);
+  assert.deepEqual([rows.length, row(first.id).superseded_by, row(edit.id).supersedes], [2, edit.id, first.id]);
+  assert.deepEqual([(await call(`${orch.url}/tasks/${first.id}`)).task.status, (await call(`${orch.url}/tasks/${edit.id}`)).task.edited], ['cancelled', true]);
+  await assert.rejects(call(`${orch.url}/tasks/${gone.id}?owner=ann.near`), (e: any) => e.status === 404);
+  assert.deepEqual([(await call(`${orch.url}/tasks/${gone.id}`)).task.status, typeof (await call(`${orch.url}/tasks/${gone.id}`)).task.deleted_at], ['cancelled', 'string']);
+  await orch.close();
+});
+
 test('without ROOK_DB nothing is stored', async () => {
   delete process.env.ROOK_DB;
   let orch = await start(0);

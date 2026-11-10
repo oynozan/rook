@@ -2,10 +2,11 @@
 
 import { revalidatePath } from 'next/cache';
 import { forgetFundingOf, forgetUnreadFunding, fundingSent, giveBackDraftSlot, markFundingRefunded, recordFundingSent, takeDraftSlot } from './db';
+import { conversationIds, deleteRefusal, FUNDING_HELD, fundingHeld, redoRefusal } from './chat-actions';
 import { amountsNamed } from './conversations';
 import { checkDraft, draftRefusal, followUpRefusal } from './draft';
 import { CONTRACT_TASK, draftShortfall, TX_HASH, untilFinal, type Funding } from './funding';
-import { approveTask, cancelTask, createTask, fundedTask, getMode, getTask, killTask, OrchestratorDown, OrchestratorError } from './orchestrator';
+import { approveTask, cancelTask, createTask, deleteConversation, fundedTask, getMode, getTask, killTask, listTasks, OrchestratorDown, OrchestratorError } from './orchestrator';
 import { actionRefusal, fundingCallFailure, type TaskAction } from './refusals';
 import { currentAccount } from './session';
 
@@ -35,7 +36,8 @@ function signInFirst() {
 
 // Every action acts as the signed-in account from the session cookie. The browser can't name an account.
 // parent_id: the conversation's newest task, which this message follows (the orchestrator checks it is the account's).
-export async function draftTask(input: { prompt: string; budget: string; parent_id?: string }): Promise<DraftResult> {
+// supersedes, instead: the newest message, sent again or edited; this one takes its place, after the same task.
+export async function draftTask(input: { prompt: string; budget: string; parent_id?: string; supersedes?: string }): Promise<DraftResult> {
   const owner = await currentAccount();
   if (!owner) return { kind: 'error', message: signInFirst() };
 
@@ -55,9 +57,10 @@ export async function draftTask(input: { prompt: string; budget: string; parent_
     return { kind: 'error', message: `You've drafted ${DRAFTS_PER_HOUR} plans in the last hour, the most Rook allows. Try again in ${Math.ceil(slot.retryInS / 60)} min.` };
   }
 
+  const supersedes = typeof input?.supersedes === 'string' && input.supersedes ? input.supersedes : undefined;
   try {
-    const parent = typeof input?.parent_id === 'string' && input.parent_id ? input.parent_id : undefined;
-    const task = await createTask(check.prompt, check.usdc, owner, parent);
+    const parent = typeof input?.parent_id === 'string' && input.parent_id && !supersedes ? input.parent_id : undefined;
+    const task = await createTask(check.prompt, check.usdc, owner, parent, supersedes);
     refreshSidebar();
     return { kind: 'planned', id: task.id };
   } catch (e) {
@@ -65,6 +68,12 @@ export async function draftTask(input: { prompt: string; budget: string; parent_
     if (e instanceof OrchestratorDown) return { kind: 'error', message: DOWN };
     const refused = e instanceof OrchestratorError && e.status === 400 ? draftRefusal(e.message) : null;
     if (refused) return { kind: 'invalid', ...refused };
+    // The message was edited or sent again from another tab, or has a newer one: the list catches up, so the page shows it.
+    const redo = supersedes && e instanceof OrchestratorError ? redoRefusal(e.status, e.message) : null;
+    if (redo) {
+      refreshSidebar();
+      return { kind: 'error', message: redo };
+    }
     const follow = e instanceof OrchestratorError ? followUpRefusal(e.status, e.message) : null;
     if (follow) {
       // The page's view of the conversation was out of date (a message sent from another tab, or a list that failed to
@@ -110,6 +119,41 @@ async function asOwner(action: TaskAction, run: (owner: string) => Promise<objec
   const owner = await currentAccount();
   if (!owner) return { ok: false, message: signInFirst() };
   return act(() => run(owner), action);
+}
+
+/** `deleted`: the ids of every task of the chat. `task`: the task whose page has the way back for its funding. */
+export type DeleteResult = { ok: true; deleted: string[] } | { ok: false; message: string; task?: string };
+
+/**
+ * Deletes the chat (conversation) task `id` is in. Refused first while a funding transfer this server remembers for one
+ * of its tasks hasn't come back, since that refund is on the task's page; then Rook refuses while a task of it holds
+ * money. A chat already gone (deleted from another tab) counts as deleted.
+ */
+export async function deleteChat(id: string): Promise<DeleteResult> {
+  const owner = await currentAccount();
+  if (!owner) return { ok: false, message: signInFirst() };
+  const chat = String(id);
+  let deleted: string[] = [];
+  try {
+    const ids = conversationIds(await listTasks(owner), chat);
+    for (const task of ids) {
+      const sent = fundingSent(task, owner);
+      if (!sent || sent.refunded) continue;
+      const snap = await getTask(task, owner).catch((e) => { if (e instanceof OrchestratorError && e.status === 404) return null; throw e; });
+      if (snap && fundingHeld(snap.task.status, !!snap.ledger, sent)) return { ok: false, message: FUNDING_HELD, task };
+    }
+    deleted = (await deleteConversation(chat, owner)).deleted;
+  } catch (e) {
+    if (e instanceof OrchestratorDown) return { ok: false, message: DOWN };
+    const out = deleteRefusal(e instanceof OrchestratorError ? e.status : null, e instanceof Error ? e.message : '');
+    if (!out.gone) {
+      if (!out.known) console.error('[web] deleteChat:', e instanceof Error ? e.message : e);
+      refreshSidebar(); // the chat may have moved on (a run started from another tab, say)
+      return { ok: false, message: out.message };
+    }
+  }
+  refreshSidebar();
+  return { ok: true, deleted };
 }
 
 /** Simulation: starts the run. Chain mode: returns the funding transfer for the wallet. */

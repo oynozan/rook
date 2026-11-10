@@ -33,6 +33,11 @@ export type Task = {
   // Conversations: the task this message followed (same owner), and the earlier messages it was planned with, oldest
   // first (the aggregator reads the task with them). A plan replaced by a revision names the revision.
   parent_id: string | null; earlier_prompts?: string[]; replaced_by?: string | null;
+  // A message sent again, as it was or edited, in the place of an earlier one (8.9): the new task names the one it
+  // supersedes (`edited`: its text or budget differs), and that one names it back. Unlike a plan replaced by a
+  // revision, a superseded task no longer shows in its conversation. Tasks stored before this have neither.
+  supersedes?: string | null; superseded_by?: string | null; edited?: boolean;
+  deleted_at?: string | null; // its owner deleted its conversation: gone for the owner, kept for the record (8.9)
   status: TaskStatus; error: string | null; created_at: string; updated_at: string;
   plan: Plan | null; subtasks: Sub[]; receipts: ReceiptView[]; events: RookEvent[];
   final_result: { final_markdown: string; attribution: { subtask_id: string; agent_handle: string }[]; abandoned: string[] } | null;
@@ -152,7 +157,11 @@ export function verdictHistory(tasks: Iterable<Task>): Record<string, AgentHisto
 
 export function taskView(t: Task) {
   const { id, status, prompt, budget_atomic, reserve_share, funder, owner, parent_id, error, created_at, updated_at, plan } = t;
-  return { id, status, prompt, budget_atomic, reserve_share, funder, owner, parent_id, replaced_by: t.replaced_by ?? null, error, created_at, updated_at, plan };
+  return {
+    id, status, prompt, budget_atomic, reserve_share, funder, owner, parent_id, replaced_by: t.replaced_by ?? null,
+    supersedes: t.supersedes ?? null, superseded_by: t.superseded_by ?? null, edited: t.edited ?? false, deleted_at: t.deleted_at ?? null,
+    error, created_at, updated_at, plan,
+  };
 }
 
 /** The task and the tasks above it in its conversation, nearest first. */
@@ -177,6 +186,41 @@ export function headOf(chain: Task[]): Task | undefined {
 export function openPlan(chain: Task[]): Task | null {
   const head = headOf(chain);
   return head?.status === 'planned' ? head : null;
+}
+
+/** It was approved at some point, so funding may have moved for it. */
+export const wasApproved = (t: Task) => t.events.some((e) => e.type === 'task_status' && e.data?.to === 'approved');
+
+/** Statuses a task can be in before it was ever approved: no money has moved for it. */
+const UNTOUCHED: TaskStatus[] = ['draft', 'planned', 'cancelled', 'failed', 'killed'];
+
+/**
+ * Why `old` can't be sent again or edited in its place (8.9), or null when it can: only the newest message of its
+ * conversation, sent again once, and only while no money has moved for it (drafting, planned, or ended before it was
+ * ever approved).
+ */
+export function supersedeRefusal(old: Task, all: Iterable<Task>): string | null {
+  if (old.superseded_by) return 'This message was already edited or sent again.';
+  if (!UNTOUCHED.includes(old.status) || wasApproved(old)) return "This message's plan was approved, so it can't be changed now. Send a new message instead.";
+  for (const x of all) if (x.parent_id === old.id) return 'Only the newest message can be edited or sent again.';
+  return null;
+}
+
+/**
+ * Every task of the conversation `t` is in: along its parent links both ways, and across messages sent again or edited
+ * (sent again in place of a conversation's first message, a new first task supersedes the old one).
+ */
+export function conversationTasks(t: Task, all: Iterable<Task>): Task[] {
+  const list = [...all];
+  const byId = new Map(list.map((x) => [x.id, x]));
+  const linked = new Map<string, Task[]>(); // id -> the tasks that follow it or supersede it
+  for (const x of list) for (const to of [x.parent_id, x.supersedes]) if (to) linked.set(to, [...(linked.get(to) ?? []), x]);
+  const out = new Set([t]);
+  for (const x of out) { // a Set's iteration also visits what is added during it
+    for (const to of [x.parent_id, x.supersedes, x.superseded_by]) { const y = to ? byId.get(to) : undefined; if (y) out.add(y); }
+    for (const y of linked.get(x.id) ?? []) out.add(y);
+  }
+  return [...out];
 }
 
 export function snapshot(t: Task, ledger: Ledger) {

@@ -12,9 +12,13 @@ export const serviceHeaders = (): Record<string, string> =>
 /**
  * parent_id: the task this one follows in its conversation; null starts a conversation. has_plan: it got a plan with
  * something to run (false for a reply that wasn't a task, or a failed draft). Older orchestrators send no parent_id
- * (every task starts its own), no budget_atomic and no has_plan.
+ * (every task starts its own), no budget_atomic and no has_plan. supersedes / superseded_by: a message sent again or
+ * edited names the one it took the place of, which names it back (chat-actions.ts shownTasks).
  */
-export type TaskSummary = { id: string; status: string; prompt: string; created_at: string; parent_id?: string | null; budget_atomic?: string; has_plan?: boolean };
+export type TaskSummary = {
+  id: string; status: string; prompt: string; created_at: string; parent_id?: string | null; budget_atomic?: string; has_plan?: boolean;
+  supersedes?: string | null; superseded_by?: string | null;
+};
 
 /**
  * An agent the planner can hire, in the order Rook hires them: lowest expected cost first (price divided by the chance it
@@ -54,8 +58,11 @@ export type PlanView = {
   budget: { reserve_atomic: string; allocated_atomic: string };
 };
 
-/** replaced_by: a plan cancelled because a revision replaced it names that revision. */
-export type TaskView = TaskSummary & { budget_atomic: string; error: string | null; owner: string | null; plan: PlanView | null; replaced_by?: string | null };
+/**
+ * replaced_by: a plan cancelled because a revision replaced it names that revision. edited: a message that supersedes
+ * another changed its text or budget (otherwise it was sent again as it was).
+ */
+export type TaskView = TaskSummary & { budget_atomic: string; error: string | null; owner: string | null; plan: PlanView | null; replaced_by?: string | null; edited?: boolean };
 
 /** attestation_hash is the evaluator's verdict hash: shown as "evaluation hash" (no TEE attests it yet). */
 export type Receipt = {
@@ -132,10 +139,13 @@ const post = <T>(path: string, body: unknown = {}) =>
 export const listTasks = (owner: string) => request<{ tasks: TaskSummary[] }>(`/tasks?owner=${encodeURIComponent(owner)}`).then((d) => d.tasks);
 export const getMode = () => request<Mode>('/mode');
 // wait: false returns the draft task at once; planning continues and reports progress as `planning` events.
-// parent_id: the conversation's newest task, which this message follows; none starts a conversation.
-export const createTask = (prompt: string, budget_usdc: string, owner: string, parent_id?: string) =>
-  post<TaskView>('/tasks', { prompt, budget_usdc, owner, wait: false, ...(parent_id ? { parent_id } : {}) });
-const taskPath = (id: string) => `/tasks/${encodeURIComponent(id)}`;
+// parent_id: the conversation's newest task, which this message follows; none starts a conversation. supersedes: the
+// newest message, sent again or edited, whose place this one takes (it follows that one's parent).
+export const createTask = (prompt: string, budget_usdc: string, owner: string, parent_id?: string, supersedes?: string) =>
+  post<TaskView>('/tasks', { prompt, budget_usdc, owner, wait: false, ...(parent_id ? { parent_id } : {}), ...(supersedes ? { supersedes } : {}) });
+/** Deletes the conversation task `id` is in, every task of it at once; answers with their ids. */
+export const deleteConversation = (id: string, owner: string) =>
+  post<{ deleted: string[] }>(`/conversations/${encodeURIComponent(id)}/delete`, { owner });const taskPath = (id: string) => `/tasks/${encodeURIComponent(id)}`;
 /** With `owner`, the orchestrator answers 404 for anyone else's task (the routes check the owner again). */
 export const getTask = (id: string, owner?: string) => request<TaskSnapshot>(taskPath(id) + (owner ? `?owner=${encodeURIComponent(owner)}` : ''));
 export const eventsUrl = (id: string, owner: string) => `${ORCHESTRATOR}${taskPath(id)}/events?owner=${encodeURIComponent(owner)}`;
