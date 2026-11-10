@@ -33,6 +33,15 @@ export function DeleteChatDialog({ chat, onClose, onDeleted, onOpenTask }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<{ message: string; task?: string } | null>(null);
   const uid = useId();
+  // Closing plays the dialog's exit before the parent unmounts it (it is keyed by the chat, so that would cut it off).
+  const [leaving, setLeaving] = useState(false);
+  const leave = (then: () => void) => {
+    if (leaving) return;
+    setLeaving(true);
+    dialog.current?.close();
+    const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    window.setTimeout(then, still ? 0 : 220);
+  };
 
   useEffect(() => {
     const d = dialog.current;
@@ -55,10 +64,11 @@ export function DeleteChatDialog({ chat, onClose, onDeleted, onOpenTask }: {
       if (e.key !== 'Escape') return;
       e.preventDefault();
       e.stopPropagation();
-      if (!busy) onClose();
+      if (!busy) leave(onClose);
     };
     document.addEventListener('keydown', onKey, true);
     return () => document.removeEventListener('keydown', onKey, true);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [chat, busy, onClose]);
 
   if (!chat) return null;
@@ -69,7 +79,7 @@ export function DeleteChatDialog({ chat, onClose, onDeleted, onOpenTask }: {
     setError(null);
     const out = await deleteChat(target.id).catch((e) => ({ ok: false as const, message: pageUnreachable(e) }));
     setBusy(false);
-    if (out.ok) return onDeleted(target, out.deleted);
+    if (out.ok) return leave(() => onDeleted(target, out.deleted));
     setError({ message: out.message, ...('task' in out && out.task ? { task: out.task } : {}) });
   }
 
@@ -78,11 +88,11 @@ export function DeleteChatDialog({ chat, onClose, onDeleted, onOpenTask }: {
       ref={dialog}
       aria-labelledby={`${uid}-title`}
       aria-describedby={`${uid}-body`}
-      onCancel={(e) => { e.preventDefault(); if (!busy) onClose(); }} // a close request without a key (a phone's back gesture)
-      onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }} // the backdrop
-      className="m-auto w-[min(28rem,calc(100%-2rem))] rounded-2xl border border-ink/15 bg-surface p-0 text-ink shadow-2xl shadow-ink/20 backdrop:bg-ink/40"
+      onCancel={(e) => { e.preventDefault(); if (!busy) leave(onClose); }} // a close request without a key (a phone's back gesture)
+      onClick={(e) => { if (e.target === e.currentTarget && !busy) leave(onClose); }} // the backdrop
+      className="rook-dialog m-auto w-[min(28rem,calc(100%-2rem))] rounded-2xl border border-ink/15 bg-surface p-0 text-ink shadow-2xl shadow-ink/20"
     >
-      <div className="rook-in p-5">
+      <div className="p-5">
         <h2 id={`${uid}-title`} className="text-lg font-medium tracking-[-0.01em]">Delete this chat?</h2>
         <p id={`${uid}-body`} className="mt-2 text-ink/80">
           <span className="line-clamp-3 font-medium break-words text-ink">“{chat.title}”</span>
@@ -92,7 +102,7 @@ export function DeleteChatDialog({ chat, onClose, onDeleted, onOpenTask }: {
           <p role="alert" className="mt-3 text-sm text-alert">
             {error.message}{' '}
             {error.task && (
-              <a href={`/app/${error.task}`} onClick={(e) => { if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return; e.preventDefault(); onOpenTask(error.task!); }}
+              <a href={`/app/${error.task}`} onClick={(e) => { if (e.metaKey || e.ctrlKey || e.shiftKey || e.button !== 0) return; e.preventDefault(); const t = error.task!; leave(() => onOpenTask(t)); }}
                 className="font-medium text-ink underline decoration-ink/30 underline-offset-2 hover:decoration-ink">
                 Open the task
               </a>
@@ -103,7 +113,7 @@ export function DeleteChatDialog({ chat, onClose, onDeleted, onOpenTask }: {
           <button
             ref={cancel}
             type="button"
-            onClick={onClose}
+            onClick={() => leave(onClose)}
             disabled={busy}
             className="inline-flex min-h-11 cursor-pointer items-center justify-center rounded-full border border-ink/25 px-5 font-medium transition-colors duration-200 hover:border-ink hover:bg-ink/5 active:translate-y-px disabled:cursor-wait disabled:text-ink/55 motion-reduce:transition-none max-sm:grow"
           >

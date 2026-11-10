@@ -73,6 +73,27 @@
   mask-image: linear-gradient(to bottom, transparent, #000 25%, #000 75%, transparent);
 }
 
+/* Dialogs: the box rises and sharpens while the page behind dims and blurs, together, both ways. The backdrop is set
+   here (not with Tailwind's backdrop: variant) so it can fade; closing animates too, since display and overlay are
+   discrete-transitioned. */
+.rook-dialog::backdrop { background: color-mix(in srgb, var(--ink) 28%, transparent); backdrop-filter: blur(3px); }
+@media (prefers-reduced-motion: no-preference) {
+  .rook-dialog {
+    opacity: 0; transform: translateY(10px) scale(0.97);
+    transition: opacity 0.18s ease-out, transform 0.28s cubic-bezier(0.16, 1, 0.3, 1), overlay 0.28s allow-discrete, display 0.28s allow-discrete;
+  }
+  .rook-dialog[open] { opacity: 1; transform: none; }
+  .rook-dialog::backdrop {
+    background: transparent; backdrop-filter: blur(0);
+    transition: background-color 0.25s ease-out, backdrop-filter 0.25s ease-out, overlay 0.28s allow-discrete, display 0.28s allow-discrete;
+  }
+  .rook-dialog[open]::backdrop { background: color-mix(in srgb, var(--ink) 28%, transparent); backdrop-filter: blur(3px); }
+  @starting-style {
+    .rook-dialog[open] { opacity: 0; transform: translateY(10px) scale(0.97); }
+    .rook-dialog[open]::backdrop { background: transparent; backdrop-filter: blur(0); }
+  }
+}
+
 /* Chat pacing: things arrive and settle; the three blocks show work in progress. */
 @media (prefers-reduced-motion: no-preference) {
   @keyframes rook-in {
