@@ -737,11 +737,13 @@ test('deleting a conversation leaves all its tasks out for their owner, refused 
   assert.deepEqual([(await snap(follow.id)).task.status, (await snap(drafting.id)).task.status], ['cancelled', 'killed']);
   await until(async () => (await snap(other.id)).task.status === 'planned'); // another conversation is left alone
 
-  // Gone for the owner: not listed, 404 on its routes, and nothing can follow it.
+  // Gone for the owner: not listed, 404 on its routes (saying why, so the page can tell them), and nothing can follow
+  // it. Anyone else still learns nothing of it.
   assert.deepEqual((await call(`${orch.url}/tasks?owner=hal.near`)).tasks.map((x: any) => x.id), [other.id]);
-  await assert.rejects(call(`${orch.url}/tasks/${follow.id}?owner=hal.near`), refusedWith(404));
+  await assert.rejects(call(`${orch.url}/tasks/${follow.id}?owner=hal.near`), refusedWith(404, `no task ${follow.id}: its conversation was deleted`));
+  await assert.rejects(call(`${orch.url}/tasks/${follow.id}?owner=eve.near`), refusedWith(404, `no task ${follow.id}`));
   assert.equal((await fetch(`${orch.url}/tasks/${root2.id}/events?owner=hal.near`)).status, 404);
-  await assert.rejects(send({ prompt: 'More', parent_id: drafting.id }), refusedWith(404));
+  await assert.rejects(send({ prompt: 'More', parent_id: drafting.id }), refusedWith(404, `no task ${drafting.id}: its conversation was deleted`));
   await assert.rejects(call(`${orch.url}/tasks`, { prompt: 'More', budget_usdc: '1', parent_id: drafting.id }), refusedWith(409, 'This conversation was deleted.'));
   await assert.rejects(del(follow.id), refusedWith(404));
   // Kept for the record: the CLI still sees every task, marked deleted, with its books and receipts.

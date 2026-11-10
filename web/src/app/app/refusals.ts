@@ -25,12 +25,19 @@ const FAILED: Record<TaskAction, string> = {
 const CHAIN_READ = /fetch failed|ECONNREFUSED|ECONNRESET|ETIMEDOUT|-> \d{3}$|NEAR RPC|^view \S+\.get_|chain-gateway|aborted|timeout/i;
 
 /**
+ * The orchestrator's 404 for one of the owner's own tasks whose conversation they deleted (from another tab, say). It
+ * tells only the owner so: anyone else's task is plain "no task".
+ */
+export const chatDeleted = (status: number | null, message: string) => status === 404 && /^no task \S+: its conversation was deleted/.test(message);
+
+/**
  * `status`: the orchestrator's HTTP status, or null when it never answered with one. `known` false: a failure on Rook's
  * side or a refusal these words don't name, so the orchestrator's own message belongs in the server log. `final`:
  * asking again can never work, so the page offers no Try again.
  */
 export function actionRefusal(action: TaskAction, status: number | null, message: string): { message: string; known: boolean; final?: true } {
   const known = (text: string) => ({ message: text, known: true });
+  if (chatDeleted(status, message)) return known('This chat was deleted.');
   if (status === 404 && /^no task /.test(message)) return known("Rook has no task at this link for the wallet you're signed in with.");
   if (status === 409) {
     // A newer message in the conversation is revising this plan (another tab sent it, say).

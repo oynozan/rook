@@ -39,7 +39,8 @@ const FOLLOW_HOLD_MS = 150; // after the reader scrolls up, how long scroll even
 
 // ---- loading one task ----
 
-type Loaded = { snap: TaskSnapshot | null; events: RookEvent[]; problem: 'missing' | 'signin' | 'down' | null; refetch: () => void };
+/** `problem`: 'deleted', this account deleted the task's chat (in another tab, say); 'missing', it isn't this account's. */
+type Loaded = { snap: TaskSnapshot | null; events: RookEvent[]; problem: 'deleted' | 'missing' | 'signin' | 'down' | null; refetch: () => void };
 
 /** `account`: the signed-in account. Another one (or none) loads the task afresh, as that account may see it. */
 function useTask(id: string | null, account: string | null): Loaded {
@@ -52,7 +53,11 @@ function useTask(id: string | null, account: string | null): Loaded {
     if (!id) return null;
     try {
       const r = await fetch(`/api/tasks/${encodeURIComponent(id)}`, { cache: 'no-store' });
-      if (r.status === 404) { setProblem('missing'); return null; }
+      if (r.status === 404) {
+        const why: { deleted?: boolean } | null = await r.json().catch(() => null);
+        setProblem(why?.deleted === true ? 'deleted' : 'missing');
+        return null;
+      }
       if (r.status === 401) { setProblem('signin'); return null; }
       if (!r.ok) { setProblem('down'); return 'down'; }
       const s: TaskSnapshot = await r.json();
@@ -1344,6 +1349,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
     if (out) setAgainError(out.message ?? out.budget ?? out.prompt ?? null);
   }
 
+  if (problem === 'deleted') return <RookMessage><p>This chat was deleted.</p></RookMessage>;
   if (problem === 'missing') return <RookMessage><p>Rook has no task at this link for the wallet you&apos;re signed in with. If another wallet drafted it, sign in with that one.</p></RookMessage>;
   if (problem === 'signin') return <RookMessage><p>Connect your wallet to see this task.</p></RookMessage>;
   if (problem === 'down' && !snap) return <RookMessage><p>Rook&apos;s services are unreachable right now. This page reconnects on its own once they&apos;re back.</p></RookMessage>;

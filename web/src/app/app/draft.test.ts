@@ -62,6 +62,8 @@ test('followUpRefusal: a message the orchestrator refuses because of the task it
   assert.equal(followUpRefusal(409, 'This conversation has a newer message: send after the newest one.'),
     'This conversation has a newer message, now shown above. Send your message after it.');
   assert.equal(followUpRefusal(404, 'no task t_1234abcd'), "Rook has no task at this link for the wallet you're signed in with.");
+  // Its chat was deleted from another tab: Rook tells its owner so.
+  assert.equal(followUpRefusal(404, 'no task t_1234abcd: its conversation was deleted'), 'This chat was deleted, so nothing more can be sent in it. Start a new task instead.');
   assert.equal(followUpRefusal(409, 'task t_1 has another owner: a follow-up keeps its owner'), null); // the web always sends the owner
   assert.equal(followUpRefusal(400, 'Wait for it'), null);
 });

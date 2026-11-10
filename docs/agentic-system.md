@@ -217,7 +217,7 @@ Rules the planner enforces (section 5.2 step 8):
 | `GET` | `/tasks/:id/events` | `?owner=` | Server-sent events; replays all past events, then streams. Honours `Last-Event-ID`. |
 | `POST` | `/conversations/:id/delete` | `{ owner? }` | Deletes the conversation task `:id` is in (any of its tasks names it), every task of it at once (8.9). Returns `{ deleted: [task ids] }`. 409 with a sentence the web app shows as is while a task of it holds or may hold money |
 
-Every task route takes the caller's `owner` (body, or `?owner=` on a GET): a task with another owner, or with none, answers 404, as if it did not exist, and so does a task of a conversation its owner deleted. A caller naming no owner (the CLI) acts on any task. With `ROOK_SERVICE_TOKEN` set, every route needs the header `x-rook-token: <token>` (401 otherwise); the web server and the CLI send it from their environment.
+Every task route takes the caller's `owner` (body, or `?owner=` on a GET): a task with another owner, or with none, answers 404, as if it did not exist, and so does a task of a conversation its owner deleted (to its owner only, the error says so: `no task <id>: its conversation was deleted`, which the web app shows as "This chat was deleted."). A caller naming no owner (the CLI) acts on any task. With `ROOK_SERVICE_TOKEN` set, every route needs the header `x-rook-token: <token>` (401 otherwise); the web server and the CLI send it from their environment.
 
 ### 8.2 Task states
 

@@ -109,10 +109,11 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
   // The web app passes the signed-in account as `owner` (body, or ?owner= on a GET); someone else's task looks like no
   // task at all. Callers that pass no owner (the CLI) act on any task: the orchestrator listens on localhost only, and
   // with ROOK_SERVICE_TOKEN set only callers holding the token (the web server, the CLI) reach it. A task of a deleted
-  // conversation is gone for its owner too, while the CLI still sees it.
+  // conversation is gone for its owner too, who is told why (nobody else learns it existed), while the CLI still sees it.
   const owned = (id: string, owner: unknown) => {
     const t = get(id);
-    if (typeof owner === 'string' && (t.owner !== owner || t.deleted_at)) throw new HttpError(404, `no task ${id}`);
+    if (typeof owner === 'string' && t.owner !== owner) throw new HttpError(404, `no task ${id}`);
+    if (typeof owner === 'string' && t.deleted_at) throw new HttpError(404, `no task ${id}: its conversation was deleted`);
     return t;
   };
   /** A newer message is being planned as a revision of `t`, a planned task: its plan replaces `t` once ready (8.9). */

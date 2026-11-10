@@ -21,6 +21,7 @@ test('Stop after the report is written says the task finished and the refund is 
 
 test('known refusals: no task for this account, an empty plan, payments off, the open-task limit, the contract minimum, a 0 USDC cap', () => {
   assert.equal(words('stop', 404, 'no task t_1'), "Rook has no task at this link for the wallet you're signed in with.");
+  assert.equal(words('approve', 404, 'no task t_1: its conversation was deleted'), 'This chat was deleted.');
   assert.equal(words('approve', 409, 'the plan has no subtasks'), "This plan has nothing to run, so it can't be started.");
   assert.equal(words('approve', 409, 'Wait for the revised plan below.'), 'Wait for the revised plan below.');
   assert.equal(words('approve', 409, 'live market: paying agents needs ROOK_LEDGER=chain (signer, chain-gateway, budget contract); see docs/x402-payments-plan.md'),
