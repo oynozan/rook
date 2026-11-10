@@ -339,13 +339,14 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
 
     // An owner sees only their own tasks; a caller naming no owner (the CLI) sees every task. `has_plan`: it got a plan
     // with something to run, which tells a failed run from a failed reply in a conversation. An owner's list leaves out
-    // the tasks of conversations they deleted; `supersedes` and `superseded_by` link a message sent again or edited.
+    // the tasks of conversations they deleted; `supersedes` and `superseded_by` link a message sent again or edited, and
+    // `edited` says which (on the message that took the other's place).
     'GET /tasks': ({ query }) => ({
       tasks: [...tasks.values()]
         .filter((t) => !query.has('owner') || (t.owner === query.get('owner') && !t.deleted_at))
-        .map(({ id, status, prompt, budget_atomic, created_at, parent_id, subtasks, supersedes, superseded_by, deleted_at }) => ({
+        .map(({ id, status, prompt, budget_atomic, created_at, parent_id, subtasks, supersedes, superseded_by, edited, deleted_at }) => ({
           id, status, prompt, budget_atomic, created_at, parent_id, has_plan: subtasks.length > 0,
-          supersedes: supersedes ?? null, superseded_by: superseded_by ?? null, deleted_at: deleted_at ?? null,
+          supersedes: supersedes ?? null, superseded_by: superseded_by ?? null, edited: edited ?? false, deleted_at: deleted_at ?? null,
         })),
     }),
 

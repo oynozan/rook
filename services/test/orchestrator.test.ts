@@ -384,7 +384,7 @@ test('a follow-up on a finished task gives the planner the earlier messages and 
   const rows = (await call(`${orch.url}/tasks`)).tasks;
   assert.deepEqual(rows.find((x: any) => x.id === follow.id),
     { id: follow.id, status: 'planned', prompt: 'Now translate it to Turkish', budget_atomic: '2000000', created_at: follow.created_at, parent_id: first.task.id, has_plan: true,
-      supersedes: null, superseded_by: null, deleted_at: null });
+      supersedes: null, superseded_by: null, edited: false, deleted_at: null });
   assert.equal(rows.find((x: any) => x.id === first.task.id).parent_id, null);
 
   await call(`${orch.url}/tasks/${follow.id}/approve`, {});
@@ -601,7 +601,7 @@ test('a message that failed before it got a plan, sent again, takes its place: i
   const was = (await snap(failed.id)).task;
   assert.deepEqual([was.status, was.superseded_by, was.replaced_by], ['failed', again.id, null]);
   const rows = (await call(`${orch.url}/tasks?owner=fay.near`)).tasks.filter((x: any) => [failed.id, again.id].includes(x.id));
-  assert.deepEqual(rows.map((x: any) => [x.id, x.parent_id, x.supersedes, x.superseded_by]), [[failed.id, first.id, null, again.id], [again.id, first.id, failed.id, null]]);
+  assert.deepEqual(rows.map((x: any) => [x.id, x.parent_id, x.supersedes, x.superseded_by, x.edited]), [[failed.id, first.id, null, again.id, false], [again.id, first.id, failed.id, null, false]]);
 
   // Once only; and a page that still shows the failed one as the newest sends after the newer one.
   await assert.rejects(send({ prompt: 'Make it shorter', supersedes: failed.id }), refusedWith(409, 'This message was already edited or sent again.'));
@@ -629,6 +629,7 @@ test('the newest message can be edited until its plan is approved: its draft sto
   assert.deepEqual([edited.status, edited.parent_id, edited.edited, edited.budget_atomic], ['planned', null, true, '2000000']);
   const old = (await snap(first.id)).task;
   assert.deepEqual([old.status, old.superseded_by, old.replaced_by], ['cancelled', edited.id, null]); // superseded, not revised
+  assert.equal((await call(`${orch.url}/tasks`)).tasks.find((x: any) => x.id === edited.id).edited, true); // `rook list` says "edited as"
   await assert.rejects(approve(first.id), /cancelled/);
 
   // Still drafting: its planning stops, and the planner's late answer changes nothing.

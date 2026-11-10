@@ -430,8 +430,11 @@ async function main() {
     case 'mode': { const m = await api('/mode'); printMode(m); console.log(JSON.stringify(m, null, 2)); break; }
     case 'list': {
       const { tasks } = await api('/tasks');
-      // Deleted by its owner in the web app, or sent again in its place: still listed here, marked.
-      const note = (t: any) => (t.deleted_at ? dim(' deleted') : '') + (t.superseded_by ? dim(` sent again as ${t.superseded_by}`) : '');
+      // Deleted by its owner in the web app, or sent again or edited in its place: still listed here, marked. Which of
+      // the two is on the newer message (an orchestrator from before `edited` was listed says neither).
+      const edited = new Map(tasks.map((t: any) => [t.id, t.edited]));
+      const how = (by: string) => (edited.get(by) === true ? 'edited as' : edited.get(by) === false ? 'sent again as' : 'replaced by');
+      const note = (t: any) => (t.deleted_at ? dim(' deleted') : '') + (t.superseded_by ? dim(` ${how(t.superseded_by)} ${t.superseded_by}`) : '');
       if (!tasks.length) console.log('no tasks');
       else table(['id', 'status', 'created', 'prompt'], tasks.map((t: any) => [t.id, t.status + note(t), t.created_at.slice(0, 19).replace('T', ' '), short(t.prompt, 60)]));
       break;
