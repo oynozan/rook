@@ -4,7 +4,7 @@ import { config, MAX_PROMPT_CHARS } from '../shared/config.ts';
 import { HttpError, bigintReplacer, call, serve, type Running } from '../shared/http.ts';
 import { AggregateRequest, PlanRequest, SelfDoRequest, type AgentSummary, type AggregateResult, type LlmCall, type Plan, type X402Config } from '../shared/types.ts';
 import { budgetBacked, formatUsdc, namedBudgetProblem, share } from '../shared/money.ts';
-import { MAX_CATEGORY_LISTED, applySelection, buildPlan, filterSearch, hireable, marketCategory, type QuoteResult } from './plan.ts';
+import { MAX_CATEGORY_LISTED, applySelection, buildPlan, filterSearch, hireable, isRookEdit, marketCategory, type QuoteResult } from './plan.ts';
 import { aggregate, draft, select, selfDo } from './prompts.ts';
 import { agentOf, isMerged } from './canned.ts';
 import { readReferences } from './reference.ts';
@@ -27,11 +27,14 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
   if (req.conversation?.earlier.some((m) => m.length > MAX_PROMPT_CHARS)) throw new HttpError(400, `an earlier message is over ${MAX_PROMPT_CHARS} characters`);
   const calls: LlmCall[] = [];
 
-  // Pages the message names (or, in a conversation, an earlier message: a revision keeps its reference), read first so
-  // the draft describes what they show. A page that can't be read is a note, never a failed plan.
-  const refs = await readReferences([req.prompt, ...[...(req.conversation?.earlier ?? [])].reverse()]);
-  const { draft: d, notATask, budgetAtomic: drafted } = await llmStep(calls, () => draft(req.prompt, sent, sent - share(sent, req.reserve_share), req.conversation, refs));
-  if (!d.length) throw new HttpError(422, notATask || 'This does not read as a task Rook can plan: say what you want done.', { llm_calls: calls });
+  // Pages the message names, read first so the draft describes what they show. A page that can't be read is a note,
+  // never a failed plan. A follow-up reads only the latest message's pages: an edit works from the delivered files, and
+  // a page re-read from an earlier message turned a rename into a clone of it. A revision keeps its reference: the
+  // plan it revises carries what the page showed, else the earlier messages' pages are read again.
+  const conv = req.conversation;
+  const refs = await readReferences(conv?.revising && !conv.plan?.length ? [req.prompt, ...[...conv.earlier].reverse()] : [req.prompt]);
+  const { draft: d, notATask, questions, assumptions, notes: draftNotes, budgetAtomic: drafted } = await llmStep(calls, () => draft(req.prompt, sent, sent - share(sent, req.reserve_share), conv, refs));
+  if (!d.length && !questions?.length) throw new HttpError(422, notATask || 'This does not read as a task Rook can plan: say what you want done.', { llm_calls: calls });
   // A total the message names ("make it 1 USDC") replaces the budget sent with it, within the same limits, refused
   // before the market is searched; the orchestrator checks it again. One the model read into a message that names no
   // such total is its mistake: the plan is made at the budget sent.
@@ -42,28 +45,45 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
   const problem = named === undefined ? null : namedBudgetProblem(named, BigInt(req.min_budget_atomic ?? '0'), config.maxBudgetAtomic);
   if (problem) throw new HttpError(422, problem, { llm_calls: calls });
   const budget = named ?? sent;
-  progress({ stage: 'searching', subtasks: d.map((s, index) => ({ index, title: s.title })) });
+  const notes = [...refs.notes, ...ignored, ...draftNotes];
+  const shown = assumptions?.length ? { assumptions } : {};
+  // Facts only the user can give are missing: Rook asks, and nothing is searched, quoted or funded. A 200, not a 422:
+  // a question is Rook's reply, not a failure. The budget is the one the answer will be planned at.
+  if (questions?.length) {
+    const reserve = share(budget, req.reserve_share);
+    return {
+      subtasks: [], dropped: [], notes, questions, ...shown, llm_calls: calls,
+      budget: { budget_atomic: budget.toString(), reserve_atomic: reserve.toString(), allocatable_atomic: (budget - reserve).toString(), allocated_atomic: '0', ...(named !== undefined ? { from_message: true } : {}) },
+    };
+  }
+  // A small edit Rook makes itself at once needs no agent: it is never searched for, picked or quoted.
+  const files = conv?.files?.map((f) => f.path) ?? [];
+  const edits = d.map((s) => isRookEdit(s, files));
+  const hire = d.flatMap((_, i) => (edits[i] ? [] : [i]));
+  progress({ stage: 'searching', subtasks: hire.map((index) => ({ index, title: d[index].title })) });
 
   // Step 2: supply check, every search term of every subtask in parallel, and each category the draft names, listed
   // once for all its subtasks. A listing is a broadening only: if the market refuses it, the keyword results still plan.
   const search = (q: string, category?: string) =>
     call<{ agents: AgentSummary[] }>(`${gw()}/search?q=${encodeURIComponent(q)}${category ? `&category=${category}` : ''}`).then((r) => r.agents);
-  const cats = d.map((s) => marketCategory(s.category));
+  const cats = d.map((s, i) => (edits[i] ? undefined : marketCategory(s.category)));
   const listings: Record<string, AgentSummary[]> = Object.fromEntries(await Promise.all([...new Set(cats.filter((c): c is string => !!c))].map(async (c) =>
     [c, (await search('', c).catch(() => [])).filter(hireable).slice(0, MAX_CATEGORY_LISTED)] as const)));
   const results = await gateway('search', () => Promise.all(d.map(async (s, index) => {
+    if (edits[index]) return [];
     const found = filterSearch(await Promise.all(s.search_terms.map((q) => search(q))));
     progress({ stage: 'found', index, title: s.title, agents: found.slice(0, FOUND_SHOWN).map((a) => ({ handle: a.handle, name: a.name })) });
     return found;
   })));
 
   const listed = cats.map((c) => (c ? listings[c] ?? [] : []));
-  const { handles: picks } = await llmStep(calls, () => select(d, results, listings, cats));
-  const selected = d.map((_, i) => applySelection([...results[i], ...listed[i]], picks[i] ?? []));
+  const { handles: chosen } = await llmStep(calls, () => select(hire.map((i) => d[i]), hire.map((i) => results[i]), listings, hire.map((i) => cats[i])));
+  const picks = d.map((_, i) => (hire.includes(i) ? chosen[hire.indexOf(i)] ?? [] : []));
+  const selected = d.map((_, i) => applySelection([...results[i], ...listed[i]], picks[i]));
 
   // Step 4: one quote per distinct handle; any failure becomes a dropped candidate, not a failed plan.
-  const x402 = await gateway('x402', () => call<X402Config>(`${gw()}/x402`));
   const handles = [...new Set(selected.flat().map((a) => a.handle))];
+  const x402 = handles.length ? await gateway('x402', () => call<X402Config>(`${gw()}/x402`)) : { recipients: [] };
   progress({ stage: 'quoting', agents: handles.length });
   const quotes: Record<string, QuoteResult> = Object.fromEntries(await Promise.all(handles.map(async (handle) => {
     const q = await call<QuoteResult>(`${gw()}/quote`, { handle })
@@ -71,8 +91,8 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
     return [handle, q] as const;
   })));
 
-  const out = buildPlan({ draft: d, selected, quotes, recipients: x402.recipients ?? [], budget_atomic: budget, reserve_share: req.reserve_share, history: req.history });
-  return { ...out, notes: [...refs.notes, ...ignored, ...out.notes], ...(named !== undefined ? { budget: { ...out.budget, from_message: true } } : {}), llm_calls: calls };
+  const out = buildPlan({ draft: d, selected, quotes, recipients: x402.recipients ?? [], budget_atomic: budget, reserve_share: req.reserve_share, history: req.history, files });
+  return { ...out, notes: [...notes, ...out.notes], ...shown, ...(named !== undefined ? { budget: { ...out.budget, from_message: true } } : {}), llm_calls: calls };
 }
 
 /** An LLM failure is a 502 carrying the calls already paid for, so the orchestrator can fail the task with a trace. */

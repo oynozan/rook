@@ -158,7 +158,7 @@ test('cross_check must reference an earlier kept subtask; references are renumbe
   assert.ok(p.notes.some((n) => n.startsWith('criterion s3.c2 removed') && n.includes('not an earlier subtask'))); // self-reference
 });
 
-test('invalid criteria are removed with a note; extra judges are cut; an empty subtask gets the default judge', () => {
+test('invalid criteria are removed with a note; a broken regex is matched as written; extra judges are cut; an empty subtask gets the default judge', () => {
   const judge = (q: string) => ({ id: 'j', kind: 'llm_judge', description: q, spec: { question: q } });
   const p = buildPlan(input({
     draft: [
@@ -168,17 +168,22 @@ test('invalid criteria are removed with a note; extra judges are cut; an empty s
         { id: 'c3', kind: 'schema', description: 'bad schema', spec: { json_schema: { type: 'not-a-type' } } },
       ] }),
       sub('b', { criteria: [judge('q1'), judge('q2'), judge('q3'), { id: 'n', kind: 'numeric_match', description: 'pct', spec: { label: 'Share', min: 0, max: 100 } }] }),
+      sub('c', { criteria: [{ id: 'c1', kind: 'numeric_match', description: 'no bounds', spec: { label: 'X' } }] }),
     ],
-    selected: [[agent('x')], [agent('x')]],
+    selected: [[agent('x')], [agent('x')], [agent('x')]],
     quotes: { x: row('100000') },
   }));
-  assert.ok(p.notes.includes('criterion s1.c1 removed: invalid regex'));
+  // An Express plan lost both its route checks as "invalid regex": the evaluator passes a pattern found verbatim, so
+  // a broken one is kept as that literal.
+  assert.ok(p.notes.includes('criterion s1.c1: invalid regex, matched as written instead'), p.notes.join('\n'));
+  assert.deepEqual(p.subtasks[0].criteria.map((c: any) => [c.kind, c.spec.pattern]), [['contains', '\\(\\[']]);
+  assert.ok(new RegExp((p.subtasks[0].criteria[0] as any).spec.pattern, 'i').test('app.get("/todos", ([req]) => ...)'));
   assert.ok(p.notes.some((n) => n.startsWith('criterion s1.c2 removed')));
   assert.ok(p.notes.some((n) => n.startsWith('criterion s1.c3 removed: invalid JSON schema')));
-  assert.equal(p.subtasks[0].criteria.length, 1);
-  assert.equal(p.subtasks[0].criteria[0].kind, 'llm_judge');
   assert.ok(p.notes.includes('criterion s2.c3 removed: more than 2 llm_judge criteria'));
   assert.deepEqual(p.subtasks[1].criteria.map((c) => [c.id, c.kind]), [['c1', 'llm_judge'], ['c2', 'llm_judge'], ['c3', 'numeric_match']]);
+  assert.deepEqual(p.subtasks[2].criteria.map((c) => [c.id, c.kind]), [['c1', 'llm_judge']]);
+  assert.ok(p.notes.includes('s3: no valid criteria left, default llm_judge added'));
 });
 
 test('POST /plan (canned) against a fake gateway: 4 subtasks, caps, reserve; /aggregate attributes and lists gaps', async (t) => {
@@ -770,7 +775,8 @@ test('the draft prompt plans one artifact as one subtask, lets Rook write what a
   assert.match(DRAFT_SYSTEM, /when the user wants a single artifact \(a website, a page, an app, a script, or one document the user wants written, such as an essay, a post or a letter\), plan ONE subtask that delivers the whole thing, with the design, structure, copy and content requirements written into its brief/);
   // "Due diligence report on the NEAR token: holders, wallets, contract and market data" is research, not one document:
   // one agent with all of it would lose the whole report to one stall.
-  assert.match(DRAFT_SYSTEM, /A report of research, findings or analysis is not an artifact, even when the user calls it one report: plan it as 3 to 5 separate questions, one subtask each, and Rook combines their results into the report\.\n- Return 1 to 5/);
+  // "research questions": the draft's "questions" are what Rook asks the user.
+  assert.match(DRAFT_SYSTEM, /A report of research, findings or analysis is not an artifact, even when the user calls it one report: plan it as 3 to 5 separate research questions, one subtask each, and Rook combines their results into the report\.\n- Return 1 to 5/);
   assert.match(DRAFT_SYSTEM, /Never split an artifact into parts whose results would have to be put together/);
   assert.match(DRAFT_SYSTEM, /Return 1 to 5 subtasks, at most 5: one per artifact or independent deliverable/);
   assert.doesNotMatch(DRAFT_SYSTEM, /Return 3 to 5 subtasks|Keep each subtask narrow/);
