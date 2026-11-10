@@ -246,3 +246,109 @@ test('contains: literal phrase matches ignoring punctuation and spacing', async 
     assert.deepEqual(e.results.filter((x: any) => x.criterion_id.startsWith('c')).map((x: any) => x.passed), [true, false]);
   } finally { await ev.close(); }
 });
+
+// ---- Code deliveries and links (docs/agentic-system.md 6.2, 7) ----
+
+const fixture = async (name: string) => (await import('node:fs')).readFileSync(new URL(`./fixtures/${name}.selfdo.md`, import.meta.url), 'utf8');
+const result = (ev: { results: { criterion_id: string }[] }, id: string) => ev.results.find((r) => r.criterion_id === id) as { passed: boolean; skipped: boolean; detail: string } | undefined;
+
+test('live_url: the link on the "Live URL:" line must load as a public web page and show must_contain; a dead or made-up one fails', async (t) => {
+  // QA, 2026-11-10: "URL: https://zz9x7k2m-qa-portfolio.netlify.app" answered 404 and passed (contains "URL: http").
+  const http = await import('node:http');
+  const { useReferenceSeam } = await import('../src/planner/reference.ts');
+  const PAGE = '<!doctype html><html><head><title>Tidy</title></head><body><h1>The calm todo app</h1><p>Pro plan $6/month</p></body></html>';
+  const server = http.createServer((q, s) => {
+    const html = (body: string) => { s.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); s.end(body); };
+    if (q.url === '/') return html(PAGE);
+    if (q.url === '/long') return html(`<!doctype html><html><head><title>Long</title></head><body><p>${'filler '.repeat(2000)}</p><footer>Made by Ozan Andaç</footer></body></html>`);
+    if (q.url === '/empty') return html('<html><body><div id="root"></div><script>render()</script></body></html>');
+    if (q.url === '/raw') { s.writeHead(200, { 'content-type': 'text/plain; charset=utf-8' }); return s.end(PAGE); } // a gist's raw URL: source, not a site
+    s.writeHead(404); s.end();
+  });
+  await new Promise<void>((ok) => server.listen(0, '127.0.0.1', ok));
+  const port = (server.address() as any).port as number;
+  const hosts: Record<string, string> = { 'tidy.test': '127.0.0.1', 'intranet.test': '10.0.0.5' };
+  useReferenceSeam({
+    resolve: async (h) => (hosts[h] ? [{ address: hosts[h], family: 4 as const }] : []),
+    allow: (a, p) => a === '127.0.0.1' && p === port, timeoutMs: 2000,
+  });
+  t.after(() => { useReferenceSeam(null); server.closeAllConnections(); server.close(); });
+  const site = `http://tidy.test:${port}`;
+  const check = async (text: string, spec: object = {}) => {
+    const ev = await evaluate(req('s1', text, [c('c1', 'live_url', spec), c('c2', 'llm_judge', { question: 'Is it deployed?' })]));
+    return { ev, c1: result(ev, 'c1')! };
+  };
+
+  const ok = await check(`Deployed it on a free host.\n\n**Live URL:** ${site}/`, { must_contain: 'calm  TODO app' });
+  assert.deepEqual([ok.ev.verdict, ok.c1.passed], ['pass', true], ok.c1.detail);
+  assert.equal(ok.c1.detail, `Live URL ${site}/ loaded tidy.test:${port} ("Tidy"), which shows "calm  TODO app"`);
+  assert.equal((await check(`Live URL: [${site}/](${site}/)`, { must_contain: '$6/month' })).c1.passed, true); // a Markdown link
+  assert.equal((await check(`Live URL: <${site}/long>`, { must_contain: 'Made by Ozan Andaç' })).c1.passed, true); // past the reader's 4000 characters
+  assert.equal((await check(`Site: ${site}/`, { label: 'Site' })).c1.passed, true);
+
+  const fails: [string, object, RegExp][] = [
+    [`Live URL: ${site}/`, { must_contain: 'Ozan Andaç' }, /which does not show "Ozan Andaç"$/],
+    [`Live URL: ${site}/gone`, {}, /did not load as a public web page: it answered HTTP 404$/],
+    [`Live URL: ${site}/raw`, {}, /it is not a web page \(text\/plain\)$/],
+    [`Live URL: ${site}/empty`, {}, /loaded tidy\.test:\d+\/empty but shows no text$/],
+    ['Live URL: http://intranet.test/', {}, /private or local network address/],
+    ['I could not deploy it.\nLive URL: none', {}, /^the "Live URL" line gives no link$/],
+    [`The site is at ${site}/`, {}, /^no "Live URL: <link>" line$/],
+    [`URL: ${site}/`, {}, /^no "Live URL: <link>" line$/], // another label is not the one asked for
+  ];
+  for (const [text, spec, why] of fails) {
+    const { ev, c1 } = await check(text, spec);
+    assert.equal(ev.verdict, 'fail', text);
+    assert.match(c1.detail, why, text);
+    assert.deepEqual([result(ev, 'c2')!.skipped, result(ev, 'c2')!.detail], [true, 'not run: earlier checks failed']); // no judge paid for
+  }
+});
+
+test('files: each path must come back as a whole file, under its folder; a flattened, missing or cut-short one fails', async () => {
+  const next = await fixture('next');
+  const files = (paths: string[], text = next) => evaluate(req('s1', text, [c('c1', 'files', { paths })]));
+  const ok = await files(['app/page.tsx', 'components/Navbar.tsx', './postcss.config.mjs', 'package.json']);
+  assert.deepEqual([ok.verdict, result(ok, 'c1')!.detail], ['pass', '4 files delivered whole'], JSON.stringify(ok.results));
+  const missing = await files(['app/page.tsx', 'README.md', 'app/pricing/page.tsx']);
+  assert.equal(result(missing, 'c1')!.detail, 'README.md is not delivered as a whole file; app/pricing/page.tsx is not delivered as a whole file');
+  // Flattened to its last part, the file is not the one asked for; inside a project folder, it is.
+  const tsx = '```tsx\nexport default function Home() {\n  return <main />;\n}\n```';
+  assert.equal((await files(['app/page.tsx'], `page.tsx\n${tsx}`)).verdict, 'fail');
+  assert.equal((await files(['app/page.tsx'], `tidy/app/page.tsx\n${tsx}`)).verdict, 'pass');
+  // A file with code left out is no whole file.
+  const cut = await files(['app/page.tsx'], 'app/page.tsx\n```tsx\nexport default function Home() {\n  // ... existing code ...\n}\n```');
+  assert.equal(result(cut, 'c1')!.detail, 'app/page.tsx leaves code out ("// ... existing code ...")');
+  const big = await files(['index.html'], `index.html\n\`\`\`html\n${'x'.repeat(1024 * 1024 + 1)}\n\`\`\``);
+  assert.equal(result(big, 'c1')!.detail, "index.html is larger than 1 MB, so it can't be attached");
+});
+
+test('linked_files, with no criterion: a page that loads a stylesheet or script the delivery leaves out fails', async () => {
+  const page = '<!doctype html>\n<html><head><link rel="stylesheet" href="styles.css"><script src="js/app.js" defer></script></head>\n<body><a href="about.html">About</a><img src="hero.jpg"></body></html>';
+  const css = 'styles.css\n```css\nbody {\n  margin: 0;\n}\n```';
+  const crit = [c('c1', 'contains', { pattern: 'styles.css' }), c('c2', 'llm_judge', { question: 'Is the site complete?' })];
+  const run = (text: string, brief = 'Build a site\n\nOne page and its stylesheet.') =>
+    evaluate({ ...req('s1', text, crit), brief });
+  const broken = await run(`index.html\n\`\`\`html\n${page}\n\`\`\`\n\n${css}`);
+  assert.deepEqual(broken.failed_criteria, ['linked_files']);
+  assert.equal(result(broken, 'linked_files')!.detail, 'not delivered: index.html loads js/app.js'); // page links and images are not counted
+  assert.equal(result(broken, 'c2')!.skipped, true);
+  // Delivered, or named in the brief (an edit gives back only the files it changes): it is there.
+  const js = 'js/app.js\n```js\ndocument.body.dataset.ready = "1";\nconsole.log("ready");\n```';
+  assert.equal((await run(`index.html\n\`\`\`html\n${page}\n\`\`\`\n\n${css}\n\n${js}`)).verdict, 'pass');
+  assert.equal((await run(`index.html\n\`\`\`html\n${page}\n\`\`\``, 'Change the title\n\nEdit index.html; styles.css and js/app.js stay as they are.')).verdict, 'pass');
+  // No page in the delivery: no such check. The 3-page site from QA passes it.
+  assert.equal(result(await evaluate(req('s1', HOLDERS)), 'linked_files'), undefined);
+  const site = await evaluate(req('s1', await fixture('static3'), [c('c1', 'contains', { pattern: 'styles.css' })]));
+  assert.deepEqual([site.verdict, result(site, 'linked_files')!.detail], ['pass', 'every file the pages load is delivered']);
+});
+
+test('a package.json that runs a script on npm install is a security flag to review, not a failure', async () => {
+  const pkg = JSON.stringify({ name: 'todo-api', scripts: { start: 'node index.js', postinstall: 'node scripts/setup.js' }, dependencies: { express: '^4.19.2' } }, null, 2);
+  const ev = await evaluate(req('s1', `The API.\n\npackage.json\n\`\`\`json\n${pkg}\n\`\`\``, [c('c1', 'contains', { pattern: 'express' })]));
+  assert.equal(ev.verdict, 'pass', JSON.stringify(ev.results));
+  assert.deepEqual(ev.security_flags, [`runs a script on npm install: review before running: 'package.json "postinstall": "node scripts/setup.js"'`]);
+  assert.deepEqual(result(ev, 'injection'), { criterion_id: 'injection', kind: 'injection', passed: true, skipped: false, detail: 'no instructions to the hiring system' });
+  // A plain package.json raises nothing.
+  const plain = await evaluate(req('s1', (await fixture('express')), [c('c1', 'contains', { pattern: 'express' })]));
+  assert.deepEqual([plain.verdict, plain.security_flags], ['pass', []]);
+});
