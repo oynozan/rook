@@ -2,8 +2,8 @@
 // orchestrator runs; with ROOK_DB set, every change is also written to SQLite (db.ts) and reloaded on start.
 import { randomUUID } from 'node:crypto';
 import {
-  MAX_HISTORY_HANDLES, type AgentHistory, type DeliveredFile, type EventType, type Evaluation, type LlmCall, type Part, type Plan, type PlanSubtask,
-  type Receipt, type RookEvent, type SubtaskStatus, type TaskStatus,
+  CONVERSATION_FILES, CONVERSATION_FILES_CHARS, MAX_HISTORY_HANDLES, type AgentHistory, type DeliveredFile, type EventType, type Evaluation, type LlmCall,
+  type Part, type Plan, type PlanSubtask, type Receipt, type RookEvent, type SubtaskStatus, type TaskStatus,
 } from '../shared/types.ts';
 import type { ChainBinding } from './chain-ledger.ts';
 import type { Ledger, Recipient } from './ledger.ts';
@@ -42,8 +42,13 @@ export type Task = {
   deleted_at?: string | null; // its owner deleted its conversation: gone for the owner, kept for the record (8.9)
   status: TaskStatus; error: string | null; created_at: string; updated_at: string;
   plan: Plan | null; subtasks: Sub[]; receipts: ReceiptView[]; events: RookEvent[];
-  // files: the code files taken out of the deliveries (planner 5.4); absent on reports stored before Rook attached files.
-  final_result: { final_markdown: string; attribution: { subtask_id: string; agent_handle: string }[]; files?: DeliveredFile[]; abandoned: string[] } | null;
+  // The chat's current files this task was planned on (Conversation.files, with who delivered each): a part's inputs
+  // are attached from it, and the report's files are it with this run's files replacing the same paths. Absent on a
+  // chat's first task, a chat with no files, and tasks stored before it.
+  workspace?: DeliveredFile[];
+  // files: the chat's current files once this run is done (planner 5.4 plus the workspace); absent on reports stored
+  // before Rook attached files. changed: the paths this run delivered new or changed; absent on reports stored before.
+  final_result: { final_markdown: string; attribution: { subtask_id: string; agent_handle: string }[]; files?: DeliveredFile[]; changed?: string[]; abandoned: string[] } | null;
   llm_calls: LlmCall[]; // self-do and aggregate calls (plan and evaluation calls live on the plan and evaluations)
   ledger_saved?: unknown; // the ledger's last view, kept so a reloaded task still shows what it spent
   chain?: ChainBinding | null; // ROOK_LEDGER=chain: its contract task, sub-accounts and outstanding authorizations
@@ -67,7 +72,8 @@ type Runtime = 'listeners' | 'abort' | 'inflight' | 'allow' | 'running' | 'unwin
 /** A task without its runtime parts: what SQLite stores. Tasks stored before conversations have no parent_id. */
 export type TaskDoc = Omit<Task, Runtime | 'parent_id'> & { parent_id?: string | null };
 
-export const TERMINAL_TASK: TaskStatus[] = ['closed', 'cancelled', 'killed', 'failed'];
+// asking ends its task like a reply that is not a task: nothing runs from it, and the next message answers it.
+export const TERMINAL_TASK: TaskStatus[] = ['closed', 'cancelled', 'killed', 'failed', 'asking'];
 export const isTerminal = (s: TaskStatus) => TERMINAL_TASK.includes(s);
 /** Every subtask is self_do: the plan pays no one, so no money is held (no contract task in chain mode). */
 export const isFree = (t: { subtasks: { self_do: boolean }[] }) => t.subtasks.length > 0 && t.subtasks.every((s) => s.self_do);
@@ -201,8 +207,56 @@ export function attempts(t: Task, byId: Map<string, Task>): Task[] {
   return out;
 }
 
-/** A message that never got a plan to run: a reply that is not a task, a planner failure, a draft stopped while planning. */
+/**
+ * A message that never got a plan to run: a reply that is not a task, a question Rook asked (asking), a planner
+ * failure, a draft stopped while planning.
+ */
 export const planless = (t: Task) => isTerminal(t.status) && !t.subtasks.length;
+
+/** What Rook asked and the message after `chain[0]` answers: the nearest asking task above it with no plan between. */
+export function questionsFor(chain: Task[]): string[] | undefined {
+  for (const x of chain) {
+    if (x.status === 'asking') return x.plan?.questions?.filter((q) => q.trim()).slice(0, 10);
+    if (!planless(x)) return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * The chat's current files, as a message after `chain[0]` (nearest first) finds them: every report's files, oldest
+ * to newest, a later version of a path replacing the earlier one in its place. Whole, up to CONVERSATION_FILES files
+ * and CONVERSATION_FILES_CHARS characters: past that the most recently delivered are kept, and `left` names the rest.
+ */
+export function workspaceOf(chain: Task[]): { files: DeliveredFile[]; left: string[] } {
+  const latest = new Map<string, { f: DeliveredFile; at: number }>();
+  const reports = chain.filter((x) => x.final_result?.files?.length).reverse();
+  reports.forEach((x, at) => { for (const f of x.final_result!.files!) latest.set(f.name, { f, at }); });
+  const keep = new Set<string>();
+  let chars = 0;
+  // Newest first, then in the chat's file order; one too big to fit never shuts out the smaller older ones.
+  for (const [name, { f }] of [...latest].sort((a, b) => b[1].at - a[1].at)) {
+    if (name.length > 300 || keep.size >= CONVERSATION_FILES || chars + f.text.length > CONVERSATION_FILES_CHARS) continue;
+    keep.add(name);
+    chars += f.text.length;
+  }
+  const all = [...latest.values()].map((x) => x.f);
+  return { files: all.filter((f) => keep.has(f.name)), left: all.filter((f) => !keep.has(f.name)).map((f) => f.name) };
+}
+
+/**
+ * A run's report files: the workspace with each file this run delivered replacing the one at its path, new ones
+ * after. A file carried over unchanged has no part in this run (subtask_id ''). `changed`: the paths this run
+ * delivered new or with different text.
+ */
+export function withWorkspace(workspace: DeliveredFile[], delivered: DeliveredFile[]): { files: DeliveredFile[]; changed: string[] } {
+  const out = new Map(workspace.map((f) => [f.name, { ...f, subtask_id: '' }]));
+  const changed: string[] = [];
+  for (const f of delivered) {
+    if (out.get(f.name)?.text !== f.text && !changed.includes(f.name)) changed.push(f.name);
+    out.set(f.name, f);
+  }
+  return { files: [...out.values()], changed };
+}
 
 /**
  * The task a new message after `chain[0]` acts on: the nearest one up the chain that is not planless, so a failed reply
@@ -222,7 +276,7 @@ export function openPlan(chain: Task[]): Task | null {
 export const wasApproved = (t: Task) => t.events.some((e) => e.type === 'task_status' && e.data?.to === 'approved');
 
 /** Statuses a task can be in before it was ever approved: no money has moved for it. */
-const UNTOUCHED: TaskStatus[] = ['draft', 'planned', 'cancelled', 'failed', 'killed'];
+const UNTOUCHED: TaskStatus[] = ['draft', 'asking', 'planned', 'cancelled', 'failed', 'killed'];
 
 /**
  * Why `old` can't be sent again or edited in its place (8.9), or null when it can: only the newest message of its

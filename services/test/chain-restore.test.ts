@@ -170,9 +170,13 @@ before(async () => {
   };
   servers.push(await serve('fake-planner', {
     // 'zero cap': a plan drafted before 0 USDC quotes were dropped, with a hired part capped at 0
+    // 'rook edit': a small edit Rook makes itself, with no agent
     'POST /plan': ({ body }) => body.prompt === 'zero cap'
       ? { ...planFor('alpha'), subtasks: [{ ...planFor('alpha').subtasks[0], cap_atomic: '0' }] }
+      : body.prompt === 'rook edit'
+      ? { ...planFor('alpha'), subtasks: [{ ...planFor('alpha').subtasks[0], cap_atomic: '0', candidates: [], self_do: true, self_do_reason: 'rook_edit' }] }
       : planFor(body.prompt),
+    'POST /self-do': () => ({ text: 'Edited.', llm_calls: [] }),
     'POST /aggregate': () => ({ final_markdown: 'final', attribution: [], llm_calls: [] }),
   }, 0));
   servers.push(await serve('fake-evaluator', {
@@ -851,6 +855,20 @@ test('a plan with a 0 USDC cap is refused before the wallet opens, and the task 
     await assert.rejects(call(`${orch.url}/tasks/${t.id}/approve`, {}), (e: any) => e.status === 409 && e.message === 'this plan has a 0 USDC cap; draft the task again');
     assert.equal((await snap(orch, t.id)).task.status, 'planned');
     assert.equal((await call(`${orch.url}/tasks/${t.id}/cancel`, {})).status, 'cancelled');
+  } finally { await orch.close(); }
+});
+
+test('a plan of small edits Rook makes itself starts at once in chain mode too: no button, no funding transfer, nothing on chain', async () => {
+  process.env.ROOK_DB = join(dir, 'rook-edit.sqlite');
+  const orch = await start(0);
+  try {
+    const before = calls.length;
+    const t = await call(`${orch.url}/tasks`, { prompt: 'rook edit', budget_usdc: '1', owner: 'robin.test' });
+    const s = await until(async () => { const x = await snap(orch, t.id); return ['closed', 'failed'].includes(x.task.status) ? x : false; });
+    assert.equal(s.task.status, 'closed', s.task.error);
+    assert.deepEqual([s.task.funder, s.subtasks[0].accepted.text, s.final_result.final_markdown], ['robin.test', 'Edited.', 'final']);
+    assert.deepEqual([s.ledger.budget_atomic, s.ledger.spent_atomic, s.ledger.refunded_atomic], ['0', '0', '0']);
+    assert.equal(calls.length, before); // nothing read, signed, funded or closed on chain
   } finally { await orch.close(); }
 });
 
