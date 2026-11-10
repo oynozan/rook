@@ -236,3 +236,18 @@ Task 3 ran in the web app (`web/`, branch `feat/web-real-path`) in a headless Ch
 9. Task 6's page said "Stopped. Spent 0.30 of 1.50 USDC" and nothing more: not the 1.20 refund, not the two receipts. A stopped or failed run now shows the same money card as a finished one: spent, refunded (or that the refund is on its way while payments are in flight), and a receipt per paid hire.
 10. Task 7's planner added a "summarise the finding" subtask. Subtasks run in parallel and never see each other's results, so it ran on nothing and failed; task 6 had hired an agent for 0.02 USDC to do the same. The planner prompt now says every subtask must be doable from its brief alone, and none may summarise or combine the others: the aggregator writes the report.
 11. Task 7's open page never caught up after the restart: while the services were down, the event stream's reconnect got a 503, and any reply but 200 closes an EventSource for good. The page now opens a new stream with backoff and reloads the task; task 8 confirmed it.
+
+### 8.1 Broader hiring on mainnet (2026-11-10)
+
+Two paid runs in the web app (headless Chromium, the same injected wallet), each at 1.50 USDC, after the planner change that lists each subtask's market category for the select step (docs/agentic-system.md 5.2):
+
+| Run | Task | Agents | Spent (USDC) | Refunded (USDC) | What it showed |
+|---|---|---|---|---|---|
+| 10 | `t_f1f330f2`, a single-file HTML page with an email-checked signup form; funding tx `8DrqkByR5cS9NHvd9qufbmpgfzmFMXcBMv8An1QNTZSJ` | `dev-tools-agent` (0.08), found through the dev_tools listing; its paid send got `-32603` and was voided | 0 | 1.50 | the planner now hires a developer for code; but with one affordable agent and no fallback the report was empty |
+| 11 | `t_851a6ef0`, a 150-word product description and three captions; funding tx `DekP8AjXpY2qScdgoRGREMb4inm6w6bcm8AismZMdcQf` | description: `taifoon-creative` (timed out), `content-writing-agent` (`-32603`), `quill-writer` (delivered, failed its checks, 0.25), `sasmex-marketing` (`-32603`), then Rook wrote it; captions: `taifoon-creative` (timed out), `content-writing-agent` (`-32603`), `sasmex-marketing` (pass, 0.25) | 0.50 | 1.00 | both parts delivered; Rook wrote the part no agent delivered |
+
+**What broke, and the fixes.**
+
+1. `-32603` on a paid send is the market's "no reachable backend right now, retry in a few minutes" (its x402 caller skill). Four of six paid sends got it; each payment was voided. Rook now asks such an agent again, once, after the other candidates, `ROOK_UNREACHABLE_RETRY_S` (180) later.
+2. A part no hired agent delivered was left out of the report, so run 10 delivered nothing. A part the draft marked `self_do_ok` is now written by Rook instead (run 11), and its cap still goes back.
+3. The page's live event stream broke every 5 minutes while an agent worked: the web proxy's fetch has a 300 s body timeout, and a reconnect with nothing new waited for headers until it gave up (a 503). The orchestrator now sends its headers at once and a keep-alive comment every 25 s.
