@@ -963,9 +963,9 @@ test('after a restart a chat waits while its books are rebuilt, and says so in i
     await assert.rejects(del(orch, 't_del_restoring'), heldBy('t_del_restoring', RETURNING));
   } finally { await orch.close(); failing.clear(); }
 
-  // Never rebuilt here. Funded on another contract: only a Rook that runs that one moves its money, so whatever its
-  // status says it holds the chat no longer. Numbers that don't fit Rook's books: the money waits for Rook's operator,
-  // which the refusal says, never that a run is under way or the USDC on its way back.
+  // Never rebuilt here. Funded on another contract: only a Rook that runs that one moves its money, so it holds the chat
+  // no longer, and the delete stops it, so that Rook returns its money rather than resume a run nobody can see. Numbers
+  // that don't fit Rook's books: the money waits for Rook's operator, which the refusal says.
   process.env.ROOK_DB = join(dir, 'delete-stranded.sqlite');
   storeTask('t_del_other', 'running', 'k', { cap_atomic: '100000' }, {}, '100000', { contract_id: 'rook.old', network: 'testnet' });
   openContractTask('dm', ['300000']);
@@ -975,8 +975,9 @@ test('after a restart a chat waits while its books are rebuilt, and says so in i
   orch = await start(0);
   try {
     assert.deepEqual((await del(orch, 't_del_other')).deleted, ['t_del_other']);
+    assert.equal((await snap(orch, 't_del_other')).task.status, 'killed');
     await assert.rejects(del(orch, 't_del_misfit'),
-      heldBy('t_del_misfit', /^A task in this chat still holds USDC that Rook can't send back by itself, so Rook's operator will\. Delete the chat once it is back in your wallet\.$/));
+      heldBy('t_del_misfit', /^A task in this chat still holds USDC that Rook can't send back by itself, so Rook's operator has to\. Until then this chat can't be deleted\.$/));
     assert.equal((await snap(orch, 't_del_misfit')).task.deleted_at, null);
   } finally { await orch.close(); }
 });

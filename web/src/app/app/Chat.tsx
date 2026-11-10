@@ -1219,7 +1219,7 @@ function Report({ markdown }: { markdown: string }) {
 /** A server action call that never got an answer: the network dropped, or the web server was restarting. */
 const UNREACHABLE = "This page couldn't reach Rook. Check your connection and try again.";
 /** A plan Rook cancelled because a message below it revised it. */
-const REPLACED = 'Replaced by the revised plan below.';
+const REPLACED = 'You revised this plan below, so it was cancelled.';
 
 /**
  * The newest message drafted again in its place, as it was ("Send again") or edited. Resolves with what went wrong, or
@@ -1244,7 +1244,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
   const [againError, setAgainError] = useState<string | null>(null);
   const editButton = useRef<HTMLButtonElement>(null); // the bubble's Edit
   const blockEditButton = useRef<HTMLButtonElement>(null); // the failure's own Edit message, shown instead of the bubble's
-  const facts = snap ?{ status: snap.task.status, subtasks: snap.plan ? snap.plan.subtasks.length : null, ledger: !!snap.ledger } : null;
+  const facts = snap ? { status: snap.task.status, subtasks: snap.plan ? snap.plan.subtasks.length : null, ledger: !!snap.ledger } : null;
   const editable = !!onRedo && !!facts && !!wallet.account && canEdit(facts);
   const resendable = !!onRedo && !!facts && !!wallet.account && canSendAgain(facts);
   useEffect(() => { if (!editable) setEditing(false); }, [editable]); // a newer message came, or the plan was approved

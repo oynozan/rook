@@ -182,7 +182,8 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
   /**
    * The task holds money, or may: approved (its funding may be in flight), running, closing, or ended with its books
    * still open (the refund is on its way, or, in chain mode, books not rebuilt yet after a restart). In chain mode a
-   * task funded on another contract holds none here, whatever its status says: nothing here can move its money.
+   * task funded on another contract holds none here: nothing here can move its money. Deleting its chat stops it if it
+   * hasn't ended, so a Rook that runs that contract returns its money instead of resuming a run its owner can't see.
    */
   const holdsMoney = (t: Task) => {
     if (t.stranded === 'other_contract') return false;
@@ -197,7 +198,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
   /** Why a conversation with `t` in it can't be deleted yet, in words the web app shows as they are. */
   const deleteRefusal = (t: Task) => {
     // Its books can't be rebuilt after a restart, so Rook can't send back what it holds without its operator.
-    if (t.stranded === 'misfit') return "A task in this chat still holds USDC that Rook can't send back by itself, so Rook's operator will. Delete the chat once it is back in your wallet.";
+    if (t.stranded === 'misfit') return "A task in this chat still holds USDC that Rook can't send back by itself, so Rook's operator has to. Until then this chat can't be deleted.";
     if (t.status === 'approved' && chain && !isFree(t) && !chain.contractTaskOf(t.id)) return 'A plan in this chat is waiting for its funding. Cancel it on its page first, then delete the chat.';
     if (['approved', 'funded', 'running', 'aggregating'].includes(t.status)) return 'A run in this chat is still under way. Stop it or let it finish, then delete the chat.';
     return 'Rook is still returning the unspent USDC of a task in this chat. Delete the chat once it is back in your wallet.';
@@ -311,6 +312,10 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
           if (isTerminal(t.status)) return; // killed while planning: stays killed
           // A 422 is the planner's sentence for a message that isn't a task: kept as is, for the user. The rest is internal.
           t.error = e instanceof HttpError && e.status === 422 ? e.message : `planner: ${e?.message ?? e}`;
+          // A go-ahead to a plan already replaced (an edit of its revision): there is no button left to run it.
+          if (revises === replaced && replaced !== null && /^That reads like a go-ahead/.test(t.error)) {
+            t.error = 'That reads like a go-ahead, but the plan it answers was replaced. Say what you want done, or edit this message.';
+          }
           emit(t, 'error', { kind: 'planner', message: t.error });
           setStatus(t, 'failed');
         }
@@ -468,6 +473,11 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       for (const x of all) {
         if (x.status === 'draft') kill(ledger, x);
         else if (x.status === 'planned') setStatus(x, 'cancelled');
+        else if (x.stranded === 'other_contract' && !isTerminal(x.status)) {
+          x.abort.abort(new Error('conversation deleted'));
+          emit(x, 'error', { kind: 'restore', message: 'Its conversation was deleted: stopped here, so a Rook that runs its contract returns its money instead of resuming it.' });
+          setStatus(x, 'killed');
+        }
         x.deleted_at ??= at;
         saveTask(x);
       }
