@@ -39,7 +39,7 @@ const hiccup = (route: string) => {
 };
 
 // ---- the fake market: an agent's A2A task stays WORKING until a test moves it ----
-const PRICE: Record<string, string> = { slowpoke: '300000', stubborn: '100000', hangs: '100000', alpha: '100000', beta: '100000', unsure: '100000' };
+const PRICE: Record<string, string> = { slowpoke: '300000', stubborn: '100000', hangs: '100000', alpha: '100000', beta: '100000', unsure: '100000', next: '100000' };
 const X402 = { network: 'near:testnet', asset: 'usdc.test', payTo: 'treasury.test' };
 const row = (amount: string) => ({ scheme: 'exact', ...X402, amount, maxTimeoutSeconds: 60 });
 const a2a = new Map<string, { handle: string; state: string }>();
@@ -153,15 +153,19 @@ before(async () => {
       ? { ok: false, error: { code: -32002, message: 'Task cannot be canceled in state WORKING' } }
       : (a2a.get(body.id)!.state = 'CANCELED', { ok: true })),
   }, 0));
-  const planFor = (handle: string) => ({
-    subtasks: [{
-      id: 's1', title: 'Holders', brief: 'Holders\nPlease report.', search_terms: ['holders'], cap_atomic: PRICE[handle], deadline_s: 60, self_do: false,
-      criteria: [{ id: 'c1', kind: 'contains', description: 'x', spec: { pattern: '.' } }],
-      candidates: [{ handle, name: handle, description: handle, sla_seconds: 60, success_rate: null, delivered_jobs: 0, price_atomic: PRICE[handle], quote: row(PRICE[handle]) }],
-    }],
-    dropped: [], notes: [], llm_calls: [],
-    budget: { budget_atomic: '1000000', reserve_atomic: '200000', allocatable_atomic: '800000', allocated_atomic: PRICE[handle] },
-  });
+  // A prompt names the candidates, in order ("stubborn,alpha"); the cap is the first one's price.
+  const planFor = (prompt: string) => {
+    const handles = prompt.split(','), cap = PRICE[handles[0]];
+    return {
+      subtasks: [{
+        id: 's1', title: 'Holders', brief: 'Holders\nPlease report.', search_terms: ['holders'], cap_atomic: cap, deadline_s: 60, self_do: false,
+        criteria: [{ id: 'c1', kind: 'contains', description: 'x', spec: { pattern: '.' } }],
+        candidates: handles.map((handle) => ({ handle, name: handle, description: handle, sla_seconds: 60, success_rate: null, delivered_jobs: 0, price_atomic: PRICE[handle], quote: row(PRICE[handle]) })),
+      }],
+      dropped: [], notes: [], llm_calls: [],
+      budget: { budget_atomic: '1000000', reserve_atomic: '200000', allocatable_atomic: '800000', allocated_atomic: cap },
+    };
+  };
   servers.push(await serve('fake-planner', {
     // 'zero cap': a plan drafted before 0 USDC quotes were dropped, with a hired part capped at 0
     'POST /plan': ({ body }) => body.prompt === 'zero cap'
@@ -194,7 +198,7 @@ const events = async (orch: Running, id: string) =>
 async function fundedAndWorking(orch: Running, handle: string, cid: string) {
   const t = await call(`${orch.url}/tasks`, { prompt: handle, budget_usdc: '1' });
   await call(`${orch.url}/tasks/${t.id}/approve`, {});
-  openContractTask(cid, [PRICE[handle]]);
+  openContractTask(cid, [PRICE[handle.split(',')[0]]]);
   await call(`${orch.url}/tasks/${t.id}/funded`, { contract_task_id: cid });
   await until(async () => (await snap(orch, t.id)).subtasks[0].status === 'working');
   return t.id as string;
@@ -252,6 +256,28 @@ test("kill in chain mode: an agent that refuses CancelTask has its payment voide
     assert.deepEqual(evs.slice(at + 1).filter((e) => e.type === 'ledger').map((e) => e.data.op), ['clearing', 'release', 'returnLeftover', 'closeTask']);
     assert.equal(evs.find((e) => e.data.op === 'clearing').data.how, 'void');
   } finally { await orch.close(); }
+});
+
+test('a hire past its patience is voided and the next candidate hired at once, whether the agent accepts CancelTask or not', async () => {
+  // Each authorization is valid for a minute here (2 h 10 min on mainnet, where a part waited 1 h 40 min after its
+  // agent had accepted CancelTask): Rook must not wait that out before it hires the next candidate.
+  process.env.ROOK_HIRE_PATIENCE_S = '1';
+  const orch = await start(0);
+  try {
+    for (const [first, cid] of [['alpha', 'pa'], ['stubborn', 'pb']]) {
+      const id = await fundedAndWorking(orch, `${first},next`, cid);
+      const account = acct(cid, 1);
+      const [nextId] = await until(async () => [...a2a].find(([, x]) => x.handle === 'next' && x.state === 'WORKING') ?? false);
+      a2a.get(nextId)!.state = 'COMPLETED';
+      auths.get(account)!.landed = true; // the marketplace settles next's payment
+      bal.set(account, bal.get(account)! - 100000n);
+      const s = await until(async () => { const x = await snap(orch, id); return ['closed', 'failed'].includes(x.task.status) ? x : false; });
+      assert.equal(s.task.status, 'closed', s.task.error);
+      assert.deepEqual(s.subtasks[0].hires.map((h: any) => [h.agent_handle, h.state, h.paid]), [[first, 'TIMEOUT', false], ['next', 'COMPLETED', true]], first);
+      assert.ok(calls.includes(`expire ${account} landed=false void`), first);
+      assert.deepEqual([s.ledger.spent_atomic, s.ledger.refunded_atomic], ['100000', '900000'], first);
+    }
+  } finally { delete process.env.ROOK_HIRE_PATIENCE_S; await orch.close(); }
 });
 
 test('a kill while fund_subtask is in flight still brings that sub-account back', async () => {

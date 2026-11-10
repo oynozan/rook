@@ -334,12 +334,12 @@ test('an unknown send outcome is counted as spent with a receipt, then the next 
   spentMatchesReceipts(s);
 });
 
-test('timeout with CancelTask refused waits until the authorization expires and pays a late completion', async () => {
-  const late = { ...cand('late', '100000', 0), quote: { ...row('100000'), maxTimeoutSeconds: 5 } };
+test('timeout with CancelTask refused: Rook stops waiting at once and hires the next candidate, the late agent unpaid', async () => {
+  const late = { ...cand('late', '100000', 0), quote: { ...row('100000'), maxTimeoutSeconds: 3600 } };
   const s = await runToEnd({ subtasks: [sub('s1', 'Late', '300000', [late, cand('holders-good', '300000')])], dropped: [], budget: budget('300000'), notes: [], llm_calls: [] });
   assert.equal(s.task.status, 'closed', s.task.error);
-  assert.deepEqual(s.subtasks[0].hires.map((h: any) => [h.agent_handle, h.state, h.paid]), [['late', 'COMPLETED', true]]);
-  assert.deepEqual(s.receipts.map((r: any) => [r.agent_handle, r.verdict]), [['late', 'pass']]);
+  assert.deepEqual(s.subtasks[0].hires.map((h: any) => [h.agent_handle, h.state, h.paid]), [['late', 'TIMEOUT', false], ['holders-good', 'COMPLETED', true]]);
+  assert.deepEqual(s.receipts.map((r: any) => [r.agent_handle, r.verdict]), [['holders-good', 'pass']]);
   spentMatchesReceipts(s);
 });
 

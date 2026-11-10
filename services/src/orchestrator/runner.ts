@@ -753,14 +753,14 @@ async function follow(ledger: Ledger, t: Task, s: Sub, c: Candidate, hire: Hire,
   t.inflight.set(hire.id, { subtask: s, hire, handle: c.handle, a2a_task_id: sentTask.id });
   let final = await poll(t, s, c, hire, sentTask, slaEnd);
   if (!final) {
-    // Past sla + grace. The header stays redeemable until the authorization expires, so the next candidate is
-    // authorized only once CancelTask is accepted or that expiry has passed (the agent may still complete and charge).
-    const cancelled = await cancelTask(c.handle, sentTask.id);
+    // Past sla + grace (at most ROOK_HIRE_PATIENCE_S): Rook stops waiting, whether or not the agent accepts CancelTask.
+    // One last look catches a delivery that landed meanwhile; otherwise the payment is voided (the signer spends its
+    // nonce), so the next candidate is hired now, not once the authorization's window ends. On mainnet a 2 h 10 min
+    // window held a part for 1 h 40 min after its agent had accepted CancelTask, with the page saying nothing.
+    await cancelTask(c.handle, sentTask.id);
     signal.throwIfAborted();
-    const expiresAt = Date.parse(hire.expires_at ?? '');
-    if (!cancelled && expiresAt - Date.now() > 1000) {
-      final = await poll(t, s, c, hire, { ...sentTask, state: hire.state as A2AState }, expiresAt);
-    }
+    const last = await getTask(c.handle, sentTask.id, signal);
+    if (last?.state === 'COMPLETED' && hasContent(last)) { final = last; hire.state = last.state; }
   }
   t.inflight.delete(hire.id);
   hire.ended_at = now();
@@ -768,7 +768,7 @@ async function follow(ledger: Ledger, t: Task, s: Sub, c: Candidate, hire: Hire,
   if (!final) {
     hire.state = 'TIMEOUT';
     emit(t, 'a2a_state', { hire_id: hire.id, agent_handle: c.handle, a2a_task_id: sentTask.id, state: 'TIMEOUT' }, s.id);
-    return (await endUnpaid(ledger, t, s, hire, 'wait')) ? hire : null;
+    return (await endUnpaid(ledger, t, s, hire, 'void')) ? hire : null;
   }
   if (final.state !== 'COMPLETED') { // REJECTED, FAILED, CANCELED: terminal and unpaid
     return (await endUnpaid(ledger, t, s, hire, 'terminal')) ? hire : null;
@@ -787,6 +787,13 @@ async function follow(ledger: Ledger, t: Task, s: Sub, c: Candidate, hire: Hire,
 }
 
 const hasContent = (task: A2ATask) => task.artifacts?.some((a) => a.parts?.some((p) => (p.text ?? '').trim() || p.url || p.raw));
+
+/** One GetTask; null when the gateway or the agent does not answer. */
+async function getTask(handle: string, id: string, signal: AbortSignal): Promise<A2ATask | null> {
+  const r = await call<GatewayResult<{ task: A2ATask }>>(gw(`/task?handle=${encodeURIComponent(handle)}&id=${encodeURIComponent(id)}`), undefined, { signal })
+    .catch(() => { signal.throwIfAborted(); return null; });
+  return r?.ok ? r.task : null;
+}
 
 /** Poll GetTask until terminal; null when the deadline passes first. */
 async function poll(t: Task, s: Sub, c: Candidate, hire: Hire, initial: A2ATask, deadline: number): Promise<A2ATask | null> {

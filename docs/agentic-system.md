@@ -241,7 +241,7 @@ Every task route takes the caller's `owner` (body, or `?owner=` on a GET): a tas
 | `quoting` | quote fails a check or the agent is unreachable | `quoting` with the next candidate, or `abandoned` if none is left |
 | `working` | A2A `COMPLETED` with artifacts | `evaluating` (payment settles) |
 | `working` | A2A `REJECTED`, `FAILED` or `CANCELED` | `quoting` with the next candidate (authorization released, nothing charged) |
-| `working` | `sla_seconds + ROOK_PAYMENT_GRACE_S` passed | `quoting` with the next candidate once the agent accepts `CancelTask` or the authorization has expired (`maxTimeoutSeconds` after signing). Until then the header can still be redeemed, so Rook keeps polling; a late `COMPLETED` is settled and evaluated like any delivery |
+| `working` | `sla_seconds + ROOK_PAYMENT_GRACE_S` passed (at most `ROOK_HIRE_PATIENCE_S`) | `quoting` with the next candidate at once: Rook sends `CancelTask`, looks at the task once more (a `COMPLETED` with content is settled and evaluated like any delivery), and otherwise voids the authorization (the signer spends its nonce), whether or not the agent accepted the cancel. Waiting out the window instead held a mainnet part for 1 h 40 min after its agent had accepted `CancelTask` (2026-11-10) |
 | `evaluating` | verdict pass | `passed` |
 | `evaluating` | verdict fail, `rehire_count` below `ROOK_MAX_REHIRES` (2) | `quoting` with the next candidate, `rehire_count + 1` |
 | `evaluating` | verdict fail, `rehire_count` is 2, or no candidate left | `abandoned` |
@@ -260,7 +260,7 @@ All must hold, or the candidate is skipped with event `quote_rejected` and the r
 - `scheme` is `exact`; `network` and `asset` match a row of the gateway's `/x402` recipients.
 - `payTo` matches that row's `payTo` (allowlist). A mismatch also emits `security_alert`.
 - `amount` is at most the candidate's price in the approved plan: an agent that raised its price since planning is skipped, never topped up.
-- `maxTimeoutSeconds` is an integer from 1 to `ROOK_MAX_PAYMENT_TIMEOUT_S` (default 90,000 s): an authorization holds its sub-account's money until it lands or expires, which takes the whole window only when the agent hangs and refuses CancelTask.
+- `maxTimeoutSeconds` is an integer from 1 to `ROOK_MAX_PAYMENT_TIMEOUT_S` (default 90,000 s): an authorization holds its sub-account's money until it lands or expires, which a run never waits out: a hire past its patience, a failed send and a kill all void it.
 - `amount` is at most the subtask's balance. On a re-hire, when the balance is short, the orchestrator first tops up the difference from the reserve (`ledger.topUp`); if the reserve cannot cover it, the candidate is skipped.
 
 ### 8.5 The ledger (stand-in for contract and signer)
