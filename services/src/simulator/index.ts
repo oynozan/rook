@@ -142,7 +142,8 @@ export function start(port = config.ports.simulator): Promise<Running> {
         const hay = [a.handle, a.name, a.description, ...a.tags].join(' ').toLowerCase();
         return words.length === 0 || words.some((w) => hay.includes(w));
       };
-      return { agents: AGENTS.filter(hit).map(listing) };
+      const category = query.get('category');
+      return { agents: AGENTS.filter(hit).map(listing).filter((a) => !category || a.category === category) };
     },
 
     // NEAR AI spend of the simulated agents (process total), so the CLI can report the full cost of a run.

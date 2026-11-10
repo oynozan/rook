@@ -4,7 +4,7 @@ import { config, MAX_PROMPT_CHARS } from '../shared/config.ts';
 import { HttpError, bigintReplacer, call, serve, type Running } from '../shared/http.ts';
 import { AggregateRequest, PlanRequest, SelfDoRequest, type AgentSummary, type AggregateResult, type LlmCall, type Plan, type X402Config } from '../shared/types.ts';
 import { budgetBacked, formatUsdc, namedBudgetProblem, share } from '../shared/money.ts';
-import { applySelection, buildPlan, filterSearch, type QuoteResult } from './plan.ts';
+import { applySelection, buildPlan, filterSearch, marketCategory, type QuoteResult } from './plan.ts';
 import { aggregate, draft, select, selfDo } from './prompts.ts';
 import { agentOf, isMerged } from './canned.ts';
 
@@ -39,10 +39,12 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
   const budget = named ?? sent;
   progress({ stage: 'searching', subtasks: d.map((s, index) => ({ index, title: s.title })) });
 
-  // Step 2: supply check, every search term of every subtask in parallel.
-  const search = (q: string) => call<{ agents: AgentSummary[] }>(`${gw()}/search?q=${encodeURIComponent(q)}`).then((r) => r.agents);
+  // Step 2: supply check, every search term of every subtask in parallel, then the listing of its category.
+  const search = (q: string, category?: string) =>
+    call<{ agents: AgentSummary[] }>(`${gw()}/search?q=${encodeURIComponent(q)}${category ? `&category=${category}` : ''}`).then((r) => r.agents);
   const results = await gateway('search', () => Promise.all(d.map(async (s, index) => {
-    const found = filterSearch(await Promise.all(s.search_terms.map(search)));
+    const category = marketCategory(s.category);
+    const found = filterSearch(await Promise.all([...s.search_terms.map((q) => search(q)), ...(category ? [search('', category)] : [])]));
     progress({ stage: 'found', index, title: s.title, agents: found.slice(0, FOUND_SHOWN).map((a) => ({ handle: a.handle, name: a.name })) });
     return found;
   })));

@@ -18,6 +18,8 @@ export const DraftSubtask = z.object({
   title: z.string().min(1),
   brief: z.string().min(1),
   search_terms: z.array(z.string().min(1)).min(1).max(3),
+  // The market category whose agents do this kind of work; one Rook does not know is ignored, never a failed draft.
+  category: z.string().nullish(),
   self_do_ok: z.boolean(),
   criteria: z.array(DraftCriterion),
 });
@@ -35,14 +37,25 @@ export type Draft = z.infer<typeof Draft>;
 
 export type QuoteResult = { ok: true; row: unknown } | { ok: false; error: { code: number | string; message: string } };
 
+/**
+ * The market's agent categories (GET /v1/agents?category=..., as listed on 2026-11-10). A subtask's category lists
+ * that category's agents next to its keyword searches: keyword search finds only agents whose description names the
+ * topic, so a "portfolio website" found 12 agents, most of them not developers, while dev_tools alone lists 36.
+ */
+export const MARKET_CATEGORIES = ['research', 'data', 'finance', 'creative', 'marketing', 'dev_tools', 'automation',
+  'legal_compliance', 'sales', 'operations', 'customer_support', 'travel', 'events', 'other'] as const;
+export const marketCategory = (c: string | null | undefined) =>
+  (MARKET_CATEGORIES as readonly string[]).includes(c ?? '') ? c! : undefined;
+
 export const DEFAULT_JUDGE = 'Does the deliverable fully answer the brief with specific content rather than generic filler?';
-const MAX_PER_SUBTASK = 10;
+const MAX_PER_SUBTASK = 12;
 const MAX_JUDGES = 2;
 
 /**
  * Step 2: keep agents that can be hired now with USDC, and merge the per-term results by handle, taking each term's
  * next unseen agent in turn. The first term is the generic skill and often fills every slot alone, which cut the
- * specialists the other terms found (a Solidity audit offered only generic code reviewers).
+ * specialists the other terms found (a Solidity audit offered only generic code reviewers). The category listing, when
+ * the subtask has one, is the last list: it adds the generalists of that kind of work without crowding out a match.
  */
 export function filterSearch(resultLists: AgentSummary[][]): AgentSummary[] {
   const lists = resultLists.map((l) => l.filter((a) => a.available_now && a.listing_status === 'live' && a.payable_with?.includes('USDC')));
