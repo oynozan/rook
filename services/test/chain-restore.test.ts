@@ -22,6 +22,7 @@ const contract = new Map<string, { task: any; subs: CSub[] }>();
 const bal = new Map<string, bigint>();
 const auths = new Map<string, { amount: bigint; landed: boolean; until: number }>(); // account -> outstanding authorization
 const expireWaits = new Map<string, number>(); // account -> /expire calls answered 409 (still valid)
+const onVoid = new Map<string, () => void>(); // account -> what happens while its void is in flight (the agent delivers)
 const calls: string[] = [];
 const acct = (cid: string, n: number) => `t${cid}-${n}.rook.test`;
 const openContractTask = (cid: string, caps: string[]) =>
@@ -59,6 +60,7 @@ before(async () => {
     'POST /expire': ({ body }) => {
       const a = acct(body.task_id, body.n), out = auths.get(a);
       if (!out) return { cleared: false, outstanding: false };
+      if (body.void) { onVoid.get(a)?.(); onVoid.delete(a); }
       // void: the signer spends the delegate's nonce, so it clears at once (landed when the payment ran first).
       if (!out.landed && !body.terminal_unpaid && !body.void && Date.now() <= out.until) {
         expireWaits.set(a, (expireWaits.get(a) ?? 0) + 1);
@@ -255,6 +257,7 @@ test("kill in chain mode: an agent that refuses CancelTask has its payment voide
     assert.deepEqual(evs.find((e) => e.type === 'ledger' && e.data.op === 'kill').data, { op: 'kill', returning: true });
     assert.deepEqual(evs.slice(at + 1).filter((e) => e.type === 'ledger').map((e) => e.data.op), ['clearing', 'release', 'returnLeftover', 'closeTask']);
     assert.equal(evs.find((e) => e.data.op === 'clearing').data.how, 'void');
+    assert.equal(evs.find((e) => e.data.op === 'release').data.agent_handle, 'stubborn'); // the page names whose payment ended
   } finally { await orch.close(); }
 });
 
@@ -277,6 +280,31 @@ test('a hire past its patience is voided and the next candidate hired at once, w
       assert.ok(calls.includes(`expire ${account} landed=false void`), first);
       assert.deepEqual([s.ledger.spent_atomic, s.ledger.refunded_atomic], ['100000', '900000'], first);
     }
+  } finally { delete process.env.ROOK_HIRE_PATIENCE_S; await orch.close(); }
+});
+
+test('a hire past its patience whose payment landed while it was voided: its delivery is read, judged and kept, and no one else is hired', async () => {
+  // The agent refuses CancelTask, the last look still shows WORKING, then it delivers and the market settles while the
+  // void is in flight. Rook paid for that work: it must not throw it away and pay the next candidate for the same part.
+  process.env.ROOK_HIRE_PATIENCE_S = '1';
+  const account = acct('lv', 1);
+  onVoid.set(account, () => {
+    const [id] = [...a2a].findLast(([, x]) => x.handle === 'stubborn')!; // this test's: older ones refused CancelTask too
+    a2a.get(id)!.state = 'COMPLETED';
+    auths.get(account)!.landed = true;
+    bal.set(account, bal.get(account)! - 100000n);
+  });
+  const orch = await start(0), from = calls.length;
+  try {
+    const id = await fundedAndWorking(orch, 'stubborn,next', 'lv');
+    const s = await until(async () => { const x = await snap(orch, id); return ['closed', 'failed'].includes(x.task.status) ? x : false; });
+    assert.equal(s.task.status, 'closed', s.task.error);
+    assert.ok(calls.includes(`expire ${account} landed=true void`));
+    assert.deepEqual(s.subtasks[0].hires.map((h: any) => [h.agent_handle, h.state, h.paid, h.deliverable_text]), [['stubborn', 'COMPLETED', true, 'Holders report']]);
+    assert.equal(s.subtasks[0].final_outcome, 'passed');
+    assert.ok(!calls.slice(from).some((c) => c.startsWith('send next')));
+    assert.deepEqual(s.receipts.map((r: any) => [r.agent_handle, r.amount_atomic, r.verdict]), [['stubborn', '100000', 'pass']]);
+    assert.deepEqual([s.ledger.spent_atomic, s.ledger.refunded_atomic], ['100000', '900000']); // booked once, by the release
   } finally { delete process.env.ROOK_HIRE_PATIENCE_S; await orch.close(); }
 });
 
