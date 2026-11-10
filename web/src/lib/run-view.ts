@@ -3,6 +3,7 @@
 // publish no progress while they work (A2A GetTask gives only a state), so between a hire and its delivery all Rook can
 // say is who is working and for how long. Pure functions, so the page and the tests both use them.
 import { skipReason } from '@/lib/feed';
+import { lineCount, reportBlocks } from '@/lib/report';
 import { usdc } from '@/lib/funding';
 import type { HireView, PlanView, RookEvent, SubtaskView } from '@/lib/server/orchestrator';
 
@@ -189,9 +190,14 @@ function liveHires(hires: HireView[], events: RookEvent[], id: string): HireView
   return out;
 }
 
-/** Text cut to about `max` characters at a word, on one line. */
+/**
+ * Text cut to about `max` characters at a word, on one line. A fenced code block shows as "(code, N lines)": the code
+ * itself is in the report's files, and its first lines say nothing (a web page opened with "<!DOCTYPE html>").
+ */
 export function preview(text: string, max = 280): string {
-  const flat = text.replace(/\s+/g, ' ').trim();
+  const flat = reportBlocks(text)
+    .map((b) => (b.kind === 'code' ? `(${b.lang || 'code'}, ${lineCount(b.text)} lines)` : b.text.replace(/^#{1,6}\s+/, '')))
+    .join(' ').replace(/\s+/g, ' ').trim();
   if (flat.length <= max) return flat;
   const cut = flat.slice(0, max);
   return `${cut.slice(0, cut.lastIndexOf(' ') > max * 0.6 ? cut.lastIndexOf(' ') : max).trimEnd()}…`;

@@ -29,6 +29,20 @@ export function reportBlocks(markdown: string): Block[] {
   return out;
 }
 
+/**
+ * The services' marker for a file taken out of the report ("[file index.html, 407 lines, attached below the report]",
+ * or "..., not attached: <why>]"), in plain words; null for any other line.
+ */
+export function fileMarker(line: string): string | null {
+  const m = line.trim().match(/^\[file (.+?), (\d+) lines?, (?:attached below the report|not attached: (.+))\]$/);
+  if (!m) return null;
+  const [, name, n, why] = m, lines = `${n} line${n === '1' ? '' : 's'}`;
+  return why ? `${name} (${lines}) wasn't attached: ${why}.` : `${name} (${lines}) is under Files below.`;
+}
+
+/** Who made a file, in plain words: Rook's own work shows as Rook, an agent by its handle. */
+export const madeBy = (handle: string) => (handle.startsWith('rook:') ? 'Rook' : handle);
+
 /** Lines in a file's text; a final newline ends the last line rather than starting another. */
 export const lineCount = (text: string) => (text ? text.replace(/\r?\n$/, '').split(/\r?\n/).length : 0);
 

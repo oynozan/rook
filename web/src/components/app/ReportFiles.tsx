@@ -7,7 +7,7 @@
 import { useId, useState } from 'react';
 import { Reveal, RowButton } from '@/components/app/controls';
 import { detail } from '@/lib/errors';
-import { blobType, downloadName, isHtml, lineCount } from '@/lib/report';
+import { blobType, downloadName, isHtml, lineCount, madeBy } from '@/lib/report';
 import type { ReportFile } from '@/lib/server/orchestrator';
 
 export function ReportFiles({ files, titles }: { files: ReportFile[]; titles: Map<string, string> }) {
@@ -59,7 +59,7 @@ function FileRow({ file, part }: { file: ReportFile; part?: string }) {
       <p className="font-mono text-sm break-all">{file.name}</p>
       <p className="text-sm text-ink/60">
         {lines} line{lines === 1 ? '' : 's'}
-        {' · '}from <span className="font-mono break-all">{file.agent_handle}</span>{part ? ` for ${part}` : ''}
+        {' · '}from {madeBy(file.agent_handle) === 'Rook' ? 'Rook' : <span className="font-mono break-all">{file.agent_handle}</span>}{part ? ` for ${part}` : ''}
       </p>
       <div className="-ml-3 mt-1 flex flex-wrap items-center">
         <RowButton onClick={download}>Download<span className="sr-only"> {file.name}</span></RowButton>

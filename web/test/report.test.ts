@@ -37,3 +37,12 @@ test('a delivered file: its lines counted, a name a download can use, a Blob typ
   assert.equal(isHtml({ name: 'site', mime: 'text/html; charset=utf-8' }), true);
   assert.equal(isHtml({ name: 'style.css', mime: 'text/css' }), false);
 });
+
+test("the services' file marker reads as plain words; Rook's own work is from Rook", async () => {
+  const { fileMarker, madeBy } = await import('@/lib/report');
+  assert.equal(fileMarker('[file index.html, 407 lines, attached below the report]'), 'index.html (407 lines) is under Files below.');
+  assert.equal(fileMarker('[file big.js, 1 line, not attached: larger than 1 MB]'), "big.js (1 line) wasn't attached: larger than 1 MB.");
+  assert.equal(fileMarker('See [file index.html, 4 lines, attached below the report]'), null); // only a line of its own
+  assert.equal(fileMarker('A paragraph.'), null);
+  assert.deepEqual([madeBy('rook:self-do'), madeBy('quill-writer')], ['Rook', 'quill-writer']);
+});

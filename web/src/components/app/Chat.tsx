@@ -17,7 +17,7 @@ import { attemptNote, canEdit, canSendAgain, messageProblem, redoWait, shownInst
 import { conversationOf, revisedPlan } from '@/lib/conversations';
 import { checkDraft, parseBudget } from '@/lib/draft';
 import { deliveredParts, feedFrom, type FeedLine, type Now } from '@/lib/feed';
-import { reportBlocks } from '@/lib/report';
+import { fileMarker, reportBlocks } from '@/lib/report';
 import { nowLine, partViews, type Line } from '@/lib/run-view';
 import {
   balanceProblem, closeTaskTransaction, confirmFailure, contractHasTask, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
@@ -1105,6 +1105,8 @@ function Report({ markdown }: { markdown: string }) {
         }
         const line = b.text.trim();
         if (!line) return null;
+        const file = fileMarker(line);
+        if (file) return <p key={i} style={delay(i)} className="rook-in text-ink/65">{file}</p>;
         const heading = line.match(/^(#{1,4})\s+(.*)$/);
         if (heading) return <h3 key={i} style={delay(i)} className={`rook-in font-medium tracking-[-0.01em] ${heading[1].length <= 1 ? 'mt-4 text-2xl' : 'mt-4 text-xl'}`}>{inline(heading[2])}</h3>;
         if (/^[-*]\s/.test(line)) return <p key={i} style={delay(i)} className="rook-in pl-4 -indent-3">• {inline(line.slice(2))}</p>;

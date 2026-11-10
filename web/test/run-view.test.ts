@@ -176,4 +176,6 @@ test('spans and previews read as people say them', () => {
   assert.equal(span(-5), '0 s');
   assert.equal(preview('  short\n\ntext '), 'short text');
   assert.equal(preview('aaaa bbbb cccc', 10), 'aaaa bbbb…');
+  // A delivered web page previews as its note, its code as a count (mainnet: the preview began "# index.html ```html <!DOCTYPE").
+  assert.equal(preview('# index.html\n\n```html\n<!DOCTYPE html>\n<html>\n</html>\n```\n\nA dark portfolio.'), 'index.html (html, 3 lines) A dark portfolio.');
 });
