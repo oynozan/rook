@@ -121,7 +121,7 @@ export function Composer({ onSend, errors, sending, compact, thread }: {
               />
               USDC
             </label>
-            <span className="mt-2 hidden text-sm whitespace-nowrap text-ink/55 sm:inline">{reserveLabel(budget)}</span>
+            {/* <span className="mt-2 hidden text-sm whitespace-nowrap text-ink/55 sm:inline">{reserveLabel(budget)}</span> */}
           </div>
         </div>
         <button

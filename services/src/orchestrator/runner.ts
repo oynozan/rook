@@ -979,11 +979,15 @@ async function evaluate(t: Task, s: Sub, text: string, parts: Part[], hire_id: s
     .map((id) => t.subtasks.find((x) => x.id === id))
     .filter((p): p is Sub => p?.final_outcome === 'passed' && !!p.accepted)
     .map((p) => ({ subtask_id: p.id, text: p.accepted!.text }));
+  // An edit gives back only the files it changes: the checker hears which ones the project already has, so a page that
+  // still loads an unchanged styles.css passes linked_files (evaluator/index.ts reads paths named in the brief as there).
+  const known = (t.workspace ?? []).map((f) => f.name);
+  const brief = known.length ? `${s.brief}\n\nFiles the project already has (unchanged unless this delivery gives them again): ${known.join(', ')}` : s.brief;
   let ev: Evaluation;
   for (let attempt = 1; ; attempt++) {
     try {
       ev = await call<Evaluation>(config.urls.evaluator + '/evaluate', {
-        task_id: t.id, subtask_id: s.id, brief: s.brief, criteria: s.criteria, deliverable: { text, parts }, peers,
+        task_id: t.id, subtask_id: s.id, brief, criteria: s.criteria, deliverable: { text, parts }, peers,
       }, { signal });
       break;
     } catch (e) {

@@ -1026,7 +1026,7 @@ test('an image link, data, a text file and a photo sent as bytes are all kept: t
   const ev = evalRequests.filter((r) => r.task_id === s.task.id).at(-1);
   assert.deepEqual([ev.deliverable.text, ev.deliverable.parts.length], [text, 4]); // every part, as before
   assert.equal(aggRequests.at(-1).subtasks[0].deliverable_text, text);
-  assert.deepEqual(s.final_result.files.map((f: any) => f.name), ['palette-1.json']);
+  assert.deepEqual(s.final_result.files.map((f: any) => f.name), ['palette-1.json', 'delivery-2.txt']); // a text file is attached too (files.ts reads txt)
   assert.match(s.final_result.final_markdown, /File: logo\.png https:\/\/cdn\.example\/a\/9f2/);
 });
 

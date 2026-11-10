@@ -13,7 +13,8 @@ export const EVIL_PAYEE = 'evil-collector.near';
 
 /** The first deliverable the evaluator flagged as an injection, with its verdict, from the task's events. */
 export function injectedDeliverable(t: Task) {
-  const alert = t.events.find((e) => e.type === 'security_alert' && e.data?.source === 'evaluator');
+  // The evaluator also flags a passing delivery whose package.json runs a script on npm install: a warning, not an injection.
+  const alert = t.events.find((e) => e.type === 'security_alert' && e.data?.source === 'evaluator' && !/^runs a script on npm install/.test(String(e.data?.flag ?? '')));
   if (!alert) return null;
   const { hire_id, agent_handle } = alert.data;
   const ev = t.events.find((e) => e.type === 'evaluation' && e.data?.hire_id === hire_id)?.data;
