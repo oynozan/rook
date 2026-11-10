@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { detail } from '@/lib/errors';
 import { NETWORK } from '@/lib/network';
+import { guardWalletMessages } from '@/lib/wallet-messages';
 
 export { NETWORK };
 
@@ -65,6 +66,7 @@ export function WalletProvider({ account: signedIn, children }: { account: strin
   async function getConnector() {
     if (connector.current) return connector.current;
     const { NearConnector } = await import('@hot-labs/near-connect');
+    guardWalletMessages(window); // a report preview's scripts must not offer the connector a wallet
     const c = new NearConnector({ network: NETWORK, footerBranding: null, features: { signMessage: true } });
     c.on('wallet:signOut', () => { void endSession(); });
     connector.current = c;
