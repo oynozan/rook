@@ -32,17 +32,50 @@ const DELETED = 'This conversation was deleted.';
 
 /**
  * What the planner gets with a follow-up: the earlier messages (the first and the newest when there are too many) and
- * the newest report in the conversation, cut to size. `revises`: the plan this message changes, if any.
+ * the newest report in the conversation with the files delivered with it, cut to size. `revises`: the plan this message
+ * changes, if any.
  */
 export function conversationFor(chain: Task[], revises: Task | null): Conversation {
   const prompts = chain.map((x) => x.prompt).reverse();
   const earlier = prompts.length > CONVERSATION_MESSAGES ? [prompts[0], ...prompts.slice(-(CONVERSATION_MESSAGES - 1))] : prompts;
-  const report = chain.find((x) => x.final_result?.final_markdown.trim())?.final_result!.final_markdown.trim();
+  const revising = revises !== null;
+  const r = chain.find((x) => x.final_result?.final_markdown.trim())?.final_result;
+  if (!r) return { earlier, revising };
+  const LIMIT = CONVERSATION_REPORT_CHARS;
+  const REPORT_MIN = 4_000; // with files too long to fit, the report keeps this much and the files get the rest
+  const NOTE_ROOM = 300; // for the closing note on what was cut
   const CUT = '\n\n[The rest of the report is left out here.]';
-  return {
-    earlier, revising: revises !== null,
-    ...(report ? { report: report.length > CONVERSATION_REPORT_CHARS ? report.slice(0, CONVERSATION_REPORT_CHARS - CUT.length) + CUT : report } : {}),
-  };
+  const md = r.final_markdown.trim();
+  // The report only names its files ("[file index.html, ...]"): a follow-up such as "make the header blue" needs the page.
+  const files = (r.files ?? []).map((f) => {
+    const fence = '`'.repeat(Math.max(3, ...[...f.text.matchAll(/`+/g)].map((m) => m[0].length + 1)));
+    return { name: f.name.slice(0, 100), head: `\n\n${f.name.slice(0, 100)}:\n${fence}\n`, text: f.text, tail: `\n${fence}` };
+  });
+  const HEAD = '\n\nThe files attached to the report, as delivered:';
+  const whole = files.length ? HEAD + files.map((f) => f.head + f.text + f.tail).join('') : '';
+  const room = Math.max(LIMIT - whole.length, REPORT_MIN);
+  const report = md.length > room ? md.slice(0, room - CUT.length) + CUT : md;
+  if (report.length + whole.length <= LIMIT) return { earlier, revising, report: report + whole };
+  // Files whole while they fit, then the next one up to a line end; a note says what is left out, never a silent cut.
+  let out = report + HEAD;
+  const left: string[] = [];
+  let i = 0;
+  for (; i < files.length; i++) {
+    const f = files[i];
+    const free = LIMIT - NOTE_ROOM - out.length;
+    if (f.head.length + f.text.length + f.tail.length <= free) { out += f.head + f.text + f.tail; continue; }
+    let part = f.text.slice(0, Math.max(0, free - f.head.length - f.tail.length));
+    if (part.length >= 200) {
+      if (part.lastIndexOf('\n') > 0) part = part.slice(0, part.lastIndexOf('\n'));
+      out += f.head + part + f.tail;
+      left.push(`${f.name} is cut at line ${part.split('\n').length} of ${f.text.split('\n').length}`);
+      i++;
+    }
+    break;
+  }
+  const more = files.length - i;
+  if (more) left.push(`${more} more file${more === 1 ? ' is' : 's are'} left out`);
+  return { earlier, revising, report: `${out}\n\n[Cut for length: ${left.join('; ')}.]` };
 }
 
 /**
