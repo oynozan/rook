@@ -4,7 +4,7 @@ import { config, MAX_PROMPT_CHARS } from '../shared/config.ts';
 import { HttpError, bigintReplacer, call, serve, type Running } from '../shared/http.ts';
 import { AggregateRequest, PlanRequest, SelfDoRequest, type AgentSummary, type AggregateResult, type LlmCall, type Plan, type X402Config } from '../shared/types.ts';
 import { budgetBacked, formatUsdc, namedBudgetProblem, share } from '../shared/money.ts';
-import { applySelection, buildPlan, filterSearch, marketCategory, type QuoteResult } from './plan.ts';
+import { MAX_CATEGORY_LISTED, applySelection, buildPlan, filterSearch, hireable, marketCategory, type QuoteResult } from './plan.ts';
 import { aggregate, draft, select, selfDo } from './prompts.ts';
 import { agentOf, isMerged } from './canned.ts';
 
@@ -39,18 +39,22 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
   const budget = named ?? sent;
   progress({ stage: 'searching', subtasks: d.map((s, index) => ({ index, title: s.title })) });
 
-  // Step 2: supply check, every search term of every subtask in parallel, then the listing of its category.
+  // Step 2: supply check, every search term of every subtask in parallel, and each category the draft names, listed
+  // once for all its subtasks. A listing is a broadening only: if the market refuses it, the keyword results still plan.
   const search = (q: string, category?: string) =>
     call<{ agents: AgentSummary[] }>(`${gw()}/search?q=${encodeURIComponent(q)}${category ? `&category=${category}` : ''}`).then((r) => r.agents);
+  const cats = d.map((s) => marketCategory(s.category));
+  const listings: Record<string, AgentSummary[]> = Object.fromEntries(await Promise.all([...new Set(cats.filter((c): c is string => !!c))].map(async (c) =>
+    [c, (await search('', c).catch(() => [])).filter(hireable).slice(0, MAX_CATEGORY_LISTED)] as const)));
   const results = await gateway('search', () => Promise.all(d.map(async (s, index) => {
-    const category = marketCategory(s.category);
-    const found = filterSearch(await Promise.all([...s.search_terms.map((q) => search(q)), ...(category ? [search('', category)] : [])]));
+    const found = filterSearch(await Promise.all(s.search_terms.map((q) => search(q))));
     progress({ stage: 'found', index, title: s.title, agents: found.slice(0, FOUND_SHOWN).map((a) => ({ handle: a.handle, name: a.name })) });
     return found;
   })));
 
-  const { handles: picks } = await llmStep(calls, () => select(d, results));
-  const selected = d.map((_, i) => applySelection(results[i], picks[i] ?? []));
+  const listed = cats.map((c) => (c ? listings[c] ?? [] : []));
+  const { handles: picks } = await llmStep(calls, () => select(d, results, listings, cats));
+  const selected = d.map((_, i) => applySelection([...results[i], ...listed[i]], picks[i] ?? []));
 
   // Step 4: one quote per distinct handle; any failure becomes a dropped candidate, not a failed plan.
   const x402 = await gateway('x402', () => call<X402Config>(`${gw()}/x402`));

@@ -40,7 +40,7 @@ export type QuoteResult = { ok: true; row: unknown } | { ok: false; error: { cod
 /**
  * The market's agent categories (GET /v1/agents?category=..., as listed on 2026-11-10). A subtask's category lists
  * that category's agents next to its keyword searches: keyword search finds only agents whose description names the
- * topic, so a "portfolio website" found 12 agents, most of them not developers, while dev_tools alone lists 36.
+ * topic, so a "portfolio website" found 9 agents of five categories, while dev_tools lists 43 available ones.
  */
 export const MARKET_CATEGORIES = ['research', 'data', 'finance', 'creative', 'marketing', 'dev_tools', 'automation',
   'legal_compliance', 'sales', 'operations', 'customer_support', 'travel', 'events', 'other'] as const;
@@ -49,16 +49,19 @@ export const marketCategory = (c: string | null | undefined) =>
 
 export const DEFAULT_JUDGE = 'Does the deliverable fully answer the brief with specific content rather than generic filler?';
 const MAX_PER_SUBTASK = 12;
+// ponytail: a category listing shown to the select step is cut at 60 agents to bound its prompt; the market lists 56 at most today.
+export const MAX_CATEGORY_LISTED = 60;
 const MAX_JUDGES = 2;
+
+export const hireable = (a: AgentSummary) => a.available_now && a.listing_status === 'live' && !!a.payable_with?.includes('USDC');
 
 /**
  * Step 2: keep agents that can be hired now with USDC, and merge the per-term results by handle, taking each term's
  * next unseen agent in turn. The first term is the generic skill and often fills every slot alone, which cut the
- * specialists the other terms found (a Solidity audit offered only generic code reviewers). The category listing, when
- * the subtask has one, is the last list: it adds the generalists of that kind of work without crowding out a match.
+ * specialists the other terms found (a Solidity audit offered only generic code reviewers).
  */
 export function filterSearch(resultLists: AgentSummary[][]): AgentSummary[] {
-  const lists = resultLists.map((l) => l.filter((a) => a.available_now && a.listing_status === 'live' && a.payable_with?.includes('USDC')));
+  const lists = resultLists.map((l) => l.filter(hireable));
   const byHandle = new Map<string, AgentSummary>();
   const next = lists.map(() => 0);
   for (let added = true; added && byHandle.size < MAX_PER_SUBTASK;) {
@@ -103,7 +106,10 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
   // first hire must fit the cap, so the first-ranked agent that fits leads, and the agents ranked above it follow it
   // in rank order: the reserve may still pay one as a fallback (the prune pass drops those it never can). Fallback
   // cover comes in the second pass, so it never costs a later subtask its agent.
-  input.draft.forEach((d, draftIdx) => {
+  // Subtasks only an agent can do (not self_do_ok) are funded first, in priority order, then the rest: a part Rook can
+  // write itself must not take the money a later part needs and be dropped for.
+  const order = input.draft.map((d, draftIdx) => ({ d, draftIdx })).sort((x, y) => Number(x.d.self_do_ok) - Number(y.d.self_do_ok));
+  order.forEach(({ d, draftIdx }) => {
     const quoted = quotedCandidates(input.selected[draftIdx] ?? [], input.quotes, input.recipients, input.history ?? {}, d.title, notes);
     const left = allocatable - allocated;
     const fits = quoted.findIndex((c) => price(c) <= left);
@@ -122,6 +128,7 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
     const need = quoted.length ? quoted.map(price).reduce((a, b) => (b < a ? b : a)) : undefined;
     kept.push({ draftIdx, d, candidates: [], cap: 0n, self_do: true, self_do_reason, need });
   });
+  kept.sort((x, y) => x.draftIdx - y.draftIdx); // back in priority order
 
   // Second pass, same order: raise each cap toward fallbackCap, as far as the allocatable budget allows.
   for (const k of kept) {

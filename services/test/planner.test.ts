@@ -651,9 +651,11 @@ test('sweep over several subtasks: caps fit the allocatable budget, every listed
       assert.ok(BigInt(s.cap_atomic) >= BigInt(s.candidates[0].price_atomic), `case ${i} ${s.title}`);
       assert.ok(s.candidates.every((c) => BigInt(c.price_atomic) <= BigInt(s.cap_atomic) + reserve), `case ${i} ${s.title}`);
     }
-    // In priority order, what the hired subtasks before it took at their lead price is all that stood in the way.
+    // In funding order (the subtasks only an agent can do first, each group by priority), what the hired subtasks before
+    // it took at their lead price is all that stood in the way.
     let taken = 0n;
-    draft.forEach((d, k) => {
+    const order = draft.map((d, k) => ({ d, k })).sort((x, y) => Number(x.d.self_do_ok) - Number(y.d.self_do_ok));
+    order.forEach(({ d, k }) => {
       const s = p.subtasks.find((x) => x.title === d.title);
       const prices = selected[k].map((a) => BigInt((quotes[a.handle] as any).row.amount));
       if (s && !s.self_do) { taken += BigInt(s.candidates[0].price_atomic); return; }

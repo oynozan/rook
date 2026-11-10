@@ -156,8 +156,10 @@ export async function start(port = config.ports.marketGateway): Promise<Running>
       const category = query.get('category') ?? '';
       if (category && !/^[a-z_]{1,40}$/.test(category)) throw new HttpError(400, 'category must be lowercase letters and _');
       const filter = category ? `&category=${category}` : '';
+      // A bare category listing is read whole (up to SEARCH_PAGES): the planner picks from it by fit, not by its order.
+      const want = category && !query.get('q') ? Infinity : SEARCH_WANT;
       const agents: AgentSummary[] = [], seen = new Set<string>();
-      for (let page = 0; page < SEARCH_PAGES && agents.length < SEARCH_WANT; page++) {
+      for (let page = 0; page < SEARCH_PAGES && agents.length < want; page++) {
         let r: Reply | undefined, err = '';
         try { r = await out(`${endpoints().search}?q=${q}${filter}&limit=${SEARCH_PAGE}&offset=${page * SEARCH_PAGE}`); } catch (e: any) { err = `market search unreachable: ${e?.message ?? e}`; }
         if (r && r.status !== 200) err = `market search: HTTP ${r.status}`;
