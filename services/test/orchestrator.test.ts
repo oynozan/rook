@@ -18,10 +18,17 @@ const row = (amount: string) => ({ scheme: 'exact', ...X402, amount, maxTimeoutS
 const cand = (handle: string, price: string, sla = 5) => ({
   handle, name: handle, description: handle, sla_seconds: sla, success_rate: null, delivered_jobs: 0, price_atomic: price, quote: row(price),
 });
+// A two-file site, and its edit ("change the name to Ozan Andaç"): what follow-ups work on.
+const PAGE = (name: string) => [
+  '<!doctype html>', '<html>', '<head><link rel="stylesheet" href="styles.css"></head>',
+  `<body><h1>${name}</h1><p>Projects: Nimbus, Cartful, PulseBoard</p><pre>${'`'.repeat(3)}not a fence${'`'.repeat(3)}</pre></body>`, '</html>',
+].join('\n');
+const CSS = 'h1 {\n  color: teal;\n}';
+const fenced = (name: string, lang: string, text: string) => `${name}\n${'`'.repeat(4)}${lang}\n${text}\n${'`'.repeat(4)}`;
 // profile: what GetTask returns once the agent "finishes"
 // quoted: price at hire time if it differs; polls: GetTask calls before the final state; sendDelay: ms /send holds;
 // unknown: /send reports outcome_unknown; noCancel: CancelTask refused; down: that many paid sends get -32603 first.
-type Profile = { price: string; state: string; text?: string; quoted?: string; polls?: number; sendDelay?: number; unknown?: boolean; noCancel?: boolean; down?: number };
+type Profile = { price: string; state: string; text?: string; artifacts?: any[]; quoted?: string; polls?: number; sendDelay?: number; unknown?: boolean; noCancel?: boolean; down?: number };
 const PROFILES: Record<string, Profile> = {
   'holders-bad': { price: '150000', state: 'COMPLETED', text: 'Top 10 holders share: 291.2%' },
   'holders-good': { price: '300000', state: 'COMPLETED', text: 'Total supply: 1,250,000,000 NEAR' },
@@ -36,18 +43,28 @@ const PROFILES: Record<string, Profile> = {
   'down-once': { price: '100000', state: 'COMPLETED', text: 'Total supply: 1,250,000,000 NEAR', down: 1 },
   'down-always': { price: '100000', state: 'COMPLETED', text: 'never delivered', down: 99 },
   'site-good': { price: '100000', state: 'COMPLETED', text: 'Here is the site.\n\nindex.html\n```html\n<!doctype html>\n<html><body>Ozan</body></html>\n```' },
+  'site-two': { price: '100000', state: 'COMPLETED', text: `Here is the site.\n\n${fenced('index.html', 'html', PAGE('Alex Doe'))}\n\n${fenced('styles.css', 'css', CSS)}` },
+  'edit-good': { price: '100000', state: 'COMPLETED', text: `Done.\n\n${fenced('index.html', 'html', PAGE('Ozan Andaç'))}` },
+  // A picture, a palette as data, a text file and a photo sent as bytes: none of them a text part.
+  media: { price: '100000', state: 'COMPLETED', artifacts: [
+    { name: 'logo.png', parts: [{ url: 'https://cdn.example/a/9f2' }] },
+    { name: 'palette', parts: [{ raw: JSON.stringify({ primary: '#f97316', accent: '#0f172a' }) }] },
+    { parts: [{ raw: Buffer.from('Brand notes: warm, round, friendly.\nUse the orange on light paper.').toString('base64') }] },
+    { name: 'photo.jpg', parts: [{ raw: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0]).toString('base64') }] },
+  ] },
 };
 const downs = new Map<string, number>();
 let planGate: Promise<void> = Promise.resolve();
 let planDown = false; // the planner's model is out of reach, as when NEAR AI answered 500
 
 let plan: any;
-const sent: { handle: string; payment: string }[] = [];
+const sent: { handle: string; payment: string; text: string }[] = [];
 const cancelled: string[] = [];
 const a2a = new Map<string, { handle: string; polls: number }>();
 const evalRequests: any[] = [];
 const planRequests: any[] = [];
 const aggRequests: any[] = [];
+const selfDoRequests: any[] = [];
 const servers: Running[] = [];
 let orch: Running;
 
@@ -60,7 +77,12 @@ before(async () => {
       if (body.prompt === 'go ahead') throw new HttpError(422, 'That reads like a go-ahead.');
       return plan;
     },
-    'POST /self-do': () => ({ text: 'Rook wrote this part.', llm_calls: [] }),
+    'POST /self-do': ({ body }) => {
+      selfDoRequests.push(body);
+      // An edit returns the file it changes whole, as Rook's writer does (planner 5.3).
+      const f = body.files?.[0];
+      return { text: f ? `Changed.\n\n${fenced(f.path, 'css', f.text.replace('teal', 'orange'))}` : 'Rook wrote this part.', llm_calls: [] };
+    },
     'POST /aggregate': ({ body }) => {
       aggRequests.push(body);
       if (body.prompt.includes('AGG-DOWN')) throw new HttpError(502, 'planner LLM failed: cost guard', { llm_calls: [{ cost_usd: 0.01, signature_verified: true }] });
@@ -89,7 +111,7 @@ before(async () => {
       const p = PROFILES[body.handle];
       const h = JSON.parse(Buffer.from(body.payment, 'base64').toString());
       if (h.accepted.amount !== p.price) return { ok: false, error: { code: 402, message: 'bad payment' } };
-      sent.push({ handle: body.handle, payment: body.payment });
+      sent.push({ handle: body.handle, payment: body.payment, text: body.text });
       if (p.sendDelay) await new Promise((ok) => setTimeout(ok, p.sendDelay));
       if (p.unknown) return { ok: false, error: { code: 'outcome_unknown', message: 'after a 502 the agent answered HTTP 402' } };
       if ((downs.get(body.handle) ?? 0) < (p.down ?? 0)) {
@@ -106,7 +128,7 @@ before(async () => {
       const done = ++t.polls >= (p.polls ?? 2);
       return { ok: true, task: {
         id: query.get('id'), context_id: 'ctx', state: done ? p.state : 'WORKING',
-        artifacts: done && p.text ? [{ parts: [{ text: p.text }] }] : [],
+        artifacts: done ? p.artifacts ?? (p.text ? [{ parts: [{ text: p.text }] }] : []) : [],
       } };
     },
     'POST /cancel': ({ body }) => {
@@ -442,6 +464,7 @@ test('an agent with no reachable backend (-32603) is asked again once, after the
 // ---- conversations ----
 
 const holdersPlan = () => ({ subtasks: [sub('s1', 'Holders', '300000', [cand('holders-good', '300000')])], dropped: [], budget: budget('300000'), notes: [], llm_calls: [] });
+const HOLDERS_PARTS = [{ title: 'Holders', brief: 'Holders\nPlease report.' }]; // holdersPlan's parts, as a revision sends them
 const ended = (id: string) => until(async () => { const x = await snap(id); return ['closed', 'failed', 'killed'].includes(x.task.status) ? x : false; });
 
 test('a follow-up on a finished task gives the planner the earlier messages and the newest report, and the aggregator the earlier messages', async () => {
@@ -476,7 +499,7 @@ test('a follow-up on a finished task gives the planner the earlier messages and 
   await call(`${orch.url}/tasks/${third.id}/cancel`, {});
 });
 
-test('a follow-up on a delivered site gives the planner the files after the report, which only names them', async () => {
+test('a follow-up on a delivered site gives the planner the files whole, apart from the report, which only names them', async () => {
   // The report has a marker where the page was: without the files, "make the header blue" had no page to change.
   const first = await runToEnd({ subtasks: [sub('s1', 'Build one-page portfolio website', '200000', [cand('site-good', '100000')])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] }, 'AGG-DOWN portfolio');
   assert.equal(first.task.status, 'closed', first.task.error);
@@ -485,8 +508,8 @@ test('a follow-up on a delivered site gives the planner the files after the repo
   const follow = await call(`${orch.url}/tasks`, { prompt: 'make the header blue', budget_usdc: '1', parent_id: first.task.id });
   assert.equal(follow.status, 'planned');
   assert.deepEqual(planRequests.at(-1).conversation, {
-    earlier: ['AGG-DOWN portfolio'], revising: false,
-    report: `${first.final_result.final_markdown.trim()}\n\nThe files attached to the report, as delivered:\n\nindex.html:\n\`\`\`\n<!doctype html>\n<html><body>Ozan</body></html>\n\`\`\``,
+    earlier: ['AGG-DOWN portfolio'], revising: false, report: first.final_result.final_markdown.trim(),
+    files: [{ path: 'index.html', text: '<!doctype html>\n<html><body>Ozan</body></html>' }],
   });
   await call(`${orch.url}/tasks/${follow.id}/cancel`, {});
 });
@@ -499,13 +522,14 @@ test('a revision replaces the plan it changes once its own plan is ready, and th
   // A bare go-ahead is not a task: it fails with the planner's sentence, and the plan above it stays planned.
   const reply = await call(`${orch.url}/tasks`, { prompt: 'go ahead', budget_usdc: '3', owner: 'alice.near', parent_id: first.id });
   assert.deepEqual([reply.status, reply.error], ['failed', 'That reads like a go-ahead.']);
-  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Due diligence on the NEAR token'], revising: true });
+  // A revision starts from the plan the user saw: its parts go along, so it changes only what the message asks.
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Due diligence on the NEAR token'], revising: true, plan: HOLDERS_PARTS });
   assert.equal((await snap(first.id)).task.status, 'planned');
 
   // The next message follows the failed reply, and still revises the plan above it.
   const revised = await call(`${orch.url}/tasks`, { prompt: 'Same task with a budget of 1.50 USDC.', budget_usdc: '1.5', owner: 'alice.near', parent_id: reply.id });
   assert.deepEqual([revised.status, revised.budget_atomic, revised.parent_id], ['planned', '1500000', reply.id]);
-  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Due diligence on the NEAR token', 'go ahead'], revising: true });
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Due diligence on the NEAR token', 'go ahead'], revising: true, plan: HOLDERS_PARTS });
   const old = await call(`${orch.url}/tasks/${first.id}?owner=alice.near`);
   assert.deepEqual([old.task.status, old.task.replaced_by], ['cancelled', revised.id]);
   assert.equal((await snap(reply.id)).task.status, 'failed'); // the reply is left as it was
@@ -662,25 +686,34 @@ test('the conversation sent to the planner keeps the first and the newest messag
   // Short ones go as they are; with no report, there is no report field.
   assert.deepEqual(conversationFor(chain.slice(-2), chain.at(-1)!), { earlier: ['m0', 'm1'], revising: true });
 
-  // With files: the newest report's files only, each fenced and named (a fence longer than any in the file).
+  // With files: every report's files, oldest to newest, a later version of a path replacing the earlier one in its
+  // place; whole, apart from the report, which keeps them out (on mainnet a 407-line page lost its footer and script).
   const file = (name: string, text: string) => ({ subtask_id: 's1', agent_handle: 'web-dev', name, mime: 'text/html', text });
-  chain[5].final_result = { ...report('older report'), files: [file('old.html', 'never sent')] };
-  chain[3].final_result = { ...report('Here is the site.\n[file index.html, 2 lines, attached below the report]'), files: [file('index.html', '<p>a</p>\n<pre>```x```</pre>')] };
-  assert.equal(conversationFor(chain, null).report,
-    'Here is the site.\n[file index.html, 2 lines, attached below the report]\n\nThe files attached to the report, as delivered:\n\nindex.html:\n````\n<p>a</p>\n<pre>```x```</pre>\n````');
-  // Too long: the report keeps its first 4000 characters, the files fill the rest, and a note says what is left out.
-  const line = (n: number) => `<p>line ${String(n).padStart(4, '0')}</p>`; // 17 characters
-  const page = Array.from({ length: 600 }, (_, n) => line(n + 1)).join('\n');
-  chain[3].final_result = { ...report('r'.repeat(9000)), files: [file('index.html', page), file('styles.css', 'body {}'), file('app.js', 'go();')] };
-  const big = conversationFor(chain, null).report!;
-  assert.ok(Conversation.safeParse({ earlier: ['m0'], revising: false, report: big }).success, String(big.length));
-  assert.match(big, /^r{3956}\n\n\[The rest of the report is left out here\.\]\n\nThe files attached to the report, as delivered:\n\nindex\.html:\n```\n<p>line 0001<\/p>\n/);
-  const shown = big.match(/<p>line (\d+)<\/p>\n```\n\n\[Cut for length: index\.html is cut at line (\d+) of 600; 2 more files are left out\.\]$/);
-  assert.ok(shown && Number(shown[1]) === Number(shown[2]) && Number(shown[1]) > 400, big.slice(-300)); // cut at a line end, and said so
-  // A report that leaves no room cuts the file too, never past the limit.
-  chain[3].final_result = { ...report('r'.repeat(3000)), files: [file('a.html', 'x'.repeat(20_000))] };
-  const one = conversationFor(chain, null).report!;
-  assert.ok(one.length <= CONVERSATION_REPORT_CHARS && one.endsWith('\n```\n\n[Cut for length: a.html is cut at line 1 of 1.]'), one.slice(-200));
+  const line = (n: number) => `<p>line ${String(n).padStart(4, '0')}</p>`;
+  const page = Array.from({ length: 600 }, (_, n) => line(n + 1)).join('\n'); // 12,000 characters and more
+  chain[5].final_result = { ...report('older report'), files: [file('index.html', 'old page'), file('styles.css', 'body {}')] };
+  chain[3].final_result = { ...report('Here is the site.\n[file index.html, 600 lines, attached below the report]'), files: [file('index.html', page), file('app.js', 'go();')] };
+  const withFiles = conversationFor(chain, null);
+  assert.equal(withFiles.report, 'Here is the site.\n[file index.html, 600 lines, attached below the report]');
+  assert.deepEqual(withFiles.files, [{ path: 'index.html', text: page }, { path: 'styles.css', text: 'body {}' }, { path: 'app.js', text: 'go();' }]);
+  assert.ok(Conversation.safeParse(withFiles).success);
+
+  // Past the limits the most recently delivered are kept, the others named at the end of the report.
+  const { workspaceOf } = await import('../src/orchestrator/store.ts');
+  const { CONVERSATION_FILES_CHARS } = await import('../src/shared/types.ts');
+  chain[5].final_result = { ...report('older report'), files: [file('big.html', 'b'.repeat(CONVERSATION_FILES_CHARS - 10)), file('small.css', 'p {}')] };
+  chain[3].final_result = { ...report('r'.repeat(20_000)), files: [file('index.html', page)] };
+  const ws = workspaceOf(chain);
+  assert.deepEqual([ws.files.map((f) => f.name), ws.left], [['small.css', 'index.html'], ['big.html']]); // one too big never shuts out the rest
+  const cut = conversationFor(chain, null);
+  assert.ok(Conversation.safeParse(cut).success);
+  assert.equal(cut.report!.length, CONVERSATION_REPORT_CHARS);
+  assert.match(cut.report!, /^r+\n\n\[The rest of the report is left out here\.\]\n\n\[Left out of the files sent with this message, for size: big\.html\.\]$/);
+  const many = Array.from({ length: 205 }, (_, i) => file(`f${i}.css`, 'a {}'));
+  chain[3].final_result = { ...report('many'), files: many };
+  const w2 = workspaceOf(chain);
+  assert.deepEqual([w2.files.length, w2.files.at(-1)!.name, w2.left.slice(0, 3)], [200, 'f199.css', ['big.html', 'small.css', 'f200.css']]);
+  assert.match(conversationFor(chain, null).report!, /for size: big\.html, small\.css, f200\.css, f201\.css, f202\.css and 2 more\.\]$/);
 });
 
 // ---- sending again, editing, deleting ----
@@ -705,7 +738,7 @@ test('a message that failed before it got a plan, sent again, takes its place: i
   const again = await send({ prompt: 'Make it shorter', supersedes: failed.id });
   assert.deepEqual([again.status, again.parent_id, again.supersedes, again.edited], ['planned', first.id, failed.id, false]);
   // It revises the plan above, as the failed one was going to; the failed one stays as it was, superseded.
-  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Holders of NEAR'], revising: true });
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Holders of NEAR'], revising: true, plan: HOLDERS_PARTS });
   assert.deepEqual([(await snap(first.id)).task.status, (await snap(first.id)).task.replaced_by], ['cancelled', again.id]);
   const was = (await snap(failed.id)).task;
   assert.deepEqual([was.status, was.superseded_by, was.replaced_by], ['failed', again.id, null]);
@@ -778,7 +811,7 @@ test('a revision whose plan replaced the plan above, edited, still revises that 
   // The plan above never ran: the edit is planned as a revision of it, as the message it replaces was.
   const edit = await send({ prompt: 'Only the top 20', supersedes: revision.id });
   assert.deepEqual([edit.status, edit.parent_id, edit.edited], ['planned', first.id, true]);
-  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Holders of NEAR'], revising: true });
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Holders of NEAR'], revising: true, plan: HOLDERS_PARTS });
   assert.deepEqual([(await snap(revision.id)).task.status, (await snap(revision.id)).task.superseded_by], ['cancelled', edit.id]);
   assert.deepEqual(await replacedBy(first.id), ['cancelled', edit.id]);
 
@@ -787,11 +820,11 @@ test('a revision whose plan replaced the plan above, edited, still revises that 
   const failed = await send({ prompt: 'Only the top 5', supersedes: edit.id });
   planDown = false;
   assert.equal(failed.status, 'failed');
-  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Holders of NEAR'], revising: true });
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Holders of NEAR'], revising: true, plan: HOLDERS_PARTS });
   assert.deepEqual(await replacedBy(first.id), ['cancelled', edit.id]);
   const again = await send({ prompt: 'Only the top 5', supersedes: failed.id });
   assert.deepEqual([again.status, again.edited], ['planned', false]);
-  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Holders of NEAR'], revising: true });
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Holders of NEAR'], revising: true, plan: HOLDERS_PARTS });
   assert.deepEqual(await replacedBy(first.id), ['cancelled', again.id]);
 
   // Below a failed reply the plan above it is still what the revision changed, so an edit of the revision revises it too.
@@ -801,7 +834,7 @@ test('a revision whose plan replaced the plan above, edited, still revises that 
   assert.deepEqual(await replacedBy(base.id), ['cancelled', shorter.id]);
   const shorter2 = await send({ prompt: 'Make it much shorter', supersedes: shorter.id });
   assert.deepEqual([shorter2.status, shorter2.parent_id], ['planned', nod.id]);
-  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Due diligence on Aurora', 'go ahead'], revising: true });
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['Due diligence on Aurora', 'go ahead'], revising: true, plan: HOLDERS_PARTS });
   assert.deepEqual(await replacedBy(base.id), ['cancelled', shorter2.id]);
 
   // A follow-up on work that ended is no revision, edited or not.
@@ -861,4 +894,161 @@ test('deleting a conversation leaves all its tasks out for their owner, refused 
   assert.deepEqual([kept.ledger, kept.receipts], [stopped.ledger, stopped.receipts]);
   assert.ok((await call(`${orch.url}/tasks`)).tasks.find((x: any) => x.id === root.id).deleted_at);
   await call(`${orch.url}/tasks/${other.id}/cancel`, {});
+});
+
+// ---- questions, the chat's files, edits, deliveries that are not text ----
+
+// A stream that never ends (a task that never ends) fails the test rather than hang it.
+const eventsOf = async (id: string) => (await fetch(`${orch.url}/tasks/${id}/events`, { signal: AbortSignal.timeout(5000) }).then((r) => r.text()))
+  .split('\n').filter((l) => l.startsWith('data: ')).map((l) => JSON.parse(l.slice(6)));
+const QUESTIONS = ['What is your name?', 'Which projects should the site show, with a link for each?'];
+const askingPlan = () => ({ subtasks: [], dropped: [], budget: budget('0'), notes: [], questions: QUESTIONS, llm_calls: [] });
+
+test('a plan that asks for facts only the user knows leaves the task asking: no failure, nothing to fund, and the next message answers it', async () => {
+  const { send, approve, del } = as('ann.near');
+  plan = askingPlan();
+  const asked = await send({ prompt: 'make me a portfolio website' });
+  assert.deepEqual([asked.status, asked.error, asked.plan.questions], ['asking', null, QUESTIONS]);
+  await assert.rejects(approve(asked.id), refusedWith(409, 'task is asking, approve needs planned'));
+  // It has ended, as a reply that is not a task has: its stream ends there, with no error event.
+  const evs = await eventsOf(asked.id);
+  assert.deepEqual(evs.filter((e) => e.type === 'task_status').map((e) => e.data.to), ['draft', 'asking']);
+  assert.deepEqual([evs.find((e) => e.type === 'plan').data.questions, evs.some((e) => e.type === 'error')], [QUESTIONS, false]);
+  assert.deepEqual((await call(`${orch.url}/tasks?owner=ann.near`)).tasks.map((x: any) => [x.status, x.has_plan]), [['asking', false]]);
+
+  // A message that is not the answer fails as before; the next one still answers the questions above it.
+  const nod = await send({ prompt: 'go ahead', parent_id: asked.id });
+  assert.equal(nod.status, 'failed');
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['make me a portfolio website'], revising: false, questions: QUESTIONS });
+  plan = holdersPlan();
+  const answer = await send({ prompt: 'Ozan Andaç. Elowen and snoop.id.', parent_id: nod.id });
+  assert.equal(answer.status, 'planned');
+  assert.deepEqual(planRequests.at(-1).conversation, { earlier: ['make me a portfolio website', 'go ahead'], revising: false, questions: QUESTIONS });
+
+  // Asked while revising a plan: that plan stays as it was, and the answer revises it, from the parts the user saw.
+  plan = askingPlan();
+  const more = await send({ prompt: 'make it about my company', parent_id: answer.id });
+  assert.deepEqual([more.status, (await snap(answer.id)).task.status], ['asking', 'planned']);
+  plan = holdersPlan();
+  const named = await send({ prompt: 'Rook Roasters, Moda', parent_id: more.id });
+  assert.deepEqual(planRequests.at(-1).conversation, {
+    earlier: ['make me a portfolio website', 'go ahead', 'Ozan Andaç. Elowen and snoop.id.', 'make it about my company'], revising: true, questions: QUESTIONS, plan: HOLDERS_PARTS,
+  });
+  assert.deepEqual([(await snap(answer.id)).task.status, (await snap(answer.id)).task.replaced_by], ['cancelled', named.id]);
+
+  // Nothing moved for it, so the message that got questions can be edited instead of answered.
+  plan = askingPlan();
+  const blog = await send({ prompt: 'and a blog', parent_id: named.id });
+  plan = holdersPlan();
+  const edited = await send({ prompt: 'and a blog with my 3 posts', supersedes: blog.id });
+  assert.deepEqual([edited.status, edited.supersedes, (await snap(blog.id)).task.status], ['planned', blog.id, 'asking']);
+  assert.equal(planRequests.at(-1).conversation.questions, undefined); // the edit answers nothing
+
+  // A planner that asks and plans at once: the parts are never kept, so nothing is funded on facts it lacks.
+  plan = { ...holdersPlan(), questions: QUESTIONS };
+  const both = await send({ prompt: 'make me a portfolio website' });
+  assert.deepEqual([both.status, both.plan.subtasks, (await snap(both.id)).subtasks], ['asking', [], []]);
+  // A chat with a question in it is deleted like any other.
+  assert.deepEqual((await del(both.id)).deleted, [both.id]);
+  await call(`${orch.url}/tasks/${edited.id}/cancel`, {});
+});
+
+test("an edit sends the agent the chat's files it changes, whole; the report holds the whole latest project and says what changed", async () => {
+  const { send, approve } = as('oz.near');
+  plan = { subtasks: [sub('s1', 'Build the site', '200000', [cand('site-two', '100000')])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] };
+  const first = await send({ prompt: 'make me a portfolio website' });
+  await approve(first.id);
+  const built = await ended(first.id);
+  assert.equal(built.task.status, 'closed', built.task.error);
+  assert.deepEqual([built.final_result.files.map((f: any) => f.name), built.final_result.changed], [['index.html', 'styles.css'], ['index.html', 'styles.css']]);
+
+  // "Change the name": the agent gets the page as it is (a fence longer than the backticks inside), never a retelling.
+  plan = { subtasks: [{ ...sub('s1', 'Change the name', '200000', [cand('edit-good', '100000')]), inputs: ['index.html'] }], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] };
+  const rename = await send({ prompt: 'change the name to Ozan Andaç', parent_id: first.id });
+  await approve(rename.id);
+  const renamed = await ended(rename.id);
+  assert.equal(renamed.task.status, 'closed', renamed.task.error);
+  assert.equal(sent.at(-1)!.text, 'Change the name\nPlease report.\n\n## Current files\n\nThe files to change, exactly as they are now, each under its path. '
+    + `Change only what is asked above, and send back every file you change whole, under the same path.\n\n${fenced('index.html', 'html', PAGE('Alex Doe'))}`);
+  // The page it changed replaces the old one; the stylesheet it never touched is still there, carried over.
+  assert.deepEqual(renamed.final_result.files.map((f: any) => [f.name, f.subtask_id, f.agent_handle, f.text]),
+    [['index.html', 's1', 'edit-good', PAGE('Ozan Andaç')], ['styles.css', '', 'site-two', CSS]]);
+  assert.deepEqual(renamed.final_result.changed, ['index.html']);
+
+  // A small edit Rook makes itself starts at once, with no button and no money, and Rook's writer gets the file too.
+  plan = { subtasks: [{ ...sub('s1', 'Make the accent orange', '0', []), self_do: true, self_do_reason: 'rook_edit', inputs: ['styles.css'] }], dropped: [], budget: budget('0'), notes: [], llm_calls: [] };
+  const orange = await send({ prompt: 'make the accent orange', parent_id: rename.id });
+  const recolored = await ended(orange.id); // never approved by anyone
+  assert.equal(recolored.task.status, 'closed', recolored.task.error);
+  assert.deepEqual(selfDoRequests.at(-1).files, [{ path: 'styles.css', text: CSS }]);
+  assert.deepEqual([recolored.ledger.budget_atomic, recolored.ledger.spent_atomic], ['0', '0']);
+  assert.deepEqual(recolored.final_result.files.map((f: any) => [f.name, f.subtask_id, f.text]),
+    [['index.html', '', PAGE('Ozan Andaç')], ['styles.css', 's1', CSS.replace('teal', 'orange')]]);
+  assert.deepEqual(recolored.final_result.changed, ['styles.css']);
+  const evs = await eventsOf(orange.id);
+  assert.deepEqual(evs.filter((e) => e.type === 'task_status').map((e) => e.data.to), ['draft', 'planned', 'approved', 'funded', 'running', 'aggregating', 'closing', 'closed']);
+
+  // A plan of Rook's own writing that is not an edit still waits for its button.
+  plan = { subtasks: [{ ...sub('s1', 'Summary', '0', []), self_do: true, self_do_reason: 'no_agent' }], dropped: [], budget: budget('0'), notes: [], llm_calls: [] };
+  const waits = await send({ prompt: 'and a summary', parent_id: orange.id });
+  assert.equal((await snap(waits.id)).task.status, 'planned');
+  await call(`${orch.url}/tasks/${waits.id}/cancel`, {});
+});
+
+test('a part whose files are too large to send whole is never sent: the plan and the run say why, and its cap goes back', async () => {
+  PROFILES['site-big'] = { price: '100000', state: 'COMPLETED', text: `index.html\n${'`'.repeat(3)}html\n<!doctype html>\n${'<p>x</p>\n'.repeat(35_000)}</html>\n${'`'.repeat(3)}` };
+  const site = await runToEnd({ subtasks: [sub('s1', 'Build the site', '200000', [cand('site-big', '100000')])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] });
+  assert.equal(site.final_result.files[0].name, 'index.html');
+  plan = { subtasks: [{ ...sub('s1', 'Change the name', '200000', [cand('edit-good', '100000')]), inputs: ['index.html'] }], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] };
+  const sends = sent.length;
+  const edit = await call(`${orch.url}/tasks`, { prompt: 'change the name', budget_usdc: '1', parent_id: site.task.id });
+  const why = 'The files "Change the name" changes come to 308 KB, more than the 300 KB Rook can send with one part, so that part isn\'t sent.';
+  assert.deepEqual(edit.plan.notes, [why]);
+  await call(`${orch.url}/tasks/${edit.id}/approve`, {});
+  const s = await ended(edit.id);
+  assert.equal(s.task.status, 'closed', s.task.error);
+  assert.equal(sent.length, sends); // no agent was paid for a request it could not see whole
+  assert.deepEqual([s.subtasks[0].final_outcome, s.ledger.spent_atomic, s.final_result.changed], ['abandoned', '0', []]);
+  assert.deepEqual((await eventsOf(edit.id)).filter((e) => e.type === 'error').map((e) => [e.subtask_id, e.data.kind, e.data.message]), [['s1', 'inputs_too_large', why]]);
+});
+
+test('an image link, data, a text file and a photo sent as bytes are all kept: the evaluator, the report and the files see them', async () => {
+  const s = await runToEnd({ subtasks: [sub('s1', 'Logo', '200000', [cand('media', '100000')])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] });
+  assert.equal(s.task.status, 'closed', s.task.error);
+  const block = (name: string, lang: string, text: string) => `${name}\n\`\`\`${lang}\n${text}\n\`\`\``;
+  const text = [
+    'File: logo.png https://cdn.example/a/9f2',
+    block('palette-1.json', 'json', '{\n  "primary": "#f97316",\n  "accent": "#0f172a"\n}'),
+    block('delivery-2.txt', 'txt', 'Brand notes: warm, round, friendly.\nUse the orange on light paper.'),
+    "File: photo.jpg (binary data, 20 bytes), sent inside the reply. Rook can't attach a file of this kind, so it isn't under Files.",
+  ].join('\n\n');
+  assert.equal(s.subtasks[0].hires[0].deliverable_text, text);
+  const ev = evalRequests.filter((r) => r.task_id === s.task.id).at(-1);
+  assert.deepEqual([ev.deliverable.text, ev.deliverable.parts.length], [text, 4]); // every part, as before
+  assert.equal(aggRequests.at(-1).subtasks[0].deliverable_text, text);
+  assert.deepEqual(s.final_result.files.map((f: any) => f.name), ['palette-1.json']);
+  assert.match(s.final_result.final_markdown, /File: logo\.png https:\/\/cdn\.example\/a\/9f2/);
+});
+
+test('deliveryOf reads data urls and a file part with its bytes inline, and never throws on what an agent sends', async () => {
+  const { deliveryOf } = await import('../src/orchestrator/runner.ts');
+  const b64 = (s: string) => Buffer.from(s).toString('base64');
+  const d = deliveryOf([
+    { parts: [{ text: 'Here you go.' }, {}] },
+    { name: 'notes.md', parts: [{ url: `data:text/markdown;base64,${b64('# Notes\nshort')}` }] },
+    { parts: [{ url: 'data:text/plain,100%25%20done' }, { url: 'data:text/plain,%E0%A4%A' }] },
+    { parts: [{ url: `data:image/png;base64,${Buffer.from([0x89, 0x50, 0x4e, 0x47, 0, 0, 0, 0x0d]).toString('base64')}` }] },
+    { parts: [{ raw: JSON.stringify({ file: { bytes: b64('a,b\n1,2'), name: 'table.csv', mimeType: 'text/csv' } }) }] },
+    { parts: [{ raw: 'plain words, not base64' }] },
+  ] as any);
+  assert.equal(d.parts.length, 8);
+  assert.deepEqual(d.deliverable_text.split('\n\n'), [
+    'Here you go.',
+    'notes.md\n```md\n# Notes\nshort\n```',
+    'delivery-1.txt\n```txt\n100% done\n```',
+    'delivery-2.txt\n```txt\n%E0%A4%A\n```',
+    "File: a file (image/png, 8 bytes), sent inside the reply. Rook can't attach a file of this kind, so it isn't under Files.",
+    'table.csv\n```csv\na,b\n1,2\n```',
+    'delivery-3.txt\n```txt\nplain words, not base64\n```',
+  ]);
 });
