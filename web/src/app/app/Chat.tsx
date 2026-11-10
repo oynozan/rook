@@ -1244,7 +1244,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
   const [againError, setAgainError] = useState<string | null>(null);
   const editButton = useRef<HTMLButtonElement>(null); // the bubble's Edit
   const blockEditButton = useRef<HTMLButtonElement>(null); // the failure's own Edit message, shown instead of the bubble's
-  const facts =snap ? { status: snap.task.status, subtasks: snap.plan ? snap.plan.subtasks.length : null, ledger: !!snap.ledger } : null;
+  const facts = snap ?{ status: snap.task.status, subtasks: snap.plan ? snap.plan.subtasks.length : null, ledger: !!snap.ledger } : null;
   const editable = !!onRedo && !!facts && !!wallet.account && canEdit(facts);
   const resendable = !!onRedo && !!facts && !!wallet.account && canSendAgain(facts);
   useEffect(() => { if (!editable) setEditing(false); }, [editable]); // a newer message came, or the plan was approved
