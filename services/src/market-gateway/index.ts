@@ -7,7 +7,7 @@ import { AcceptsRow, type A2AState, type A2ATask, type AgentSummary, type Gatewa
 
 const HANDLE = /^[a-z0-9-]+$/;
 // Search paging: the market's largest page, how many pages one search may read, and how many available agents are
-// enough (the planner keeps 10 per subtask, merged over up to 3 terms).
+// enough (the planner keeps 12 per subtask, merged over up to 3 terms and a category).
 const SEARCH_PAGE = 50, SEARCH_PAGES = 3, SEARCH_WANT = 20;
 const sleep = (ms: number) => new Promise((ok) => setTimeout(ok, ms));
 
@@ -152,10 +152,16 @@ export async function start(port = config.ports.marketGateway): Promise<Running>
     // read pages until SEARCH_WANT agents are available now, the results end, or SEARCH_PAGES pages were read.
     'GET /search': async ({ query }) => {
       const q = encodeURIComponent(query.get('q') ?? '');
+      // A category alone lists that category's agents (the planner's broad search for a kind of work).
+      const category = query.get('category') ?? '';
+      if (category && !/^[a-z_]{1,40}$/.test(category)) throw new HttpError(400, 'category must be lowercase letters and _');
+      const filter = category ? `&category=${category}` : '';
+      // A bare category listing is read whole (up to SEARCH_PAGES): the planner picks from it by fit, not by its order.
+      const want = category && !query.get('q') ? Infinity : SEARCH_WANT;
       const agents: AgentSummary[] = [], seen = new Set<string>();
-      for (let page = 0; page < SEARCH_PAGES && agents.length < SEARCH_WANT; page++) {
+      for (let page = 0; page < SEARCH_PAGES && agents.length < want; page++) {
         let r: Reply | undefined, err = '';
-        try { r = await out(`${endpoints().search}?q=${q}&limit=${SEARCH_PAGE}&offset=${page * SEARCH_PAGE}`); } catch (e: any) { err = `market search unreachable: ${e?.message ?? e}`; }
+        try { r = await out(`${endpoints().search}?q=${q}${filter}&limit=${SEARCH_PAGE}&offset=${page * SEARCH_PAGE}`); } catch (e: any) { err = `market search unreachable: ${e?.message ?? e}`; }
         if (r && r.status !== 200) err = `market search: HTTP ${r.status}`;
         if (err || !r) {
           if (page > 0) break; // a later page failing still leaves the agents already found
