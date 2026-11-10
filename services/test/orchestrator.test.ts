@@ -356,7 +356,9 @@ test("hires in the plan's candidate order, not by price; the next /plan carries 
   const { PlanRequest } = await import('../src/shared/types.ts');
   assert.ok(PlanRequest.safeParse(body).success);
   assert.ok(body.history['holders-good'].pass >= 1);
-  assert.ok(Object.values(body.history).every((h: any) => h.pass + h.fail > 0)); // judged receipts only
+  // Judged receipts, and hires that never reached work: 'late' timed out in an earlier test and has delivered nothing since.
+  assert.ok(Object.values(body.history).every((h: any) => h.pass + h.fail + (h.stalled ?? 0) > 0));
+  assert.deepEqual(body.history.late, { pass: 0, fail: 0, stalled: 1 });
   await until(async () => (await snap(next.id)).task.status === 'failed'); // its plan is empty
 });
 

@@ -84,8 +84,11 @@ export type Plan = {
   notes: string[];
   llm_calls: LlmCall[];
 };
-/** Rook's own evaluator verdicts on its earlier hires of one agent (from its receipts). */
-export const AgentHistory = z.object({ pass: z.number().int().min(0), fail: z.number().int().min(0) });
+/**
+ * Rook's own evaluator verdicts on its earlier hires of one agent (from its receipts). `stalled`: its recent hires that
+ * never reached work (the paid send failed, or it timed out) since it last delivered; such an agent ranks after the others.
+ */
+export const AgentHistory = z.object({ pass: z.number().int().min(0), fail: z.number().int().min(0), stalled: z.number().int().min(0).optional() });
 export type AgentHistory = z.infer<typeof AgentHistory>;
 export const MAX_HISTORY_HANDLES = 500;
 /** A follow-up's context: at most this many earlier messages (the first one and the latest), and this much of a report. */

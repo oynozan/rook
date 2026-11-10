@@ -48,7 +48,8 @@ export function conversationFor(chain: Task[], revises: Task | null): Conversati
 /**
  * Asks the planner for a plan, relaying its progress lines as `planning` events. A planner that answers with plain
  * JSON (an older one, or a test double) still works: there is just no progress to relay. `history`: Rook's own
- * verdicts per agent, which the planner ranks candidates with. `min`: the contract's smallest budget, which a total
+ * verdicts per agent and its recent hires that never reached work (store.ts verdictHistory), which the planner ranks
+ * candidates with. `min`: the contract's smallest budget, which a total
  * the message names must meet too.
  */
 async function planWithProgress(t: Task, history: Record<string, AgentHistory>, min: bigint, conversation?: Conversation): Promise<Plan> {

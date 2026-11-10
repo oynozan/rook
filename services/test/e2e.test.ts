@@ -44,6 +44,36 @@ async function events(id: string): Promise<any[]> {
   return text.split('\n').filter((l) => l.startsWith('data: ')).map((l) => JSON.parse(l.slice(6)));
 }
 
+// Before acceptance A: there sim-price-slow times out, so the next plan ranks it after sim-price (5.2 step 4) and
+// it would no longer be the hire in flight that this kill catches.
+test('kill during a run: killed, authorizations released, no hire after the kill', { timeout: 30_000 }, async () => {
+  const task = await call(`${orch}/tasks`, { prompt: 'Due diligence on the NEAR token', budget_usdc: '3' });
+  await call(`${orch}/tasks/${task.id}/approve`, {});
+  // sim-price-slow holds an authorization for its whole SLA, so a kill now has something to release.
+  await waitFor(task.id, (s) => s.subtasks.find((x: any) => x.id === 's4').hires.some((h: any) => h.agent_handle === 'sim-price-slow' && h.a2a_task_id), 10_000);
+  const killed = await call(`${orch}/tasks/${task.id}/kill`, {});
+  assert.equal(killed.status, 'killed');
+
+  // The unwind closes the books after the kill, so the stopped run shows its refund.
+  const snap = await waitFor(task.id, (s) => s.ledger?.closed === true, 10_000);
+  assert.equal(snap.task.status, 'killed');
+  assert.ok(snap.ledger.killed);
+  assert.ok(snap.ledger.subtasks.every((s: any) => s.authorized_atomic === null));
+  assert.ok(snap.ledger.invariant_holds);
+  const open = snap.subtasks.flatMap((s: any) => s.hires).filter((h: any) => ['SENDING', 'SUBMITTED', 'WORKING'].includes(h.state));
+  assert.deepEqual(open, []);
+  const evs = await events(task.id);
+  const k = evs.findIndex((e) => e.type === 'ledger' && e.data.op === 'kill');
+  assert.ok(k > 0);
+  assert.ok(evs.slice(k).every((e) => e.type !== 'hire_sent'));
+  assert.ok(evs.slice(k).some((e) => e.type === 'ledger' && e.data.op === 'release'));
+  const killedAt = evs.findIndex((e) => e.type === 'task_status' && e.data.to === 'killed');
+  assert.ok(killedAt > k && evs.slice(killedAt + 1).every((e) => e.type === 'ledger' || e.type === 'subtask_status'));
+  assert.equal(evs.at(-1).data.op, 'closeTask');
+  assert.equal(BigInt(snap.ledger.refunded_atomic) + BigInt(snap.ledger.spent_atomic), BigInt(snap.ledger.budget_atomic));
+  await assert.rejects(call(`${orch}/tasks/${task.id}/approve`, {}), /killed/);
+});
+
 test('acceptance A: plan, faults caught, re-hires from the reserve, closed with 1.20 spent', { timeout: 90_000 }, async () => {
   const task = await call(`${orch}/tasks`, { prompt: 'Due diligence on the NEAR token', budget_usdc: '3' });
   assert.equal(task.status, 'planned', task.error);
@@ -92,32 +122,10 @@ test('acceptance A: plan, faults caught, re-hires from the reserve, closed with 
   ]);
   for (const h of ['sim-holders', 'sim-wallets', 'sim-tokencheck', 'sim-price']) assert.ok(snap.final_result.final_markdown.includes(h));
   assert.ok(!snap.final_result.final_markdown.includes('evil-collector'));
-});
 
-test('kill during a run: killed, authorizations released, no hire after the kill', { timeout: 30_000 }, async () => {
-  const task = await call(`${orch}/tasks`, { prompt: 'Due diligence on the NEAR token', budget_usdc: '3' });
-  await call(`${orch}/tasks/${task.id}/approve`, {});
-  // sim-price-slow holds an authorization for its whole SLA, so a kill now has something to release.
-  await waitFor(task.id, (s) => s.subtasks.find((x: any) => x.id === 's4').hires.some((h: any) => h.agent_handle === 'sim-price-slow' && h.a2a_task_id), 10_000);
-  const killed = await call(`${orch}/tasks/${task.id}/kill`, {});
-  assert.equal(killed.status, 'killed');
-
-  // The unwind closes the books after the kill, so the stopped run shows its refund.
-  const snap = await waitFor(task.id, (s) => s.ledger?.closed === true, 10_000);
-  assert.equal(snap.task.status, 'killed');
-  assert.ok(snap.ledger.killed);
-  assert.ok(snap.ledger.subtasks.every((s: any) => s.authorized_atomic === null));
-  assert.ok(snap.ledger.invariant_holds);
-  const open = snap.subtasks.flatMap((s: any) => s.hires).filter((h: any) => ['SENDING', 'SUBMITTED', 'WORKING'].includes(h.state));
-  assert.deepEqual(open, []);
-  const evs = await events(task.id);
-  const k = evs.findIndex((e) => e.type === 'ledger' && e.data.op === 'kill');
-  assert.ok(k > 0);
-  assert.ok(evs.slice(k).every((e) => e.type !== 'hire_sent'));
-  assert.ok(evs.slice(k).some((e) => e.type === 'ledger' && e.data.op === 'release'));
-  const killedAt = evs.findIndex((e) => e.type === 'task_status' && e.data.to === 'killed');
-  assert.ok(killedAt > k && evs.slice(killedAt + 1).every((e) => e.type === 'ledger' || e.type === 'subtask_status'));
-  assert.equal(evs.at(-1).data.op, 'closeTask');
-  assert.equal(BigInt(snap.ledger.refunded_atomic) + BigInt(snap.ledger.spent_atomic), BigInt(snap.ledger.budget_atomic));
-  await assert.rejects(call(`${orch}/tasks/${task.id}/approve`, {}), /killed/);
+  // sim-price-slow timed out and has delivered nothing since: the next plan ranks it after sim-price, which delivered.
+  const next = await call(`${orch}/tasks`, { prompt: 'Due diligence on the NEAR token', budget_usdc: '3' });
+  const s4 = next.plan.subtasks[3].candidates;
+  assert.deepEqual(s4.map((c: any) => c.handle), ['sim-price', 'sim-price-slow']);
+  assert.match(s4[1].rank_reason, /; ranked after the others: 1 recent hire by Rook failed to send or timed out$/);
 });

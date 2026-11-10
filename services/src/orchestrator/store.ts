@@ -142,23 +142,39 @@ export function setSub(t: Task, s: Sub, to: SubtaskStatus) {
   saveTask(t);
 }
 
+/** Hire ends that never reached the agent's work: the paid send failed (-32603 and the like), or it never answered. */
+const STALLED = ['SEND_FAILED', 'TIMEOUT'];
+// ponytail: a stall counts for 7 days, and a delivery clears the agent's stalls before it; no decay or per-error weight.
+export const STALL_WINDOW_MS = 7 * 86_400_000;
+
 /**
  * Rook's own record per agent: the evaluator's verdicts on its paid hires, from every task's receipts (all stored tasks
- * are loaded at start, so with ROOK_DB this spans restarts). Unjudged receipts (verdict null) do not count. The planner
- * ranks with it (docs/agentic-system.md 5.2 step 4); it takes at most MAX_HISTORY_HANDLES, the most-judged first.
+ * are loaded at start, so with ROOK_DB this spans restarts). Unjudged receipts (verdict null) do not count. `stalled`:
+ * its hires of the last STALL_WINDOW_MS that ended SEND_FAILED or TIMEOUT after its last delivery (COMPLETED); none of
+ * those has a receipt, so before this an agent that failed every paid send (dev-tools-agent on mainnet, two runs)
+ * stayed first in every plan. The planner ranks with it (docs/agentic-system.md 5.2 step 4); it takes at most
+ * MAX_HISTORY_HANDLES, those with the most on record first.
  */
-export function verdictHistory(tasks: Iterable<Task>): Record<string, AgentHistory> {
+export function verdictHistory(tasks: Iterable<Task>, at = Date.now()): Record<string, AgentHistory> {
   const by = new Map<string, AgentHistory>();
+  const of = (handle: string) => by.get(handle) ?? by.set(handle, { pass: 0, fail: 0 }).get(handle)!;
+  const ends: { handle: string; at: number; delivered: boolean }[] = [];
   for (const t of tasks) {
-    for (const r of t.receipts) {
-      if (r.verdict !== 'pass' && r.verdict !== 'fail') continue;
-      const h = by.get(r.agent_handle) ?? { pass: 0, fail: 0 };
-      h[r.verdict]++;
-      by.set(r.agent_handle, h);
+    for (const r of t.receipts) if (r.verdict === 'pass' || r.verdict === 'fail') of(r.agent_handle)[r.verdict]++;
+    for (const s of t.subtasks) {
+      for (const h of s.hires) {
+        const end = Date.parse(h.ended_at ?? '');
+        if (!Number.isFinite(end)) continue;
+        if (h.state === 'COMPLETED') ends.push({ handle: h.agent_handle, at: end, delivered: true });
+        else if (STALLED.includes(h.state) && end > at - STALL_WINDOW_MS) ends.push({ handle: h.agent_handle, at: end, delivered: false });
+      }
     }
   }
-  const jobs = (h: AgentHistory) => h.pass + h.fail;
-  return Object.fromEntries([...by].sort((a, b) => jobs(b[1]) - jobs(a[1])).slice(0, MAX_HISTORY_HANDLES));
+  for (const e of ends.sort((a, b) => a.at - b.at)) {
+    if (!e.delivered) { const h = of(e.handle); h.stalled = (h.stalled ?? 0) + 1; } else if (by.get(e.handle)?.stalled) delete by.get(e.handle)!.stalled;
+  }
+  const record = (h: AgentHistory) => h.pass + h.fail + (h.stalled ?? 0);
+  return Object.fromEntries([...by].filter(([, h]) => record(h) > 0).sort((a, b) => record(b[1]) - record(a[1])).slice(0, MAX_HISTORY_HANDLES));
 }
 
 export function taskView(t: Task) {
