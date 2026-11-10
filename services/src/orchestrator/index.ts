@@ -560,6 +560,8 @@ function events(ctx: Ctx, t: Task, moving: (t: Task) => boolean) {
   const after = Number(ctx.req.headers['last-event-id'] ?? ctx.query.get('after') ?? 0) || 0;
   const res = ctx.res;
   res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache', connection: 'keep-alive' });
+  // Sent now, not with the first event: a reconnect with nothing new waited for headers until fetch gave up (5 min, a 503).
+  res.flushHeaders();
   const write = (e: RookEvent) => res.write(`id: ${e.seq}\nevent: ${e.type}\ndata: ${JSON.stringify(e, bigintReplacer)}\n\n`);
   for (const e of t.events) if (e.seq > after) write(e);
   if (isTerminal(t.status) && !moving(t)) { res.end(); return; }
@@ -569,5 +571,9 @@ function events(ctx: Ctx, t: Task, moving: (t: Task) => boolean) {
     if ((isTerminal(t.status) || (e.type === 'task_status' && isTerminal(e.data.to))) && !moving(t)) { t.listeners.delete(fn); res.end(); }
   };
   t.listeners.add(fn);
-  res.on('close', () => t.listeners.delete(fn));
+  // A comment line every 25 s keeps a quiet stream open: an agent can work for many minutes with no event, and the web
+  // app's proxy (Node fetch, 300 s body timeout) cut the stream at 5 minutes, which the browser saw as a 503.
+  const beat = setInterval(() => res.write(': ping\n\n'), HEARTBEAT_MS);
+  res.on('close', () => { clearInterval(beat); t.listeners.delete(fn); });
 }
+const HEARTBEAT_MS = 25_000;

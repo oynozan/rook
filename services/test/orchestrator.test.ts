@@ -195,6 +195,18 @@ test('re-hire after a failed verdict with a top-up, skip a FAILED agent, close w
   assert.equal(tail.trim().split('\n\n').length, 1);
 });
 
+test('an open event stream answers at once, even with nothing new to send', async () => {
+  plan = holdersPlan();
+  const created = await call(`${orch.url}/tasks`, { prompt: 'p', budget_usdc: '1' }); // planned: the stream stays open
+  const stop = new AbortController();
+  const at = Date.now();
+  const r = await fetch(`${orch.url}/tasks/${created.id}/events`, { signal: stop.signal, headers: { 'last-event-id': '9999' } });
+  assert.equal(r.status, 200);
+  assert.ok(Date.now() - at < 2000, 'headers came only with the first write'); // the web proxy's fetch gave up at 5 min
+  stop.abort();
+  await call(`${orch.url}/tasks/${created.id}/cancel`, {}).catch(() => {});
+});
+
 test('kill releases the authorization, cancels the A2A task and stops hiring', async () => {
   plan = { subtasks: [sub('s1', 'Hang', '200000', [cand('hang', '100000', 60), cand('holders-good', '300000')])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] };
   const created = await call(`${orch.url}/tasks`, { prompt: 'p', budget_usdc: '1' });
