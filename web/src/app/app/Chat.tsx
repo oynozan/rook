@@ -275,11 +275,14 @@ function Working({ label }: { label: string }) {
   );
 }
 
-/** `submit`: the form's submit button (no onClick needed). */
-function ActionButton({ onClick, busy, disabled, title, primary, submit, children }: { onClick?: () => void; busy?: boolean; disabled?: boolean; title?: string; primary?: boolean; submit?: boolean; children: ReactNode }) {
+/** `submit`: the form's submit button (no onClick needed). `buttonRef`: for focus to come back to it. */
+function ActionButton({ onClick, busy, disabled, title, primary, submit, buttonRef, children }: {
+  onClick?: () => void; busy?: boolean; disabled?: boolean; title?: string; primary?: boolean; submit?: boolean; buttonRef?: Ref<HTMLButtonElement>; children: ReactNode;
+}) {
   const off = disabled || busy;
   return (
     <button
+      ref={buttonRef}
       type={submit ? 'submit' : 'button'}
       onClick={onClick}
       disabled={off}
@@ -1239,8 +1242,9 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
   const [editing, setEditing] = useState(false);
   const [editErrors, setEditErrors] = useState<ComposerErrors | null>(null);
   const [againError, setAgainError] = useState<string | null>(null);
-  const editButton = useRef<HTMLButtonElement>(null);
-  const facts = snap ? { status: snap.task.status, subtasks: snap.plan ? snap.plan.subtasks.length : null, ledger: !!snap.ledger } : null;
+  const editButton = useRef<HTMLButtonElement>(null); // the bubble's Edit
+  const blockEditButton = useRef<HTMLButtonElement>(null); // the failure's own Edit message, shown instead of the bubble's
+  const facts =snap ? { status: snap.task.status, subtasks: snap.plan ? snap.plan.subtasks.length : null, ledger: !!snap.ledger } : null;
   const editable = !!onRedo && !!facts && !!wallet.account && canEdit(facts);
   const resendable = !!onRedo && !!facts && !!wallet.account && canSendAgain(facts);
   useEffect(() => { if (!editable) setEditing(false); }, [editable]); // a newer message came, or the plan was approved
@@ -1329,10 +1333,11 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
   }
 
   const openEditor = () => { setEditErrors(null); setAgainError(null); setEditing(true); };
+  // Back to the Edit button that opened it: the failure's own when it shows one (the bubble's is hidden then), else the bubble's.
   const closeEditor = () => {
     setEditing(false);
     setEditErrors(null);
-    requestAnimationFrame(() => editButton.current?.focus());
+    requestAnimationFrame(() => (blockEditButton.current ?? editButton.current)?.focus());
   };
   // Checked here first, as the composer does; the action checks again. Once sent, this message makes way for the new one.
   async function saveEdit(prompt: string, budget: string) {
@@ -1373,13 +1378,18 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
 
   // The message's own problem (not a task, a budget out of range): editing it is what helps, so that comes first.
   const aboutMessage = messageProblem(task.error);
-  const editMessage = editable && !editing && <ActionButton primary={aboutMessage || !resendable} onClick={openEditor} disabled={locked || redoing || !!busy}>Edit message</ActionButton>;
+  const editMessage = editable && !editing && (
+    <ActionButton primary={aboutMessage || !resendable} onClick={openEditor} disabled={locked || redoing || !!busy} buttonRef={blockEditButton}>Edit message</ActionButton>
+  );
+  // The failure offers Edit message itself (the planner's sentence about the message, or every part dropped): the
+  // bubble's Edit would be a second button of the same name beside it.
+  const failureEdits = !!editMessage && ((task.status === 'failed' && !plan && resendable && aboutMessage) || (!!plan && !revealing && plan.subtasks.length === 0));
 
   return (
     <>
       {editing && onRedo
         ? <MessageEditor prompt={task.prompt} budget={usdc(task.budget_atomic)} saving={redoing} errors={editErrors} onSave={(p, b) => void saveEdit(p, b)} onCancel={closeEditor} />
-        : <UserMessage prompt={task.prompt} budget={usdc(task.budget_atomic)} note={attemptNote(task)} onEdit={editable && !locked && !redoing && !busy ? openEditor : undefined} editRef={editButton} />}
+        : <UserMessage prompt={task.prompt} budget={usdc(task.budget_atomic)} note={attemptNote(task)} onEdit={editable && !locked && !redoing && !busy && !failureEdits ? openEditor : undefined} editRef={editButton} />}
 
       {(task.status === 'draft' || (plan && (revealing || plan.subtasks.some((s) => s.candidates.length > 0)))) && (
         <RookMessage still={fresh}>
