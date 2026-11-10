@@ -73,9 +73,9 @@ function PanelToggle({ label, onClick }: { label: string; onClick: () => void })
  */
 function TaskList({ tasks, onNavigate, onDelete }: { tasks: TaskSummary[] | null; onNavigate: () => void; onDelete: (chat: ChatRef) => void }) {
   const pathname = usePathname();
-  const { chain } = useMode(); // chain mode: an approved task waits for the owner's funding transfer
+  const { chain, down } = useMode(); // chain mode: an approved task waits for the owner's funding transfer
   const label = (s: string) => (chain && s === 'approved' ? 'Needs funding' : STATUS[s] ?? s);
-  if (tasks === null) return <p className="px-3 text-sm text-ink/65">Rook&apos;s services are unreachable right now. Your tasks will be back here as soon as they are.</p>;
+  if (tasks === null) return <p className="px-3 text-sm text-ink/65">Your tasks can&apos;t load: {down ?? "Rook's services aren't answering"}. They&apos;ll be back here on their own once Rook answers.</p>;
   if (!tasks.length) return <p className="px-3 text-sm text-ink/65">Tasks you draft will appear here.</p>;
   return (
     <ul>

@@ -4,17 +4,22 @@ import { createContext, useContext, type ReactNode } from 'react';
 import { NETWORK } from '@/lib/network';
 import type { Mode } from '@/lib/server/orchestrator';
 
-const ModeContext = createContext<Mode | null>(null);
+const ModeContext = createContext<{ mode: Mode | null; down: string | null }>({ mode: null, down: null });
 
-/** Which market and ledger the services run with, read once by the layout. Null when the services aren't reachable. */
-export function ModeProvider({ mode, children }: { mode: Mode | null; children: ReactNode }) {
-  return <ModeContext.Provider value={mode}>{children}</ModeContext.Provider>;
+/**
+ * Which market and ledger the services run with, read once by the layout. Null when the services aren't reachable;
+ * `down` then says why, as a clause (orchestrator.ts whyUnreachable).
+ */
+export function ModeProvider({ mode, down, children }: { mode: Mode | null; down: string | null; children: ReactNode }) {
+  return <ModeContext.Provider value={{ mode, down }}>{children}</ModeContext.Provider>;
 }
 
 export function useMode() {
-  const mode = useContext(ModeContext);
+  const { mode, down } = useContext(ModeContext);
   return {
     mode,
+    /** Why the layout couldn't read the task list or the mode, or null. */
+    down,
     live: mode?.market === 'live',
     // On the live market Rook can only pay agents through the budget contract (ROOK_LEDGER=chain).
     paymentsOff: mode?.market === 'live' && !mode.paying,

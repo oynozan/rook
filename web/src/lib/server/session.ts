@@ -4,6 +4,7 @@
 import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
 import { cookies } from 'next/headers';
 import { createSession, revokeSession, sessionAccount, spendNonce } from '@/lib/server/db';
+import { detail } from '@/lib/errors';
 import { DEFAULT_RPC, NETWORK } from '@/lib/network';
 import { isAccountId, isFullAccessKey, signatureValid, SIGN_IN_MESSAGE } from '@/lib/nep413';
 
@@ -72,20 +73,20 @@ export async function verifySignIn(input: { accountId?: unknown; publicKey?: unk
   const jar = await cookies();
   const challenge = open<{ nonce: string; recipient: string; exp: number }>('challenge', jar.get(CHALLENGE)?.value);
   jar.delete({ name: CHALLENGE, path: '/api/auth' }); // one attempt per challenge
-  if (!challenge || challenge.exp < Date.now() || challenge.recipient !== signInRecipient()) return { ok: false, reason: 'The sign-in request expired. Try again.' };
-  if (!spendNonce(challenge.nonce, challenge.exp)) return { ok: false, reason: 'This sign-in was already used. Try again.' };
+  if (!challenge || challenge.exp < Date.now() || challenge.recipient !== signInRecipient()) return { ok: false, reason: `This sign-in request is no longer valid: it lasts ${CHALLENGE_S / 60} minutes, and restarting the web server or blocking its cookies ends it too. Connect your wallet again.` };
+  if (!spendNonce(challenge.nonce, challenge.exp)) return { ok: false, reason: 'This sign-in request was already used: each one signs in once, so a replayed signature is refused. Connect your wallet again.' };
 
   const { accountId, publicKey, signature } = input;
-  if (!isAccountId(accountId) || typeof publicKey !== 'string' || typeof signature !== 'string') return { ok: false, reason: 'The wallet sent an incomplete signature.' };
+  if (!isAccountId(accountId) || typeof publicKey !== 'string' || typeof signature !== 'string') return { ok: false, reason: "Your wallet's answer was missing the account, its public key or the signature, so Rook can't check who signed. Try again, or use another wallet." };
   const nonce = Buffer.from(challenge.nonce, 'base64');
   if (!signatureValid({ publicKey, signature, message: SIGN_IN_MESSAGE, nonce, recipient: challenge.recipient })) {
-    return { ok: false, reason: 'The signature did not match. Try again.' };
+    return { ok: false, reason: "Your wallet's signature doesn't match Rook's sign-in message, so it doesn't prove the account is yours. Try again; if it keeps failing, your wallet may not support NEP-413 message signing, so use another wallet." };
   }
   try {
     const rpc = process.env.WEB_NEAR_RPC_URL ?? DEFAULT_RPC[NETWORK];
-    if (!(await isFullAccessKey(accountId, publicKey, rpc))) return { ok: false, reason: `That key isn't a full-access key of ${accountId} on NEAR ${NETWORK}.` };
-  } catch {
-    return { ok: false, reason: "Couldn't reach NEAR to check your key. Try again in a moment." };
+    if (!(await isFullAccessKey(accountId, publicKey, rpc))) return { ok: false, reason: `Rook only accepts a signature from one of the account's full-access keys, and the key your wallet signed with isn't one of ${accountId}'s on NEAR ${NETWORK}. Check that the wallet is on ${NETWORK} and signs with the account's own key.` };
+  } catch (e) {
+    return { ok: false, reason: `Rook couldn't ask NEAR whether your key belongs to ${accountId} (${detail(e instanceof Error ? e.message : e) || 'no answer'}). Try again in a moment.` };
   }
 
   const exp = Date.now() + SESSION_DAYS * 86_400_000;

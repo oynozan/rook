@@ -4,11 +4,11 @@ import { test } from 'node:test';
 import type { PlanView } from '@/lib/server/orchestrator';
 import { allSelfDoWhy, budgetToHire, plannerReason, selfDoWhy } from '@/lib/planner';
 
-test("a planner failure reads in plain words, never the services' raw text", () => {
+test("a planner failure reads in plain words; one with no plainer words says what the planner gave", () => {
   // The strings the orchestrator stores (services/src/orchestrator/index.ts: "planner: " + the planner's error).
   const plain: [string, RegExp][] = [
-    ['planner: fetch failed', /^Rook's planner could not be reached/],
-    ['planner: planner ended without a plan', /^Rook's planner could not be reached/],
+    ['planner: fetch failed', /^Rook's planner service didn't answer/],
+    ['planner: planner ended without a plan', /^Rook's planner service didn't answer/],
     ['planner: market gateway search failed: fetch failed', /^The NEAR AI market could not be reached/],
     ['planner: market gateway search failed: GET http://127.0.0.1:7102/search?q=holders -> 502', /^The NEAR AI market could not be reached/],
     ['planner: market gateway search failed: market search unreachable: fetch failed', /^The NEAR AI market could not be reached/],
@@ -23,9 +23,6 @@ test("a planner failure reads in plain words, never the services' raw text", () 
     ['planner: planner LLM failed: NEAR AI 402 for plan.draft: {"error":{"type":"insufficient_balance","message":"Credits exhausted"}}', /^NEAR AI has no credits available for Rook, so the planning model could not run\.$/],
     ['planner: planner LLM failed: NEAR AI 401 for plan.draft: {"error":"invalid api key"}', /^NEAR AI rejected Rook's API key/],
     ['planner: planner LLM failed: LLM cost guard: 1.0200 USD spent in the last 24 h (0.0000 in flight), limit ROOK_LLM_MAX_USD=1 per day', /daily spending limit/],
-    // Anything else internal gets the plain fallback, never the raw text.
-    ['planner: [ { "code": "invalid_type", "path": [ "prompt" ] } ]', /^Rook's planner hit a problem/],
-    ["planner: Cannot read properties of undefined (reading 'handle')", /^Rook's planner hit a problem/],
     ["Rook's services restarted while this task was draft, so it stopped there. It has no contract task on record, so nothing of it is on chain to resume.", /^Rook restarted while it was planning this task.*Send the task again\.$/],
   ];
   for (const [error, want] of plain) {
@@ -40,8 +37,12 @@ test("a planner failure reads in plain words, never the services' raw text", () 
   assert.equal(plannerReason(`planner: ${notATask}`), notATask);
   const fallback = 'This does not read as a task Rook can plan: say what you want done.';
   assert.equal(plannerReason(`planner: ${fallback}`), fallback);
+  // Anything else internal says what the planner gave, after a plain lead.
+  assert.equal(plannerReason("planner: Cannot read properties of undefined (reading 'handle')"),
+    "Rook's planner hit an error it doesn't explain further: Cannot read properties of undefined (reading 'handle'). Try again in a moment.");
+  assert.match(plannerReason('planner: [ { "code": "invalid_type", "path": [ "prompt" ] } ]'), /^Rook's planner hit an error it doesn't explain further: \[ \{ "code"/);
   // Only the planner's own sentence: model errors that happen to say it are still internal.
-  assert.match(plannerReason('planner: planner LLM failed: NEAR AI 400 for plan.draft: not a task'), /^Rook's planner hit a problem/);
+  assert.match(plannerReason('planner: planner LLM failed: NEAR AI 400 for plan.draft: not a task'), /^Rook's planner hit an error/);
 });
 
 test('a part Rook does itself says the true reason: no fitting agent, or a budget too small for the agents found', () => {

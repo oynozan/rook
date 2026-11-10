@@ -117,6 +117,6 @@ test('deleting a chat takes every task of it, the replaced ones too; refused whi
   const operator = "A task in this chat still holds USDC that Rook can't send back by itself, so Rook's operator will. Delete the chat once it is back in your wallet.";
   assert.deepEqual(deleteRefusal(409, operator, { task_id: 't_3' }), { gone: false, message: operator, known: true, task: 't_3' });
   assert.deepEqual(deleteRefusal(404, 'no task t_1'), { gone: true }); // deleted from another tab already
-  assert.deepEqual(deleteRefusal(500, 'boom'), { gone: false, message: "Rook couldn't delete this chat right now. Try again in a moment.", known: false });
+  assert.deepEqual(deleteRefusal(500, 'boom'), { gone: false, message: "Rook couldn't delete this chat: Rook's orchestrator hit an error (boom). Try again in a moment.", known: false });
   assert.equal(deleteRefusal(null, '').gone, false);
 });

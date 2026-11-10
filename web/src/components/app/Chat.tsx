@@ -22,6 +22,7 @@ import {
 } from '@/lib/funding';
 import { explorerTx, NETWORK, rpcFor, type Network } from '@/lib/network';
 import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary } from '@/lib/server/orchestrator';
+import { detail, pageUnreachable } from '@/lib/errors';
 import { useMode } from '@/hooks/mode';
 import { allSelfDoWhy, budgetToHire, plannerReason, selfDoWhy } from '@/lib/planner';
 import { FUNDING_NOT_READY } from '@/lib/refusals';
@@ -40,13 +41,15 @@ const FOLLOW_HOLD_MS = 150; // after the reader scrolls up, how long scroll even
 // ---- loading one task ----
 
 /** `problem`: 'deleted', this account deleted the task's chat (in another tab, say); 'missing', it isn't this account's. */
-type Loaded = { snap: TaskSnapshot | null; events: RookEvent[]; problem: 'deleted' | 'missing' | 'signin' | 'down' | null; refetch: () => void };
+/** `down`: why the task couldn't load, as a clause, while `problem` is 'down'. */
+type Loaded = { snap: TaskSnapshot | null; events: RookEvent[]; problem: 'deleted' | 'missing' | 'signin' | 'down' | null; down: string | null; refetch: () => void };
 
 /** `account`: the signed-in account. Another one (or none) loads the task afresh, as that account may see it. */
 function useTask(id: string | null, account: string | null): Loaded {
   const [snap, setSnap] = useState<TaskSnapshot | null>(null);
   const [events, setEvents] = useState<RookEvent[]>([]);
   const [problem, setProblem] = useState<Loaded['problem']>(null);
+  const [down, setDown] = useState<string | null>(null);
 
   /** Loads the task; resolves with it, 'down' when Rook couldn't be reached, or null when it isn't this account's. */
   const load = useCallback(async (): Promise<TaskSnapshot | 'down' | null> => {
@@ -59,12 +62,18 @@ function useTask(id: string | null, account: string | null): Loaded {
         return null;
       }
       if (r.status === 401) { setProblem('signin'); return null; }
-      if (!r.ok) { setProblem('down'); return 'down'; }
+      if (!r.ok) {
+        const why: { error?: unknown } | null = await r.json().catch(() => null);
+        setDown(typeof why?.error === 'string' ? why.error : `this web server answered HTTP ${r.status}`);
+        setProblem('down');
+        return 'down';
+      }
       const s: TaskSnapshot = await r.json();
       setProblem(null);
       setSnap(s);
       return s;
-    } catch {
+    } catch (e) {
+      setDown(`this page got no answer from Rook's web server (${detail(e instanceof Error ? e.message : e) || 'no reason given'})`);
       setProblem('down');
       return 'down';
     }
@@ -148,7 +157,7 @@ function useTask(id: string | null, account: string | null): Loaded {
   }, [awaitingTx, refetch]);
 
   // Just after switching tasks or accounts the state still holds the old task for one render: never show it as the new one.
-  return { snap: snap?.task.id === id && snap.task.owner === account ? snap : null, events, problem, refetch };
+  return { snap: snap?.task.id === id && snap.task.owner === account ? snap : null, events, problem, down, refetch };
 }
 
 // ---- pieces of the thread ----
@@ -581,7 +590,7 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
     setRefundable(false);
     setPhase('confirming');
     const out: ActResult = await confirmFunding(id, { contract_task_id: cid, tx_hash: tx })
-      .catch(() => ({ ok: false as const, message: UNREACHABLE }));
+      .catch((e) => ({ ok: false as const, message: pageUnreachable(e) }));
     setPhase('idle');
     if (out.ok) {
       session.set(keptTransferKey(id), null); // Rook runs it now: the server's books know the way back to it
@@ -1217,7 +1226,6 @@ function Report({ markdown }: { markdown: string }) {
 // ---- one conversation ----
 
 /** A server action call that never got an answer: the network dropped, or the web server was restarting. */
-const UNREACHABLE = "This page couldn't reach Rook. Check your connection and try again.";
 /** A plan Rook cancelled because a message below it revised it. */
 const REPLACED = 'You revised this plan below, so it was cancelled.';
 
@@ -1236,7 +1244,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
   id: string; loaded: Loaded; tasks: TaskSummary[] | null; onGrow: () => void; fresh: boolean; onRevealed: (id: string) => void; revised: boolean;
   onRedo?: Redo; redoing: boolean; locked: boolean;
 }) {
-  const { snap, events, problem, refetch } = loaded;
+  const { snap, events, problem, down, refetch } = loaded;
   const router = useRouter();
   const wallet = useWallet();
   const [editing, setEditing] = useState(false);
@@ -1276,7 +1284,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
     if (!awaitingFunding || sentLive || funding || fundingConfirmed || fundingTrouble !== null || fundingAsked.current) return;
     fundingAsked.current = true; // approve again: the orchestrator repeats the funding instructions for an approved task
     void fundingInstructions(id)
-      .catch((): ActResult => ({ ok: false, message: UNREACHABLE }))
+      .catch((e): ActResult => ({ ok: false, message: pageUnreachable(e) }))
       .then((out) => {
         fundingAsked.current = false;
         if (out.ok && out.funding) return setFunding(out.funding);
@@ -1325,7 +1333,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
     setActError(null);
     // Checked again on the click (the balance may have changed since): a short wallet's plan is never approved.
     if (kind === 'approve' && needsFunds && await funds.check()) return setBusy(null);
-    const out = await (kind === 'approve' ? approve(id) : kind === 'cancel' ? cancel(id) : stop(id)).catch(() => ({ ok: false as const, message: UNREACHABLE }));
+    const out = await (kind === 'approve' ? approve(id) : kind === 'cancel' ? cancel(id) : stop(id)).catch((e) => ({ ok: false as const, message: pageUnreachable(e) }));
     setBusy(null);
     if (!out.ok) setActError(out.message);
     else if (out.funding) { setFunding(out.funding); if (kind === 'approve') setAutoFund(true); }
@@ -1357,7 +1365,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
   if (problem === 'deleted') return <RookMessage><p>This chat was deleted.</p></RookMessage>;
   if (problem === 'missing') return <RookMessage><p>Rook has no task at this link for the wallet you&apos;re signed in with. If another wallet drafted it, sign in with that one.</p></RookMessage>;
   if (problem === 'signin') return <RookMessage><p>Connect your wallet to see this task.</p></RookMessage>;
-  if (problem === 'down' && !snap) return <RookMessage><p>Rook&apos;s services are unreachable right now. This page reconnects on its own once they&apos;re back.</p></RookMessage>;
+  if (problem === 'down' && !snap) return <RookMessage><p>This task can&apos;t load: {down ?? "Rook's services aren't answering"}. This page reconnects on its own once Rook answers.</p></RookMessage>;
   if (!snap) return <RookMessage><Working label="Loading" /></RookMessage>;
 
   const { task, plan, receipts, ledger, final_result } = snap;
@@ -1613,7 +1621,7 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
     const parent_id = thread?.parent;
     // Returns as soon as the task exists; the plan then streams in on the task's page. The call itself can fail (the
     // network, or the web server restarting): then the composer gets its text back and says so.
-    const out = await draftTask({ prompt, budget, parent_id }).catch(() => ({ kind: 'error' as const, message: UNREACHABLE }));
+    const out = await draftTask({ prompt, budget, parent_id }).catch((e) => ({ kind: 'error' as const, message: pageUnreachable(e) }));
     if (out.kind === 'planned') {
       placed(out.id, prompt, budget, parent_id ?? null);
       setSending((s) => s && { ...s, id: out.id });
@@ -1646,7 +1654,7 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
     if (sending || redoing) return { message: 'Wait until the message being sent is in.' };
     setRedoing(old.id);
     setErrors(null);
-    const out = await draftTask({ prompt, budget, supersedes: old.id }).catch(() => ({ kind: 'error' as const, message: UNREACHABLE }));
+    const out = await draftTask({ prompt, budget, supersedes: old.id }).catch((e) => ({ kind: 'error' as const, message: pageUnreachable(e) }));
     setRedoing(null);
     if (out.kind === 'invalid') return { prompt: out.prompt, budget: out.budget };
     if (out.kind === 'error') return { message: out.message };
@@ -1662,7 +1670,7 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
 
   // A failed send's errors are about that send: not the next page, nor the next sign-in ("Sign in first" is wrong once
   // the owner signed in again). A sign-out keeps them: a send refused for a lapsed session signs the page out after the
-  // error is set, and "Sign in with your NEAR wallet first" must stay to say why nothing was sent.
+  // error is set, and the "your sign-in has ended" message must stay to say why nothing was sent.
   useEffect(() => { setErrors(null); }, [id]);
   useEffect(() => { if (wallet.account) setErrors(null); }, [wallet.account]);
 

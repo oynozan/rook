@@ -36,43 +36,53 @@ test('known refusals: no task for this account, an empty plan, payments off, the
   const zero = 'This plan has a part capped at 0 USDC, which the Rook contract refuses.';
   assert.deepEqual(actionRefusal('approve', 409, 'this plan has a 0 USDC cap; draft the task again'), { message: `${zero} Draft the task again.`, known: true, final: true });
   assert.deepEqual(actionRefusal('fund', 409, 'this plan has a 0 USDC cap; draft the task again'), { message: `${zero} Cancel it and draft the task again.`, known: true, final: true });
-  assert.equal(words('approve', 409, 'this plan has a 10 USDC cap'), "Rook couldn't get this task started right now. Try again in a moment."); // not a 0 cap
+  assert.equal(words('approve', 409, 'this plan has a 10 USDC cap'), "Rook couldn't start this task: Rook's orchestrator refused it (this plan has a 10 USDC cap)."); // not a 0 cap
   assert.equal(actionRefusal('approve', 409, 'task is cancelled, approve needs planned').final, undefined);
 });
 
-test('anything else gets a plain fallback per button, and is marked for the server log', () => {
-  assert.deepEqual(actionRefusal('approve', 500, 'database is locked'), { message: "Rook couldn't get this task started right now. Try again in a moment.", known: false });
-  assert.deepEqual(actionRefusal('cancel', 401, 'The orchestrator refused this web server: ROOK_SERVICE_TOKEN differs between them.'),
-    { message: "Rook couldn't cancel this task right now. Try again in a moment.", known: false });
-  assert.equal(words('stop', null, 'database is locked'), "Rook couldn't stop this task right now. Try again in a moment.");
-  assert.equal(words('approve', 404, 'GET http://127.0.0.1:7104/config -> 404'), "Rook couldn't get this task started right now. Try again in a moment.");
-  assert.equal(words('approve', 409, "reserve_share 0.2 gives 1 on chain but 2 in the plan; use a share with at most 4 decimals"), "Rook couldn't get this task started right now. Try again in a moment.");
+test('anything else names its cause per button (Try again only where it may pass), and is marked for the server log', () => {
+  assert.deepEqual(actionRefusal('approve', 500, 'database is locked'),
+    { message: "Rook couldn't start this task: Rook's orchestrator hit an error (database is locked). Try again in a moment.", known: false });
+  assert.equal(words('stop', null, 'database is locked'), "Rook couldn't stop this task: something failed on Rook's side (database is locked). Try again in a moment.");
+  // A local service's URL is named by the service, never shown as an address; a refusal repeats, so no Try again.
+  assert.equal(words('approve', 404, 'GET http://127.0.0.1:7104/config -> 404'), "Rook couldn't start this task: Rook's orchestrator refused it (the simulator (GET /config) answered HTTP 404).");
+  assert.equal(words('approve', 409, "reserve_share 0.2 gives 1 on chain but 2 in the plan; use a share with at most 4 decimals"),
+    "Rook couldn't start this task: Rook's orchestrator refused it (reserve_share 0.2 gives 1 on chain but 2 in the plan; use a share with at most 4 decimals).");
+  assert.equal(words('cancel', 502, 'fetch failed'), "Rook couldn't cancel this task: a service behind Rook's orchestrator didn't answer (fetch failed). Try again in a moment.");
+  // A service token that differs: no retry can help, so the page offers none.
+  assert.deepEqual(actionRefusal('cancel', 401, 'The orchestrator refused this web server: ROOK_SERVICE_TOKEN differs between them.'), {
+    message: "Rook couldn't cancel this task: this web app's ROOK_SERVICE_TOKEN doesn't match the orchestrator's, so the orchestrator turns every request "
+      + "from it away. Trying again won't help: whoever runs Rook has to give both the same token.", known: true, final: true,
+  });
   // The funding step asking for the transfer again has its own words.
-  assert.equal(words('fund', 500, 'database is locked'), "Rook couldn't get the funding transfer ready. Try again in a moment.");
+  assert.equal(words('fund', 500, 'database is locked'), "Rook couldn't get the funding transfer ready: Rook's orchestrator hit an error (database is locked). Try again in a moment.");
   assert.equal(words('fund', 409, 'task is killed, approve needs planned'), "This task was stopped, so it can't be funded.");
 });
 
 test("approving can't read the contract's settings from NEAR: said once, the same for the button and the funding step", () => {
-  const settings = "Rook couldn't read the Rook contract's settings from NEAR just now, so the funding transfer isn't ready. Try again in a moment.";
-  // The chain-gateway down, its answer not JSON, NEAR RPC failing behind it, or its 60 s RPC deadline.
-  for (const m of ['fetch failed', 'GET http://127.0.0.1:7104/config -> 502', 'NEAR RPC query: TIMEOUT_ERROR {}',
-    'view rook.oynozan.near.get_config: wasm execution failed', 'The operation was aborted due to timeout']) {
-    assert.deepEqual(actionRefusal('approve', 500, m), { message: settings, known: false }, m);
-    assert.equal(words('fund', 502, m), settings, m);
+  const settings = (why: string) => `Rook couldn't read the Rook contract's settings from NEAR (${why}), so the funding transfer isn't ready. Try again in a moment.`;
+  // The chain-gateway down, its answer not JSON, NEAR RPC failing behind it, or its 60 s RPC deadline. A local address
+  // is named by its service, and a query string (which can carry a key) is dropped.
+  for (const [m, why] of [['fetch failed', 'fetch failed'], ['GET http://127.0.0.1:7106/config?k=1 -> 502', 'the chain gateway (GET /config) answered HTTP 502'],
+    ['NEAR RPC query: TIMEOUT_ERROR {}', 'NEAR RPC query: TIMEOUT_ERROR {}'],
+    ['view rook.oynozan.near.get_config: wasm execution failed', 'view rook.oynozan.near.get_config: wasm execution failed'],
+    ['The operation was aborted due to timeout', 'The operation was aborted due to timeout']]) {
+    assert.deepEqual(actionRefusal('approve', 500, m), { message: settings(why), known: false }, m);
+    assert.equal(words('fund', 502, m), settings(why), m);
   }
   // Only for a failure on Rook's side, and never for the other buttons.
-  assert.equal(words('cancel', 500, 'fetch failed'), "Rook couldn't cancel this task right now. Try again in a moment.");
-  assert.equal(words('approve', 409, 'timeout'), "Rook couldn't get this task started right now. Try again in a moment.");
+  assert.equal(words('cancel', 500, 'fetch failed'), "Rook couldn't cancel this task: a service behind Rook's orchestrator didn't answer (fetch failed). Try again in a moment.");
+  assert.equal(words('approve', 409, 'timeout'), "Rook couldn't start this task: Rook's orchestrator refused it (timeout).");
 });
 
-test("confirming: the orchestrator's refusals stay as written for the funding step to read; Rook's own trouble is a plain sentence", () => {
+test("confirming: the orchestrator's refusals stay as written for the funding step to read; Rook's own trouble says its cause", () => {
   // 4xx: what confirmFailure and untilFinal read (the chain-gateway's 404 for a contract task NEAR doesn't show yet).
   assert.deepEqual(fundingCallFailure(409, 'contract task 1a does not match the approved plan: caps differ'), { message: 'contract task 1a does not match the approved plan: caps differ', raw: true });
   assert.deepEqual(fundingCallFailure(404, 'no contract task 1a'), { message: 'no contract task 1a', raw: true });
   // Never "Rook didn't start the run: fetch failed".
-  const plain = { message: "Rook couldn't check your transfer right now. Try again in a moment." };
-  assert.deepEqual(fundingCallFailure(500, 'fetch failed'), plain);
-  assert.deepEqual(fundingCallFailure(502, 'NEAR RPC query: TIMEOUT_ERROR {}'), plain);
-  assert.deepEqual(fundingCallFailure(401, 'The orchestrator refused this web server: ROOK_SERVICE_TOKEN differs between them.'), plain);
-  assert.deepEqual(fundingCallFailure(null, 'database is locked'), plain);
+  const check = "Rook couldn't check your transfer: ";
+  assert.deepEqual(fundingCallFailure(500, 'fetch failed'), { message: `${check}a service behind Rook's orchestrator didn't answer (fetch failed). Try again in a moment.` });
+  assert.deepEqual(fundingCallFailure(502, 'NEAR RPC query: TIMEOUT_ERROR {}'), { message: `${check}Rook's orchestrator hit an error (NEAR RPC query: TIMEOUT_ERROR {}). Try again in a moment.` });
+  assert.match(fundingCallFailure(401, 'The orchestrator refused this web server: ROOK_SERVICE_TOKEN differs between them.').message, /ROOK_SERVICE_TOKEN doesn't match.*Trying again won't help/);
+  assert.deepEqual(fundingCallFailure(null, 'database is locked'), { message: `${check}something failed on Rook's side (database is locked). Try again in a moment.` });
 });

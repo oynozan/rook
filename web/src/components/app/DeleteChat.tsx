@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useId, useRef, useState } from 'react';
+import { pageUnreachable } from '@/lib/errors';
 import { deleteChat } from '@/lib/server/actions';
 
 /** A bin: delete a chat. */
@@ -66,7 +67,7 @@ export function DeleteChatDialog({ chat, onClose, onDeleted, onOpenTask }: {
   async function remove() {
     setBusy(true);
     setError(null);
-    const out = await deleteChat(target.id).catch(() => ({ ok: false as const, message: "This page couldn't reach Rook. Check your connection and try again." }));
+    const out = await deleteChat(target.id).catch((e) => ({ ok: false as const, message: pageUnreachable(e) }));
     setBusy(false);
     if (out.ok) return onDeleted(target, out.deleted);
     setError({ message: out.message, ...('task' in out && out.task ? { task: out.task } : {}) });

@@ -1,5 +1,6 @@
 // Server-side client for the orchestrator API (docs/agentic-system.md section 8.1). It listens on localhost with no
 // CORS, so the browser only ever reaches it through this app's server.
+import { cause, DOWN } from '@/lib/errors';
 import type { Funding } from '@/lib/funding';
 import type { Network } from '@/lib/network';
 
@@ -112,6 +113,10 @@ export type TaskSnapshot = {
 export type RookEvent = { seq: number; type: string; subtask_id?: string; data: any };
 
 export class OrchestratorDown extends Error {}
+
+/** Why a page can't load from the orchestrator, as a clause: it isn't answering, a token mismatch, or what it said. */
+export const whyUnreachable = (e: unknown) => e instanceof OrchestratorDown ? DOWN
+  : cause(e instanceof OrchestratorError ? e.status : null, e instanceof Error ? e.message : String(e));
 
 /**
  * The orchestrator answered with an error: its HTTP status, its own message, and what it adds for some (`details`: a

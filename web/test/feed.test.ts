@@ -23,17 +23,23 @@ test('a quote security alert names the agent and says what it asked for', () => 
   assert.equal(alertLine('payTo evil.near is not the marketplace treasury', 'evil'), "Security alert: evil asked to be paid to an account that isn't the marketplace's.");
 });
 
-test("Rook's errors: retries and notes muted, real problems alert, no ids or raw text in the line", () => {
+test("Rook's errors: retries and notes muted, real problems alert, in plain words with their cause", () => {
   const retry = problemLine({ kind: 'eval_retry', message: 'evaluator attempt 1 failed, retrying: NEAR AI 502 for evaluate: <html>' }, 'Holder data');
   assert.deepEqual(retry, { text: "Checking Holder data didn't go through, so Rook is trying again.", tone: 'muted', label: 'Retrying' });
   const lag = problemLine({ kind: 'payment_lookup', agent_handle: 'web-research', message: 'web-research: the indexer does not show the payment transaction yet; ...' });
   assert.equal(lag?.tone, 'muted');
   assert.match(lag!.text, /^The payment to web-research went through/);
   const abandoned = problemLine({ kind: 'abandoned', message: 's2 abandoned: NEAR RPC send_tx: INVALID_TRANSACTION {}' }, 'Contract check');
-  assert.deepEqual(abandoned, { text: "Rook couldn't finish Contract check because of a problem on its side.", tone: 'alert', label: 'Problem' });
-  assert.equal(problemLine({ kind: 'close', message: 'ledger refused: subtask 2 has not returned its leftover' })?.text, 'Sending the unspent USDC back hit a problem. Rook is still finishing the refund.');
+  assert.deepEqual(abandoned, { text: "Rook couldn't finish Contract check because of a problem on its side (NEAR RPC send_tx: INVALID_TRANSACTION {}).", tone: 'alert', label: 'Problem' });
+  assert.equal(problemLine({ kind: 'close', message: 'ledger refused: subtask 2 has not returned its leftover' })?.text,
+    'Sending the unspent USDC back hit a problem (ledger refused: subtask 2 has not returned its leftover). Rook is still finishing the refund.');
   assert.equal(problemLine({ kind: 'unpaid', message: 'x delivered, but its payment never showed on chain before the authorization expired; booked unpaid' }), null);
-  assert.equal(problemLine({ kind: 'something-new', message: 'raw' })?.text, 'Rook hit a problem on its side.');
+  assert.equal(problemLine({ kind: 'something-new', message: 'raw' })?.text, 'Rook hit a problem on its side (raw).');
+  assert.equal(problemLine({ kind: 'something-new' })?.text, 'Rook hit a problem on its side.');
+  // A planning failure in the planner's plain words; a local address named by its service, never shown.
+  assert.equal(problemLine({ kind: 'planner', message: 'planner: planner LLM failed: NEAR AI 402 for plan.draft: x' })?.text,
+    "Rook couldn't draft a plan for this task: NEAR AI has no credits available for Rook, so the planning model could not run.");
+  assert.equal(problemLine({ kind: 'run', message: 'POST http://127.0.0.1:7105/pay -> 500' })?.text, "The run stopped because of a problem on Rook's side (the signer (POST /pay) answered HTTP 500).");
 });
 
 test('a part given up on ends the wait on its agent, so the run never says "Waiting on" an agent that is done', () => {
@@ -52,10 +58,10 @@ test('a part given up on ends the wait on its agent, so the run never says "Wait
 test('error events stored before they had a kind are read from their message', () => {
   assert.equal(problemLine({ message: 'evaluator attempt 2 failed, retrying: fetch failed' }, 'Prices')?.tone, 'muted');
   assert.match(problemLine({ message: 'web-research: the indexer does not show the payment transaction yet; the balance already showed the payment, so the receipt stands without payment_tx' })!.text, /^The payment to web-research went through/);
-  assert.equal(problemLine({ message: 's2 abandoned: NEAR RPC send_tx: INVALID_TRANSACTION {}' }, 'Contract check')?.text, "Rook couldn't finish Contract check because of a problem on its side.");
+  assert.equal(problemLine({ message: 's2 abandoned: NEAR RPC send_tx: INVALID_TRANSACTION {}' }, 'Contract check')?.text, "Rook couldn't finish Contract check because of a problem on its side (NEAR RPC send_tx: INVALID_TRANSACTION {}).");
   assert.equal(problemLine({ message: 'salvage, closeTask: ledger refused: subtask 2 has not returned its leftover' })?.tone, 'alert');
   assert.equal(problemLine({ message: 'send to luigi: after a 502 the agent answered HTTP 402; counted as spent' })?.text, "luigi's payment went through after all, so it counts as spent.");
-  assert.equal(problemLine({ message: 'evaluation of luigi failed, subtask abandoned unjudged: down' }, 'Prices')?.text, "Rook couldn't check luigi's work on Prices, so that part is left out.");
+  assert.equal(problemLine({ message: 'evaluation of luigi failed, subtask abandoned unjudged: down' }, 'Prices')?.text, "Rook couldn't check luigi's work on Prices (down), so that part is left out.");
 });
 
 test("delivered parts: a hire's text from its accepted hire, Rook's own from the accepted text, only parts that passed", () => {

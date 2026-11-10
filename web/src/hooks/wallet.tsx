@@ -3,6 +3,7 @@
 import type { ConnectorAction, NearConnector, SignedMessage, SignMessageParams } from '@hot-labs/near-connect';
 import { useRouter } from 'next/navigation';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { detail } from '@/lib/errors';
 import { NETWORK } from '@/lib/network';
 
 export { NETWORK };
@@ -30,7 +31,9 @@ export function useWallet() {
 
 const post = async <T,>(url: string, body?: unknown): Promise<{ status: number; data: T }> => {
   const r = await fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body) });
-  return { status: r.status, data: await r.json() };
+  // A crash shows as an HTML error page: say which call failed, rather than "Unexpected token '<'".
+  const data = await r.json().catch(() => { throw new Error(`Rook's web server answered ${url} with HTTP ${r.status} and no data; its log says why`); });
+  return { status: r.status, data };
 };
 const fromBase64 = (s: string) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 const pause = (ms: number) => new Promise<null>((ok) => setTimeout(() => ok(null), ms));
@@ -125,8 +128,8 @@ export function WalletProvider({ account: signedIn, children }: { account: strin
       } catch (e) {
         // Closing the wallet list or declining to sign rejects too, and that is a choice rather than a failure.
         const message = e instanceof Error ? e.message : String(e);
-        if (/no wallets/.test(message)) setError("Couldn't load wallets. Try again.");
-        else if (!/clos|cancel|reject|denied|declin/i.test(message)) setError("Couldn't sign in with your wallet. Try again.");
+        if (/no wallets/.test(message)) setError(`The list of NEAR wallets didn't load (${detail(message)}). Check your connection, or turn off a blocker that stops it, then try again.`);
+        else if (!/clos|cancel|reject|denied|declin/i.test(message)) setError(`Signing in with your wallet failed: ${detail(message) || 'the wallet gave no reason'}. Try again, or use another wallet.`);
       } finally {
         setConnecting(false);
       }

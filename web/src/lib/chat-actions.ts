@@ -1,6 +1,7 @@
 // What a conversation offers: sending its newest message again, or editing it, in its place; and deleting it. Pure
 // functions, so the tests use them. Run: npx tsx --test test/*.test.ts (from web/)
 import { currentTask, waitReason } from '@/lib/conversations';
+import { failed } from '@/lib/errors';
 import type { TaskSummary } from '@/lib/server/orchestrator';
 import { olderNotATask } from '@/lib/planner';
 
@@ -126,5 +127,5 @@ export function deleteRefusal(status: number | null, message: string, details?: 
     const task = (details as { task_id?: unknown } | null | undefined)?.task_id;
     return { gone: false, message, known: true, ...(typeof task === 'string' && TASK_ID.test(task) ? { task } : {}) };
   }
-  return { gone: false, message: "Rook couldn't delete this chat right now. Try again in a moment.", known: false };
+  return { gone: false, message: failed("Rook couldn't delete this chat", status, message), known: false };
 }

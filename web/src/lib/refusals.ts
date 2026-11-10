@@ -1,5 +1,6 @@
 // What the orchestrator answers to the task page's buttons (approve, cancel, stop), and to the funding step asking for
 // the funding transfer again (fund), in plain words for the page.
+import { detail, failed, TOKEN_MISMATCH } from '@/lib/errors';
 
 export type TaskAction = 'approve' | 'fund' | 'cancel' | 'stop';
 
@@ -9,13 +10,18 @@ const NOW: Record<string, string> = {
   closed: 'has already finished', cancelled: 'was cancelled', killed: 'was stopped', failed: 'has already failed',
 };
 const DONE: Record<TaskAction, string> = { approve: 'started', fund: 'funded', cancel: 'cancelled', stop: 'stopped' };
-/** The funding transfer didn't come back, for no reason Rook can name. */
-export const FUNDING_NOT_READY = "Rook couldn't get the funding transfer ready. Try again in a moment.";
+/**
+ * Approving answered without the funding transfer: the orchestrator's ledger isn't the Rook contract now (it restarted
+ * in simulation mode, say), or the plan hires no one and started at once. Either way there is nothing to sign.
+ */
+export const FUNDING_NOT_READY = 'Rook answered without a funding transfer for your wallet to sign: its services may not be running against '
+  + 'the Rook contract right now (a restart in simulation mode, say). Reload the page to see where this task stands.';
+/** The start of a failure Rook can't word more plainly; errors.ts failed() adds the cause. */
 const FAILED: Record<TaskAction, string> = {
-  approve: "Rook couldn't get this task started right now. Try again in a moment.",
-  fund: FUNDING_NOT_READY,
-  cancel: "Rook couldn't cancel this task right now. Try again in a moment.",
-  stop: "Rook couldn't stop this task right now. Try again in a moment.",
+  approve: "Rook couldn't start this task",
+  fund: "Rook couldn't get the funding transfer ready",
+  cancel: "Rook couldn't cancel this task",
+  stop: "Rook couldn't stop this task",
 };
 
 /**
@@ -38,6 +44,7 @@ export const chatDeleted = (status: number | null, message: string) => status ==
 export function actionRefusal(action: TaskAction, status: number | null, message: string): { message: string; known: boolean; final?: true } {
   const known = (text: string) => ({ message: text, known: true });
   if (chatDeleted(status, message)) return known('This chat was deleted.');
+  if (status === 401) return { ...known(`${FAILED[action]}: ${TOKEN_MISMATCH}.`), final: true };
   if (status === 404 && /^no task /.test(message)) return known("Rook has no task at this link for the wallet you're signed in with.");
   if (status === 409) {
     // A newer message in the conversation is revising this plan (another tab sent it, say).
@@ -64,9 +71,9 @@ export function actionRefusal(action: TaskAction, status: number | null, message
     if (m) return known(`This task's budget is below the contract's smallest, ${m[1]} USDC. Draft it again with a larger budget.`);
   }
   if ((action === 'approve' || action === 'fund') && status !== null && status >= 500 && CHAIN_READ.test(message)) {
-    return { message: "Rook couldn't read the Rook contract's settings from NEAR just now, so the funding transfer isn't ready. Try again in a moment.", known: false };
+    return { message: `Rook couldn't read the Rook contract's settings from NEAR (${detail(message)}), so the funding transfer isn't ready. Try again in a moment.`, known: false };
   }
-  return { message: FAILED[action], known: false };
+  return { message: failed(FAILED[action], status, message), known: false };
 }
 
 /**
@@ -77,5 +84,5 @@ export function actionRefusal(action: TaskAction, status: number | null, message
  */
 export function fundingCallFailure(status: number | null, message: string): { message: string; raw?: true } {
   if (status !== null && status >= 400 && status < 500 && status !== 401 && message) return { message, raw: true };
-  return { message: "Rook couldn't check your transfer right now. Try again in a moment." };
+  return { message: failed("Rook couldn't check your transfer", status, message) };
 }

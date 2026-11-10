@@ -1,6 +1,7 @@
 'use server';
 
 import { revalidatePath } from 'next/cache';
+import { DOWN as NOT_ANSWERING, failed } from '@/lib/errors';
 import { forgetFundingOf, forgetUnreadFunding, fundingSent, giveBackDraftSlot, markFundingRefunded, recordFundingSent, takeDraftSlot } from '@/lib/server/db';
 import { conversationIds, deleteRefusal, fundingHeld, fundingHeldRefusal, redoRefusal } from '@/lib/chat-actions';
 import { amountsNamed } from '@/lib/conversations';
@@ -25,13 +26,13 @@ export type ActResult = { ok: true; funding?: Funding } | { ok: false; message: 
 // Each draft spends NEAR AI credit on the planner, so one account can't drain it. ponytail: per account only; many
 // throwaway accounts still add up, so the planner's own ROOK_LLM_MAX_USD cap is the backstop.
 const DRAFTS_PER_HOUR = Math.max(1, Math.floor(Number(process.env.ROOK_DRAFTS_PER_HOUR)) || 20);
-const DOWN = "Rook's services are unreachable right now. Try again in a minute.";
+const DOWN = `${NOT_ANSWERING}, so nothing was done. Try again in a minute.`;
 const refreshSidebar = () => revalidatePath('/app', 'layout');
 
 /** No session (it lapsed, or another tab signed out): the layout renders signed out again, so the page offers Connect. */
 function signInFirst() {
   refreshSidebar();
-  return 'Sign in with your NEAR wallet first.';
+  return 'Your sign-in has ended (it lasts 7 days, and signing out in another tab ends it too), so Rook did nothing. Connect your NEAR wallet again.';
 }
 
 // Every action acts as the signed-in account from the session cookie. The browser can't name an account.
@@ -82,7 +83,7 @@ export async function draftTask(input: { prompt: string; budget: string; parent_
       return { kind: 'error', message: follow };
     }
     console.error('[web] draftTask:', e instanceof Error ? e.message : e);
-    return { kind: 'error', message: "Rook couldn't draft a plan for this task. Try again in a moment." };
+    return { kind: 'error', message: failed("Rook couldn't draft a plan for this task", e instanceof OrchestratorError ? e.status : null, e instanceof Error ? e.message : String(e)) };
   }
 }
 
@@ -210,7 +211,7 @@ export async function confirmFunding(id: string, input: { contract_task_id: stri
   const owner = await currentAccount();
   if (!owner) return { ok: false, message: signInFirst() };
   const cid = String(input?.contract_task_id ?? '');
-  if (!CONTRACT_TASK.test(cid)) return { ok: false, message: 'That contract task id is not valid.' };
+  if (!CONTRACT_TASK.test(cid)) return { ok: false, message: `"${cid.slice(0, 40)}" isn't a contract task id Rook can read: it should be the short id from the contract's task_created event, like 12.` };
   if (!recordFundingSent(id, owner, { contract_task_id: cid, tx_hash: txOf(input?.tx_hash) })) {
     const was = fundingSent(id, owner);
     return { ok: false, message: `This task's funding is already ${was?.contract_task_id ? `contract task ${was.contract_task_id}` : 'another transfer'}, so Rook won't confirm contract task ${cid} for it.` };
@@ -231,7 +232,7 @@ export async function fundingRefunded(id: string, input: { contract_task_id: str
   const owner = await currentAccount();
   if (!owner) return { ok: false, message: signInFirst() };
   const cid = String(input?.contract_task_id ?? '');
-  if (!CONTRACT_TASK.test(cid)) return { ok: false, message: 'That contract task id is not valid.' };
+  if (!CONTRACT_TASK.test(cid)) return { ok: false, message: `"${cid.slice(0, 40)}" isn't a contract task id Rook can read: it should be the short id from the contract's task_created event, like 12.` };
   if (!markFundingRefunded(id, owner, cid, txOf(input?.refund_tx))) return { ok: true };
   return act(async () => {
     const { task, ledger } = await getTask(id, owner);

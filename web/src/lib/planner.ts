@@ -1,11 +1,13 @@
 // What the planner reports, in plain words for the page: why a draft failed, and why Rook does a part itself. Pure
 // functions, so the tests use them too. Run: npx tsx --test test/*.test.ts (from web/)
+import { detail } from '@/lib/errors';
 import { usdc } from '@/lib/funding';
 import type { PlanView } from '@/lib/server/orchestrator';
 
 /**
  * Why Rook couldn't draft a plan. The orchestrator stores the planner's failures as "planner: <error>"
- * (services/src/orchestrator/index.ts): internal text, so it is put in plain words here, with a plain fallback. Any
+ * (services/src/orchestrator/index.ts): internal text, so it is put in plain words here; a failure with no plainer
+ * words is shown as the planner gave it (errors.ts detail), so the page still names the problem. Any
  * other error is a sentence Rook wrote for the user (the planner's answer to a message that isn't a task), shown as is.
  */
 export function plannerReason(error: string): string {
@@ -25,10 +27,10 @@ export function plannerReason(error: string): string {
   if (/^market gateway \w+ failed/.test(why)) return 'The NEAR AI market could not be reached. Try again in a minute.';
   // The planner itself: down, or gone before it answered.
   if (/^(fetch failed|terminated|other side closed|planner ended without a plan|planner answered HTTP 5)|ECONNREFUSED|ECONNRESET/.test(why)) {
-    return "Rook's planner could not be reached. Try again in a minute.";
+    return "Rook's planner service didn't answer (it is stopped, restarting or crashed while planning). Try again in a minute.";
   }
   if (olderNotATask(why)) return why;
-  return "Rook's planner hit a problem. Try again in a moment.";
+  return `Rook's planner hit an error it doesn't explain further: ${detail(why)}. Try again in a moment.`;
 }
 
 /**

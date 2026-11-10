@@ -1,6 +1,8 @@
 // Plain words for the run's activity lines: why Rook skipped an agent, and what Rook's own error events mean. The
 // services word these for logs and the CLI (runner.ts); the page shows these sentences and keeps the raw text as a
 // tooltip. Also the parts a run delivered. Pure functions, so the page and the tests both use them.
+import { detail } from '@/lib/errors';
+import { plannerReason } from '@/lib/planner';
 import type { SubtaskView } from '@/lib/server/orchestrator';
 
 export type DeliveredPart = { id: string; title: string; agent: string | null; text: string };
@@ -91,27 +93,29 @@ export function problemLine(data: { kind?: string; message?: string; agent_handl
   const note = (text: string): ProblemLine => ({ text, tone: 'muted', label: 'Note' });
   const retry = (text: string): ProblemLine => ({ text, tone: 'muted', label: 'Retrying' });
   const problem = (text: string, ended?: string): ProblemLine => ({ text, tone: 'alert', label: 'Problem', ...(ended ? { ended } : {}) });
+  // What the event says went wrong, after the prefix that names its kind: " (why)", or nothing when it says nothing.
+  const why = (prefix?: RegExp) => { const d = detail(prefix ? message.replace(prefix, '') : message); return d ? ` (${d})` : ''; };
   switch (kind) {
     case 'eval_retry': return retry(`Checking ${it} didn't go through, so Rook is trying again.`);
     case 'close_retry': return retry("Sending the unspent USDC back didn't go through yet, so Rook is trying again.");
     case 'return': return retry(`Returning the unspent USDC from ${it} didn't go through yet; Rook tries again before it closes the budget.`);
     case 'payment_lookup': return note(`The payment to ${who ?? 'the agent'} went through; its transaction link isn't available yet.`);
-    case 'receipt': return note(`Rook couldn't record ${who ? `${who}'s` : 'a'} receipt on NEAR, so it's kept in Rook's own records.`);
+    case 'receipt': return note(`Rook couldn't record ${who ? `${who}'s` : 'a'} receipt on NEAR${why(/^receipt on chain: /)}, so it's kept in Rook's own records.`);
     case 'paid_anyway': return note(who ? `${who}'s payment went through after all, so it counts as spent.` : 'A payment Rook made before it restarted went through, so it counts as spent.');
     case 'unpaid': return null; // the receipt line says it: delivered, nothing paid
     case 'aggregate': return note("Rook couldn't write the report itself, so the report puts the deliverables together as they are.");
     case 'restore_note': return note("Rook restarted and found its records differ from the contract's, so it goes by the contract.");
-    case 'abandoned': return problem(`Rook couldn't finish ${it} because of a problem on its side.`, hired);
-    case 'unchecked': return problem(`Rook couldn't check ${who ? `${who}'s` : 'the'} work on ${it}, so that part is left out.`, who ?? hired);
-    case 'close': return problem('Sending the unspent USDC back hit a problem. Rook is still finishing the refund.');
-    case 'unwind': return problem("Rook couldn't send all the unspent USDC back yet. It will try again.");
-    case 'run': return problem("The run stopped because of a problem on Rook's side.");
+    case 'abandoned': return problem(`Rook couldn't finish ${it} because of a problem on its side${why(/^\S+ abandoned: /)}.`, hired);
+    case 'unchecked': return problem(`Rook couldn't check ${who ? `${who}'s` : 'the'} work on ${it}${why(/^evaluation of \S+ failed, subtask abandoned unjudged: /)}, so that part is left out.`, who ?? hired);
+    case 'close': return problem(`Sending the unspent USDC back hit a problem${why()}. Rook is still finishing the refund.`);
+    case 'unwind': return problem(`Rook couldn't send all the unspent USDC back yet${why(/^(salvage|after kill|after restart), /)}. It will try again.`);
+    case 'run': return problem(`The run stopped because of a problem on Rook's side${why()}.`);
     case 'restore': return /left as it is/.test(message)
-      ? problem("Rook restarted and can't pick this task up again on its own. Its USDC stays on the Rook contract until Rook's operator sorts it out.")
-      : problem("Rook restarted and couldn't pick this task up again yet. It keeps trying on its own.");
+      ? problem(`Rook restarted and can't pick this task up again on its own${why()}. Its USDC stays on the Rook contract until Rook's operator sorts it out.`)
+      : problem(`Rook restarted and couldn't pick this task up again yet${why(/^after a restart Rook could not rebuild[^:]*: /)}. It keeps trying on its own.`);
     case 'restart': return problem('Rook restarted during this task, so the run stopped there.');
-    case 'planner': return problem("Rook couldn't draft a plan for this task.");
+    case 'planner': return problem(`Rook couldn't draft a plan for this task: ${plannerReason(message)}`);
     case 'no_plan': return problem(message);
-    default: return problem('Rook hit a problem on its side.');
+    default: return problem(`Rook hit a problem on its side${why()}.`);
   }
 }
