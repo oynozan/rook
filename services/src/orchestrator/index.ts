@@ -180,10 +180,12 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     || (ledger.view(t.id)?.closed === false && (chain === null || chain.contractTaskOf(t.id) !== null));
   /**
    * The task holds money, or may: approved (its funding may be in flight), running, closing, or ended with its books
-   * still open (the refund is on its way, or, in chain mode, books not rebuilt yet after a restart).
+   * still open (the refund is on its way, or, in chain mode, books not rebuilt yet after a restart). In chain mode a
+   * task funded on another contract holds none here, whatever its status says: nothing here can move its money.
    */
   const holdsMoney = (t: Task) => {
-    if (['approved', 'funded', 'running', 'aggregating', 'closing'].includes(t.status) || t.unwinding || t.restoring) return true;
+    if (t.stranded === 'other_contract') return false;
+    if (['approved', 'funded', 'running', 'aggregating', 'closing'].includes(t.status) || t.unwinding || t.restoring || t.stranded) return true;
     if (!chain) return ledger.view(t.id)?.closed === false;
     // Funded here: books not known yet (a restart) count as open. Funded on another contract: nothing here can move it.
     const ours = chain.contractTaskOf(t.id) !== null || (!!t.chain && (!t.chain.contract_id || t.chain.contract_id === config.contractId));
@@ -193,6 +195,8 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
   };
   /** Why a conversation with `t` in it can't be deleted yet, in words the web app shows as they are. */
   const deleteRefusal = (t: Task) => {
+    // Its books can't be rebuilt after a restart, so Rook can't send back what it holds without its operator.
+    if (t.stranded === 'misfit') return "A task in this chat still holds USDC that Rook can't send back by itself, so Rook's operator will. Delete the chat once it is back in your wallet.";
     if (t.status === 'approved' && chain && !isFree(t) && !chain.contractTaskOf(t.id)) return 'A plan in this chat is waiting for its funding. Cancel it on its page first, then delete the chat.';
     if (['approved', 'funded', 'running', 'aggregating'].includes(t.status)) return 'A run in this chat is still under way. Stop it or let it finish, then delete the chat.';
     return 'Rook is still returning the unspent USDC of a task in this chat. Delete the chat once it is back in your wallet.';
@@ -450,13 +454,14 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     /**
      * Deletes the conversation task :id is in (8.9): its tasks leave the owner's list and answer 404 to the owner. They
      * stay stored, with their receipts and books, and a caller naming no owner (the CLI) still sees them. Refused while
-     * any of them holds or may hold money; a plan waiting for approval is cancelled, a draft's planning stopped.
+     * any of them holds or may hold money, naming it (`details.task_id`) so the web app links its page; a plan waiting
+     * for approval is cancelled, a draft's planning stopped.
      */
     'POST /conversations/:id/delete': ({ params, body }) => {
       const t = owned(params.id, body?.owner);
       const all = conversationTasks(t, tasks.values()).filter((x) => x.owner === t.owner);
       const busy = all.find(holdsMoney);
-      if (busy) throw new HttpError(409, deleteRefusal(busy));
+      if (busy) throw new HttpError(409, deleteRefusal(busy), { task_id: busy.id });
       const at = new Date().toISOString();
       for (const x of all) {
         if (x.status === 'draft') kill(ledger, x);

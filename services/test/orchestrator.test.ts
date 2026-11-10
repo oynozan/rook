@@ -713,7 +713,10 @@ test('deleting a conversation leaves all its tasks out for their owner, refused 
   const root2 = await send({ prompt: 'Holders', supersedes: root.id });
   await approve(root2.id);
   await until(async () => (await snap(root2.id)).subtasks[0].status === 'working');
-  await assert.rejects(del(root2.id), refusedWith(409, 'A run in this chat is still under way. Stop it or let it finish, then delete the chat.'));
+  // Asked from any of its tasks, the refusal names the one that holds the money, for the web app to link.
+  const running = (e: any) => refusedWith(409, 'A run in this chat is still under way. Stop it or let it finish, then delete the chat.')(e) && e.body?.details?.task_id === root2.id;
+  await assert.rejects(del(root2.id), running);
+  await assert.rejects(del(root.id), running);
   await call(`${orch.url}/tasks/${root2.id}/kill`, { owner: 'hal.near' });
   const stopped = await until(async () => { const x = await snap(root2.id); return x.ledger?.closed ? x : false; });
 

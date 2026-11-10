@@ -526,7 +526,10 @@ test('orchestrator, ROOK_LEDGER=chain: approve gives funding instructions, /fund
   // Approved and not funded: no run has started, so a message after it is told to fund or cancel it, not to wait for a run.
   await refused(call(`${orch.url}/tasks`, { prompt: 'more', budget_usdc: '1', owner: 'alice.near', parent_id: alice.id }), /^Fund or cancel the plan above before sending more\.$/);
   // Its transfer may be on its way, so its chat can't be deleted, nor its message edited, until the plan is cancelled.
-  await refused(call(`${orch.url}/conversations/${alice.id}/delete`, { owner: 'alice.near' }), /^A plan in this chat is waiting for its funding\. Cancel it on its page first, then delete the chat\.$/);
+  // The refusal names the task, whose page the web app links.
+  const waiting = call(`${orch.url}/conversations/${alice.id}/delete`, { owner: 'alice.near' });
+  await refused(waiting, /^A plan in this chat is waiting for its funding\. Cancel it on its page first, then delete the chat\.$/);
+  assert.deepEqual(await waiting.catch((e) => e.body.details), { task_id: alice.id });
   await refused(call(`${orch.url}/tasks`, { prompt: 'p4', budget_usdc: '1', owner: 'alice.near', supersedes: alice.id }), /plan was approved/);
   const both = await Promise.allSettled([1, 2].map(() => call(`${orch.url}/tasks/${t.id}/funded`, { contract_task_id: 'ok' })));
   assert.deepEqual(both.map((x) => x.status).sort(), ['fulfilled', 'rejected']); // overlapping /funded: one binds and runs

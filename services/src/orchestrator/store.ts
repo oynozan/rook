@@ -55,8 +55,12 @@ export type Task = {
   // Chain mode, after a restart: rebuilding its books from contract task `chain.contract_task_id` failed and is being
   // tried again, so it is not bound yet, though that contract task still holds its money.
   restoring?: boolean;
+  // Chain mode, after a restart: its books can't be rebuilt here, and every try would fail the same way. Its money was
+  // funded on another contract (`other_contract`: a Rook that runs that one moves it, never this one), or its contract
+  // task's numbers don't fit Rook's books (`misfit`: it waits for Rook's operator, on this contract).
+  stranded?: 'other_contract' | 'misfit';
 };
-type Runtime = 'listeners' | 'abort' | 'inflight' | 'allow' | 'running' | 'unwinding' | 'salvaging' | 'shutdown' | 'restoring';
+type Runtime = 'listeners' | 'abort' | 'inflight' | 'allow' | 'running' | 'unwinding' | 'salvaging' | 'shutdown' | 'restoring' | 'stranded';
 /** A task without its runtime parts: what SQLite stores. Tasks stored before conversations have no parent_id. */
 export type TaskDoc = Omit<Task, Runtime | 'parent_id'> & { parent_id?: string | null };
 
@@ -73,7 +77,7 @@ export const saveTask = (t: Task) => persist?.(t);
 
 /** The task without its runtime parts, ready to store. */
 export function toDoc(t: Task): TaskDoc {
-  const { listeners: _l, abort: _a, inflight: _i, allow: _w, running: _r, unwinding: _u, salvaging: _s, shutdown: _d, restoring: _o, ...doc } = t;
+  const { listeners: _l, abort: _a, inflight: _i, allow: _w, running: _r, unwinding: _u, salvaging: _s, shutdown: _d, restoring: _o, stranded: _x, ...doc } = t;
   return doc;
 }
 

@@ -380,7 +380,7 @@ async function rebuild(ledger: ChainLedger, t: Task, said: { last: string }): Pr
   } catch (e) {
     const other = e instanceof OtherContract, misfit = e instanceof Unrebuildable;
     // Never bound here, so nothing of it moves: cleared before the event, which then ends its stream.
-    if (other || misfit) t.restoring = false;
+    if (other || misfit) Object.assign(t, { restoring: false, stranded: other ? 'other_contract' : 'misfit' });
     const next = other ? 'It is left as it is, for a Rook that runs that contract.'
       : misfit ? "Every try would fail the same way, so it is left as it is for Rook's operator."
       : 'Rook tries again, waiting longer each time.';

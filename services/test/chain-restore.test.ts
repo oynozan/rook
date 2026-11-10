@@ -913,3 +913,70 @@ test('a kill whose close keeps failing for a while: the unwind tries again until
     assert.match(errs[0].data.message, /^after kill, closeTask: /);
   } finally { await orch.close(); failing.clear(); }
 });
+
+// ---- deleting a chat while its money is on chain ----
+
+const del = (orch: Running, id: string) => call(`${orch.url}/conversations/${id}/delete`, {});
+/** The delete was refused in words matching `re`, naming task `id` for the web app to link. */
+const heldBy = (id: string, re: RegExp) => (e: any) => e.status === 409 && re.test(e.message) && e.body?.details?.task_id === id;
+const RETURNING = /^Rook is still returning the unspent USDC of a task in this chat\. Delete the chat once it is back in your wallet\.$/;
+
+test('a chat is not deleted while a task of it unwinds after a kill, or closes with its report written, until its books close', async () => {
+  process.env.ROOK_DB = join(dir, 'delete-held.sqlite');
+  const orch = await start(0);
+  try {
+    // Stopped, its close failing for a while: the unwind keeps trying, and the chat waits for the money to come back.
+    const killed = await fundedAndWorking(orch, 'alpha', 'dk');
+    failing.set('close', 5);
+    await call(`${orch.url}/tasks/${killed}/kill`, {});
+    await assert.rejects(del(orch, killed), heldBy(killed, RETURNING));
+    await until(async () => (await snap(orch, killed)).ledger?.closed);
+    assert.deepEqual((await del(orch, killed)).deleted, [killed]);
+
+    // The report is written and the close keeps failing: the run has finished and takes a follow-up, but its refund is
+    // still on its way, so the chat is refused from any of its tasks, naming the one whose books are open.
+    const done = await fundedAndWorking(orch, 'alpha', 'dc');
+    failing.set('close', 99);
+    await deliverAndPay(orch, done, 'dc');
+    await until(async () => { const x = await snap(orch, done); return x.task.status === 'closing' && x.final_result; });
+    const follow = await call(`${orch.url}/tasks`, { prompt: 'beta', budget_usdc: '1', parent_id: done });
+    await assert.rejects(del(orch, follow.id), heldBy(done, RETURNING));
+    const kept = (await snap(orch, follow.id)).task;
+    assert.deepEqual([kept.status, kept.deleted_at], ['planned', null]); // refused as a whole: nothing of it changed
+    failing.set('close', 0);
+    await until(async () => (await snap(orch, done)).ledger?.closed);
+    assert.deepEqual((await del(orch, follow.id)).deleted.sort(), [done, follow.id].sort());
+    assert.deepEqual([(await snap(orch, done)).task.status, (await snap(orch, follow.id)).task.status], ['closed', 'cancelled']);
+  } finally { await orch.close(); failing.clear(); }
+});
+
+test('after a restart a chat waits while its books are rebuilt, and says so in its own words when they never can be; a task of another contract does not hold it', async () => {
+  // Its rebuild from the contract keeps failing: the money is on the contract, Rook's books for it are not back yet.
+  process.env.ROOK_DB = join(dir, 'delete-restoring.sqlite');
+  openContractTask('dr', ['300000']);
+  contract.get('dr')!.subs.push(fundedSub('dr', 1, '300000'));
+  bal.set(acct('dr', 1), 300_000n);
+  storeTask('t_del_restoring', 'killed', 'dr', { cap_atomic: '300000' }, {}, '300000', { contract_id: 'rook.test', network: 'testnet' });
+  failing.set('task', 999);
+  let orch = await start(0);
+  try {
+    await assert.rejects(del(orch, 't_del_restoring'), heldBy('t_del_restoring', RETURNING));
+  } finally { await orch.close(); failing.clear(); }
+
+  // Never rebuilt here. Funded on another contract: only a Rook that runs that one moves its money, so whatever its
+  // status says it holds the chat no longer. Numbers that don't fit Rook's books: the money waits for Rook's operator,
+  // which the refusal says, never that a run is under way or the USDC on its way back.
+  process.env.ROOK_DB = join(dir, 'delete-stranded.sqlite');
+  storeTask('t_del_other', 'running', 'k', { cap_atomic: '100000' }, {}, '100000', { contract_id: 'rook.old', network: 'testnet' });
+  openContractTask('dm', ['300000']);
+  contract.get('dm')!.subs.push({ ...fundedSub('dm', 1, '300000'), topped_up: '300000' });
+  bal.set(acct('dm', 1), 600_000n);
+  storeTask('t_del_misfit', 'running', 'dm', { cap_atomic: '300000' }, {}, '600000', { contract_id: 'rook.test', network: 'testnet' });
+  orch = await start(0);
+  try {
+    assert.deepEqual((await del(orch, 't_del_other')).deleted, ['t_del_other']);
+    await assert.rejects(del(orch, 't_del_misfit'),
+      heldBy('t_del_misfit', /^A task in this chat still holds USDC that Rook can't send back by itself, so Rook's operator will\. Delete the chat once it is back in your wallet\.$/));
+    assert.equal((await snap(orch, 't_del_misfit')).task.deleted_at, null);
+  } finally { await orch.close(); }
+});
