@@ -71,7 +71,7 @@ export function draftRefusal(message: string): { prompt?: string; budget?: strin
  * shows above), or isn't this account's. Null for any other refusal.
  */
 export function followUpRefusal(status: number, message: string): string | null {
-  if (status === 409 && /^This conversation has a newer message/.test(message)) return 'This conversation has a newer message, now shown above. Send again to add yours after it.';
+  if (status === 409 && /^This conversation has a newer message/.test(message)) return 'This conversation has a newer message, now shown above. Send your message after it.';
   if (status === 409 && /^(Wait for |Fund or cancel )/.test(message)) return message;
   if (status === 404 && /^no task /.test(message)) return "Rook has no task at this link for the wallet you're signed in with.";
   return null;

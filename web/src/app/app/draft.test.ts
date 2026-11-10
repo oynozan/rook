@@ -60,7 +60,7 @@ test('followUpRefusal: a message the orchestrator refuses because of the task it
     'Fund or cancel the plan above before sending more.']) assert.equal(followUpRefusal(409, m), m);
   // The page's list was out of date: the action brings it up to date, and the typed text stays for another send.
   assert.equal(followUpRefusal(409, 'This conversation has a newer message: send after the newest one.'),
-    'This conversation has a newer message, now shown above. Send again to add yours after it.');
+    'This conversation has a newer message, now shown above. Send your message after it.');
   assert.equal(followUpRefusal(404, 'no task t_1234abcd'), "Rook has no task at this link for the wallet you're signed in with.");
   assert.equal(followUpRefusal(409, 'task t_1 has another owner: a follow-up keeps its owner'), null); // the web always sends the owner
   assert.equal(followUpRefusal(400, 'Wait for it'), null);
