@@ -128,11 +128,12 @@ export function start(port = config.ports.planner): Promise<Running> {
       res.end();
       return undefined;
     },
+    // `files`: an edit's inputs, whole. `sources`: the pages Rook's model read or cited (also listed after the text).
     'POST /self-do': async ({ body }) => {
       const req = SelfDoRequest.parse(body);
       const calls: LlmCall[] = [];
-      const { text } = await llmStep(calls, () => selfDo(req.brief, req.criteria));
-      return { text, llm_calls: calls };
+      const { text, sources } = await llmStep(calls, () => selfDo(req.brief, req.criteria, req.files));
+      return { text, sources, llm_calls: calls };
     },
     'POST /aggregate': async ({ body }): Promise<AggregateResult> => {
       const req = AggregateRequest.parse(body);

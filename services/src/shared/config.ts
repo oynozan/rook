@@ -45,7 +45,8 @@ export const config = {
   get planEffort() { const e = env('ROOK_PLAN_EFFORT', 'low'); return (['low', 'medium', 'high'].includes(e) ? e : 'low') as 'low' | 'medium' | 'high'; },
   get evaluatorModel() { return env('EVALUATOR_MODEL', 'deepseek-ai/DeepSeek-V4.1-Flash-1017'); },
   get simAgentModel() { return env('SIM_AGENT_MODEL', 'anthropic/claude-haiku-5-5'); },
-  get llmMaxUsd() { return num('ROOK_LLM_MAX_USD', 1); },
+  // USD per process in any 24 h. At 1, a few QA plans in parallel (about 0.024 USD each) refused everyone's planning.
+  get llmMaxUsd() { return num('ROOK_LLM_MAX_USD', 10); },
 
   ports: {
     get orchestrator() { return port('ORCHESTRATOR', 7100); },
