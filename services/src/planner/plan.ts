@@ -74,10 +74,16 @@ export function filterSearch(resultLists: AgentSummary[][]): AgentSummary[] {
   return [...byHandle.values()];
 }
 
-/** Step 3 output hygiene: keep only handles that were in that subtask's search results, at most 3. */
+/**
+ * Step 3 output hygiene: keep only handles that were in that subtask's search results, at most MAX_PICKS. Five, not
+ * three: the best-described agents are often unpayable (a 14-day payment window, a 6 USDC price for a 3 USDC task),
+ * and with three picks the cheap generalist behind them was never quoted, so the part fell to Rook. Quotes are free;
+ * buildPlan drops whatever the budget cannot pay.
+ */
+export const MAX_PICKS = 5;
 export function applySelection(results: AgentSummary[], handles: string[]): AgentSummary[] {
   const picked = [...new Set(handles)].map((h) => results.find((a) => a.handle === h)).filter((a): a is AgentSummary => !!a);
-  return picked.slice(0, 3);
+  return picked.slice(0, MAX_PICKS);
 }
 
 export type PlanInput = {

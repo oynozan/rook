@@ -15,7 +15,7 @@ export type PlanProgress =
   | { stage: 'searching'; subtasks: { index: number; title: string }[] }
   | { stage: 'found'; index: number; title: string; agents: { handle: string; name: string }[] }
   | { stage: 'quoting'; agents: number };
-const FOUND_SHOWN = 8; // agents reported per subtask; the search can return more, the plan keeps at most 3
+const FOUND_SHOWN = 8; // agents reported per subtask; the search can return more, the plan keeps at most 5
 
 async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {}): Promise<Plan> {
   const req = PlanRequest.parse(body);
@@ -32,7 +32,8 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
   // before the market is searched; the orchestrator checks it again. One the model read into a message that names no
   // such total is its mistake: the plan is made at the budget sent.
   const named = drafted !== undefined && budgetBacked(req.prompt, drafted) ? drafted : undefined;
-  const ignored = drafted !== undefined && named === undefined
+  // The budget sent, echoed back by the draft, is no mistake worth a note.
+  const ignored = drafted !== undefined && named === undefined && drafted !== sent
     ? [`the draft set a budget of ${formatUsdc(drafted)} USDC, but the message names no such budget: planned at the budget sent`] : [];
   const problem = named === undefined ? null : namedBudgetProblem(named, BigInt(req.min_budget_atomic ?? '0'), config.maxBudgetAtomic);
   if (problem) throw new HttpError(422, problem, { llm_calls: calls });
