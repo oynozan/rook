@@ -7,6 +7,7 @@ import { lookup } from 'node:dns/promises';
 import http from 'node:http';
 import https from 'node:https';
 import { BlockList, isIP } from 'node:net';
+import { domainToUnicode } from 'node:url';
 import { pipeline, type Readable } from 'node:stream';
 import zlib from 'node:zlib';
 import { config } from '../shared/config.ts';
@@ -17,6 +18,7 @@ const TIMEOUT_MS = 8000; // for one page, its redirects included
 const MAX_BYTES = 500_000; // of the page as decoded; a larger one is not read
 const MAX_REDIRECTS = 3;
 const TEXT_CHARS = 4000; // of visible text per page shown to the draft
+const EXTRACT_CHARS = 150_000; // of the page extraction reads: the title, styles and top of a page are well inside it
 export const REFERENCE_TAG = 'reference_page';
 
 export type ReferencePage = { url: string; title: string; description: string; headings: string[]; fonts: string[]; colors: string[]; text: string };
@@ -43,7 +45,9 @@ export class Refused extends Error {}
 const FILE_ENDINGS = new Set(['js', 'ts', 'tsx', 'jsx', 'mjs', 'cjs', 'md', 'py', 'json', 'html', 'htm', 'txt', 'pdf', 'png', 'jpg', 'jpeg',
   'gif', 'svg', 'webp', 'csv', 'sol', 'rs', 'go', 'sh', 'yml', 'yaml', 'toml', 'css', 'scss', 'exe', 'zip', 'rb', 'java', 'kt', 'cpp',
   'lock', 'log', 'env', 'xml', 'sql', 'ipynb', 'docx', 'xlsx', 'pptx', 'mp3', 'mp4', 'wasm']);
-const URL_RE = /\bhttps?:\/\/[^\s<>"'`]+|(?<![@\w./:-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+([a-z]{2,24})(?![\w-])(?:\/[^\s<>"'`]*)?/gi;
+// Labels take any letter, number or mark: with ASCII ones only, "güzelsite.com" matched from after the ü and named
+// zelsite.com, another real domain. new URL() turns the whole name into its punycode form.
+const URL_RE = /\bhttps?:\/\/[^\s<>"'`]+|(?<![@\p{L}\p{N}\p{M}_./:-])(?:[\p{L}\p{N}](?:[\p{L}\p{N}\p{M}-]{0,61}[\p{L}\p{N}\p{M}])?\.)+([a-z]{2,24})(?![\p{L}\p{N}\p{M}_-])(?:\/[^\s<>"'`]*)?/giu;
 
 /** The pages the texts name (URLs or bare domains, first text first), at most MAX_REFERENCES, as https URLs. */
 export function findUrls(texts: string[]): string[] {
@@ -201,10 +205,50 @@ const decode = (s: string) => s.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e: 
   try { return String.fromCodePoint(e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : Number(e.slice(1))); } catch { return ''; }
 });
 const flat = (s: string, n: number) => s.replace(/\s+/g, ' ').trim().slice(0, n);
-const textOf = (html: string) => decode(html.replace(/<[^>]*>/g, ' '));
+
+// The page is untrusted, so every pattern below runs in linear time. A pattern that rescans to the end from each
+// place it could start is quadratic: 500 KB of "<!--" held the planner's only thread for 87 s. So no tag pattern
+// runs past the last ">" (where every match ends), comments and elements are found with forward scans, and an
+// attribute name is tried only where a name starts.
+const upToLastTagEnd = (html: string) => html.slice(0, html.lastIndexOf('>') + 1);
+const textOf = (html: string) => { const head = upToLastTagEnd(html); return decode(head.replace(/<[^>]*>/g, ' ') + html.slice(head.length)); };
 function attrs(tag: string): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const m of tag.matchAll(/([^\s"'<>\/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g)) out[m[1].toLowerCase()] ??= decode(m[2] ?? m[3] ?? m[4] ?? '');
+  for (const m of tag.matchAll(/(?<![^\s"'<>\/=])([^\s"'<>\/=]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+))/g)) out[m[1].toLowerCase()] ??= decode(m[2] ?? m[3] ?? m[4] ?? '');
+  return out;
+}
+/** The page with each comment as a space. An unclosed comment hides the rest, as in a browser. */
+function uncomment(html: string): string {
+  let out = '', i = 0;
+  for (let s; (s = html.indexOf('<!--', i)) >= 0;) {
+    out += html.slice(i, s) + ' ';
+    const e = html.indexOf('-->', s + 4);
+    if (e < 0) return out;
+    i = e + 3;
+  }
+  return out + html.slice(i);
+}
+type Element = { start: number; end: number; inner: string };
+/**
+ * Each <name ...>inner</name> of one of `names`, left to right, as /<(names)\b[^>]*>([\s\S]*?)<\/\1\s*>/gi matches
+ * (without the `[^>]*>` when `tagEnd` is false), in linear time: a name whose closing tag never comes is dropped
+ * from the search, so no later opening tag rescans to the end for it.
+ */
+function elements(html: string, names: string[], tagEnd = true): Element[] {
+  const src = upToLastTagEnd(html), out: Element[] = [];
+  let left = names, at = 0;
+  while (left.length) {
+    const open = new RegExp(`<(${left.join('|')})\\b${tagEnd ? '[^>]*>' : ''}`, 'gi');
+    open.lastIndex = at;
+    const m = open.exec(src);
+    if (!m) break;
+    const name = m[1].toLowerCase(), close = new RegExp(`<\\/${name}\\s*>`, 'gi');
+    close.lastIndex = open.lastIndex;
+    const c = close.exec(src);
+    if (!c) { left = left.filter((n) => n !== name); at = m.index + 1; continue; }
+    out.push({ start: m.index, end: close.lastIndex, inner: src.slice(open.lastIndex, c.index) });
+    at = close.lastIndex;
+  }
   return out;
 }
 const GENERIC_FONTS = /^(serif|sans-serif|monospace|cursive|fantasy|system-ui|inherit|initial|unset|revert|-apple-system|blinkmacsystemfont|ui-[\w-]+|emoji|math)$/i;
@@ -212,19 +256,21 @@ const COLOR_RE = /#(?:[0-9a-f]{8}|[0-9a-f]{6}|[0-9a-f]{3,4})\b|(?:rgba?|hsla?|ok
 
 /** Title, description, headings, cheap style hints and visible text of a page, each flattened and capped. */
 export function extract(url: string, html: string): ReferencePage {
-  const src = html.replace(/<!--[\s\S]*?-->/g, ' ');
-  const tags = (name: string) => [...src.matchAll(new RegExp(`<${name}\\b[^>]*>`, 'gi'))].map((m) => attrs(m[0]));
+  const src = uncomment(html.slice(0, EXTRACT_CHARS));
+  const tags = (name: string) => [...upToLastTagEnd(src).matchAll(new RegExp(`<${name}\\b[^>]*>`, 'gi'))].map((m) => attrs(m[0]));
   const metas = tags('meta');
   const meta = (key: string) => metas.find((m) => (m.name ?? m.property ?? '').toLowerCase() === key)?.content ?? '';
-  const css = [...src.matchAll(/<style\b[^>]*>([\s\S]*?)<\/style\s*>/gi)].map((m) => m[1])
+  const css = elements(src, ['style']).map((e) => e.inner)
     .concat([...src.matchAll(/\sstyle\s*=\s*(?:"([^"]*)"|'([^']*)')/gi)].map((m) => decode(m[1] ?? m[2] ?? ''))).join('\n');
-  const body = src.replace(/<(script|style|noscript|template|svg|head)\b[\s\S]*?<\/\1\s*>/gi, ' ');
+  let body = '', from = 0;
+  for (const e of elements(src, ['script', 'style', 'noscript', 'template', 'svg', 'head'], false)) { body += src.slice(from, e.start) + ' '; from = e.end; }
+  body += src.slice(from);
 
-  const headings = [...new Set([...body.matchAll(/<h([1-3])\b[^>]*>([\s\S]*?)<\/h\1\s*>/gi)].map((m) => flat(textOf(m[2]), 120)).filter(Boolean))].slice(0, 12);
+  const headings = [...new Set(elements(body, ['h1', 'h2', 'h3']).map((e) => flat(textOf(e.inner), 120)).filter(Boolean))].slice(0, 12);
 
   // Fonts: Google Fonts families from <link> and @import, then the first family of each CSS font-family.
   const fonts = new Set<string>();
-  const sheets = tags('link').map((l) => l.href ?? '').concat([...css.matchAll(/@import\s+(?:url\()?\s*["']?([^"')\s;]+)/gi)].map((m) => m[1]));
+  const sheets = tags('link').map((l) => l.href ?? '').concat([...css.matchAll(/@import\s+(?:url\(\s*)?["']?([^"')\s;]+)/gi)].map((m) => m[1]));
   for (const href of sheets.filter((h) => /fonts\.googleapis\.com/i.test(h))) {
     try {
       for (const f of new URL(href, 'https://fonts.googleapis.com').searchParams.getAll('family')) for (const name of f.split('|')) fonts.add(flat(name.split(':')[0], 60));
@@ -243,7 +289,7 @@ export function extract(url: string, html: string): ReferencePage {
 
   return {
     url,
-    title: flat(decode(/<title\b[^>]*>([\s\S]*?)<\/title\s*>/i.exec(src)?.[1] ?? '') || meta('og:title'), 200),
+    title: flat(decode(elements(src, ['title'])[0]?.inner ?? '') || meta('og:title'), 200),
     description: flat(meta('description') || meta('og:description'), 400),
     headings, fonts: [...fonts].filter(Boolean).slice(0, 6), colors,
     text: flat(textOf(body), TEXT_CHARS),
@@ -252,8 +298,8 @@ export function extract(url: string, html: string): ReferencePage {
 
 // ---- For the draft ----
 
-/** How a page is named to the user: its host and path, without the scheme or a lone trailing slash. */
-export const shown = (url: string) => url.replace(/^https?:\/\//i, '').replace(/\/$/, '');
+/** How a page is named to the user: its host as written (not punycode) and path, without the scheme or a lone trailing slash. */
+export const shown = (url: string) => url.replace(/^https?:\/\//i, '').replace(/^[^/:?#]+/, (h) => domainToUnicode(h) || h).replace(/\/$/, '');
 
 /** Reads the pages the texts name (the prompt first, then earlier messages), in parallel, with a plan note per page. */
 export async function readReferences(texts: string[]): Promise<References> {
