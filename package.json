@@ -9,7 +9,7 @@
     "live": "pnpm --filter @rook/services dev --live",
     "web": "pnpm --filter @rook/web dev",
     "rook": "pnpm --filter @rook/services --silent rook",
-    "test": "pnpm --filter @rook/services test",
+    "test": "pnpm --filter @rook/services test && pnpm --filter @rook/web test",
     "typecheck": "pnpm --filter @rook/services typecheck"
   }
 }

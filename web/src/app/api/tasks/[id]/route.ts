@@ -1,7 +1,7 @@
-import { fundingSent } from '@/app/app/db';
-import { currentAccount } from '@/app/app/session';
-import { getTask, OrchestratorDown, OrchestratorError } from '@/app/app/orchestrator';
-import { chatDeleted } from '@/app/app/refusals';
+import { fundingSent } from '@/lib/server/db';
+import { currentAccount } from '@/lib/server/session';
+import { getTask, OrchestratorDown, OrchestratorError } from '@/lib/server/orchestrator';
+import { chatDeleted } from '@/lib/refusals';
 
 /** One task, only for the account that owns it. Anyone else gets 404, as if it didn't exist. */
 export async function GET(_: Request, { params }: { params: Promise<{ id: string }> }) {

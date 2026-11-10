@@ -1,4 +1,4 @@
-import { verifySignIn } from '@/app/app/session';
+import { verifySignIn } from '@/lib/server/session';
 
 /** Step 2 of sign-in: the wallet's NEP-413 signature. On success a session cookie is set. */
 export async function POST(req: Request) {

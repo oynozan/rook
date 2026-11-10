@@ -1,5 +1,5 @@
-import { currentAccount } from '@/app/app/session';
-import { eventsUrl, getTask, OrchestratorError, serviceHeaders } from '@/app/app/orchestrator';
+import { currentAccount } from '@/lib/server/session';
+import { eventsUrl, getTask, OrchestratorError, serviceHeaders } from '@/lib/server/orchestrator';
 
 /** Passes the orchestrator's event stream through for the task's owner, resuming from Last-Event-ID on reconnect. */
 export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {

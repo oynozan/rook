@@ -1,4 +1,4 @@
-import { currentAccount, signOut } from '@/app/app/session';
+import { currentAccount, signOut } from '@/lib/server/session';
 
 /** Who is signed in, if anyone. */
 export async function GET() {

@@ -1,4 +1,4 @@
-import { issueChallenge } from '@/app/app/session';
+import { issueChallenge } from '@/lib/server/session';
 
 /** Step 1 of sign-in: a one-time nonce for the wallet to sign. */
 export async function POST() {

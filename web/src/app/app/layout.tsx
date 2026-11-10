@@ -1,10 +1,10 @@
 import type { ReactNode } from 'react';
-import { AppShell } from './AppShell';
-import { Chat } from './Chat';
-import { ModeProvider } from './mode';
-import { getMode, listTasks } from './orchestrator';
-import { currentAccount } from './session';
-import { WalletProvider } from './wallet';
+import { AppShell } from '@/components/app/AppShell';
+import { Chat } from '@/components/app/Chat';
+import { ModeProvider } from '@/hooks/mode';
+import { getMode, listTasks } from '@/lib/server/orchestrator';
+import { currentAccount } from '@/lib/server/session';
+import { WalletProvider } from '@/hooks/wallet';
 
 export const dynamic = 'force-dynamic';
 
