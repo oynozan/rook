@@ -267,7 +267,7 @@ test('a follow-up reads only the pages the latest message names; a revision with
   t.after(() => useReferenceSeam(null));
   const { url } = await plannerWithGateway(t);
   const base = { task_id: 't', budget_atomic: '3000000', reserve_share: 0.2 };
-  const notes = async (prompt: string, conversation: Conversation) => (await call(`${url}/plan`, { ...base, prompt, conversation })).notes.filter((n: string) => n.startsWith('Rook could not open')).map((n: string) => n.split(':')[0]);
+  const notes = async (prompt: string, conversation: Conversation) => (await call(`${url}/plan`, { ...base, prompt, conversation })).notes.filter((n: string) => n.startsWith('Rook could not open')).map((n: string) => n.split(/[:,]/)[0]); // the host, whatever the note adds ("..., the page you named as a model")
   const earlier = ['make me a portfolio like oldsite.test'];
   // QA: a rename re-read oynozan.com from the first message, and one replay cloned it.
   assert.deepEqual(await notes('change the name to Ozan Andaç', { earlier, revising: false, files: [{ path: 'index.html', text: PAGE }] }), []);

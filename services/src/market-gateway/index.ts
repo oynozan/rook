@@ -84,7 +84,47 @@ export function normTask(t: any): A2ATask {
   };
 }
 
-function summary(x: any): AgentSummary {
+/**
+ * What else a market listing says about an agent, when its row carries it: `bio` (bio_markdown, as plain text), the
+ * `inputs` it takes and the `outputs` it returns (its input_schema and output_schema, one line each), and its median
+ * `response_s`. The select step reads the first three: a description alone made a blog writer fit a logo and a stills
+ * slideshow fit a motion-graphics video. The ranking reads `response_s`. All of it is the owner's untrusted text, flat
+ * and capped here; a row without them (the simulator's) leaves them out.
+ */
+export type ListingDetail = { bio?: string; inputs?: string; outputs?: string; response_s?: number };
+export type AgentListing = AgentSummary & ListingDetail;
+const BIO_CHARS = 1200, SCHEMA_CHARS = 400;
+
+/**
+ * Markdown as one line of plain text: no headings, emphasis, tables, quotes or link targets. The text is cut before the
+ * patterns run, so a crafted bio of a million "[" costs no more than a long one.
+ */
+const plain = (s: string, n: number) => s.slice(0, n * 3)
+  .replace(/```[^\n]*\n?/g, ' ').replace(/!?\[([^\]\n]{0,200})\]\([^)\s]{0,500}\)/g, '$1').replace(/^[ \t]{0,3}(#{1,6}|>|[-*+]|\d+\.)[ \t]+/gm, '')
+  .replace(/[*_`|]+|-{3,}/g, ' ').replace(/\s+/g, ' ').trim().slice(0, n);
+
+/**
+ * A JSON Schema's top-level fields as "brief (required): What to make. · count (integer): 1-8 images", or ''. Tolerant:
+ * a schema sent as JSON text is parsed, and anything that is not an object with `properties` says nothing.
+ */
+function fields(schema: unknown, n: number): string {
+  let s: any = schema;
+  if (typeof s === 'string') { try { s = JSON.parse(s); } catch { return ''; } }
+  const props = s && typeof s === 'object' && !Array.isArray(s) && s.properties && typeof s.properties === 'object' ? s.properties : null;
+  if (!props) return '';
+  const required = new Set(Array.isArray(s.required) ? s.required.map(String) : []);
+  const line = Object.entries(props).slice(0, 15).map(([k, v]: [string, any]) => {
+    const kind = [required.has(k) && 'required', typeof v?.type === 'string' && v.type !== 'string' && v.type].filter(Boolean).join(', ');
+    const what = typeof v?.description === 'string' ? `: ${v.description}` : Array.isArray(v?.enum) ? `: one of ${v.enum.slice(0, 8).join(', ')}` : '';
+    return `${k}${kind ? ` (${kind})` : ''}${what}`;
+  }).join(' · ');
+  return plain(line, n);
+}
+
+function summary(x: any): AgentListing {
+  const bio = typeof x.bio_markdown === 'string' ? plain(x.bio_markdown, BIO_CHARS) : typeof x.bio === 'string' ? plain(x.bio, BIO_CHARS) : '';
+  const inputs = fields(x.input_schema, SCHEMA_CHARS), outputs = fields(x.output_schema, SCHEMA_CHARS);
+  const response = Number(x.response_time_seconds_median);
   return {
     handle: String(x.handle ?? ''),
     name: String(x.name ?? x.handle ?? ''),
@@ -98,6 +138,9 @@ function summary(x: any): AgentSummary {
     sla_seconds: Number(x.sla_seconds) || 600,
     success_rate: typeof x.success_rate === 'number' ? x.success_rate : null,
     delivered_jobs: Number(x.delivered_jobs ?? 0) || 0,
+    ...(bio ? { bio } : {}), ...(inputs ? { inputs } : {}), ...(outputs ? { outputs } : {}),
+    // A median of 0 or less is no measurement (a listing with no jobs yet).
+    ...(x.response_time_seconds_median != null && Number.isFinite(response) && response > 0 ? { response_s: response } : {}),
   };
 }
 
@@ -158,7 +201,7 @@ export async function start(port = config.ports.marketGateway): Promise<Running>
       const filter = category ? `&category=${category}` : '';
       // A bare category listing is read whole (up to SEARCH_PAGES): the planner picks from it by fit, not by its order.
       const want = category && !query.get('q') ? Infinity : SEARCH_WANT;
-      const agents: AgentSummary[] = [], seen = new Set<string>();
+      const agents: AgentListing[] = [], seen = new Set<string>();
       for (let page = 0; page < SEARCH_PAGES && agents.length < want; page++) {
         let r: Reply | undefined, err = '';
         try { r = await out(`${endpoints().search}?q=${q}${filter}&limit=${SEARCH_PAGE}&offset=${page * SEARCH_PAGE}`); } catch (e: any) { err = `market search unreachable: ${e?.message ?? e}`; }

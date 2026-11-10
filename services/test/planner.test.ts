@@ -748,7 +748,7 @@ test('verdictHistory counts recent hires that failed to send or timed out since 
   assert.deepEqual(later, { a: { pass: 1, fail: 0, stalled: 1 } });
 });
 
-test('an agent whose recent hires stalled ranks after the others, cheapest or not, and stays as a fallback', async () => {
+test('an agent with one recent stall ranks after the others, cheapest or not, and stays as a fallback', async () => {
   const plan = (history?: Record<string, { pass: number; fail: number; stalled?: number }>) => buildPlan(input({
     draft: [sub('site')],
     selected: [[agent('dev-tools'), agent('codex'), agent('patchforge')]], // 90% of 10 jobs each
@@ -756,12 +756,12 @@ test('an agent whose recent hires stalled ranks after the others, cheapest or no
     history,
   })).subtasks[0];
   assert.deepEqual(plan().candidates.map((c) => c.handle), ['dev-tools', 'patchforge', 'codex']);
-  const s = plan({ 'dev-tools': { pass: 0, fail: 0, stalled: 2 }, codex: { pass: 1, fail: 0 } });
+  const s = plan({ 'dev-tools': { pass: 0, fail: 0, stalled: 1 }, codex: { pass: 1, fail: 0 } });
   assert.deepEqual(s.candidates.map((c) => c.handle), ['patchforge', 'codex', 'dev-tools']);
-  assert.match(s.candidates[2].rank_reason, /; ranked after the others: 2 recent hires by Rook failed to send or timed out$/);
+  assert.match(s.candidates[2].rank_reason, /; ranked after the others: 1 recent hire by Rook failed to send or timed out$/);
   assert.doesNotMatch(s.candidates[0].rank_reason, /ranked after/);
-  // Only stalled agents: they keep their order by expected cost.
-  const all = plan({ 'dev-tools': { pass: 0, fail: 0, stalled: 1 }, codex: { pass: 0, fail: 0, stalled: 1 }, patchforge: { pass: 0, fail: 0, stalled: 3 } });
+  // Only stalled agents, one stall each: they keep their order by expected cost. 2 or more are dropped (ranking.test.ts).
+  const all = plan({ 'dev-tools': { pass: 0, fail: 0, stalled: 1 }, codex: { pass: 0, fail: 0, stalled: 1 }, patchforge: { pass: 0, fail: 0, stalled: 1 } });
   assert.deepEqual(all.candidates.map((c) => c.handle), ['dev-tools', 'patchforge', 'codex']);
   const { PlanRequest } = await import('../src/shared/types.ts');
   assert.ok(PlanRequest.safeParse({ task_id: 't', prompt: 'p', budget_atomic: '1', reserve_share: 0.2, history: { a: { pass: 0, fail: 0, stalled: 2 } } }).success);
