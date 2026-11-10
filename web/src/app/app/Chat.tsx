@@ -1619,7 +1619,10 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
       id: task, status: 'draft', prompt: prompt.trim(), created_at: new Date().toISOString(), parent_id,
       ...(supersedes ? { supersedes } : {}), ...(b.ok ? { budget_atomic: b.atomic.toString() } : {}),
     }]);
-    go(`/app/${task}`);
+    // Sent again or edited, it takes the old message's place in the same conversation, and so in the history: a new
+    // entry would leave the old message's address behind it, which Back lands on only to be sent forward again.
+    if (supersedes) window.history.replaceState(null, '', `/app/${task}`);
+    else go(`/app/${task}`);
   }
 
   /** The newest message, sent again or edited: the new one takes its place once Rook has it. */
