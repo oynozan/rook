@@ -18,6 +18,12 @@ export const Criterion = z.discriminatedUnion('kind', [
     spec: z.object({ label: z.string().min(1), other_subtask: z.string(), other_label: z.string().min(1), tolerance_pct: z.number().min(0) }),
   }),
   z.object({ ...base, kind: z.literal('llm_judge'), spec: z.object({ question: z.string().min(1) }) }),
+  // A link the delivery gives (on a line "<label>: <url>", default label "Live URL") must load as a public web page,
+  // through the same SSRF-guarded reader as reference pages, and show `must_contain` when set: a deploy is checked, not believed.
+  z.object({ ...base, kind: z.literal('live_url'), spec: z.object({ label: z.string().min(1).optional(), must_contain: z.string().min(1).optional() }) }),
+  // Each path must come back as a whole file (planner/files.ts reads the delivery's files): a project or an edit is
+  // checked file by file, and a file holding a placeholder such as "rest of the code here" fails.
+  z.object({ ...base, kind: z.literal('files'), spec: z.object({ paths: z.array(z.string().min(1)).min(1).max(60) }) }),
 ]);
 export type Criterion = z.infer<typeof Criterion>;
 
@@ -63,14 +69,21 @@ export type Candidate = {
   success_rate: number | null; delivered_jobs: number; price_atomic: string; quote: AcceptsRow;
   p_pass: number; expected_cost_atomic: string; rank_reason: string;
 };
-/** Why a subtask is self_do: no agent could be hired for it, or no agent's price fit what was left of the budget. */
-export type SelfDoReason = 'no_agent' | 'over_budget';
+/**
+ * Why a subtask is self_do: no agent could be hired for it, no agent's price fit what was left of the budget, or it is a
+ * small edit of delivered files Rook makes itself at once (a rename, a colour), with no agent fee and no 30 min wait.
+ */
+export type SelfDoReason = 'no_agent' | 'over_budget' | 'rook_edit';
 export type PlanSubtask = {
   id: string; title: string; brief: string; search_terms: string[];
   criteria: Criterion[]; cap_atomic: string; deadline_s: number; self_do: boolean;
   self_do_reason?: SelfDoReason; // set on every self_do subtask
   self_do_need_atomic?: string; // over_budget only: the cheapest quoted price, what one hire would have cost
   self_do_ok?: boolean; // Rook may write it itself when no hired agent delivers (absent in older plans: it may not)
+  // An edit of delivered work: the conversation's files (by path) this part changes. They are attached to the brief
+  // verbatim when the part is sent (to an agent or to Rook's own writer), never retyped by a model; the part returns
+  // each changed file whole, and the report's files are the conversation's files with the changed ones replaced.
+  inputs?: string[];
   candidates: Candidate[];
 };
 export type Plan = {
@@ -82,6 +95,14 @@ export type Plan = {
    */
   budget: { budget_atomic: string; reserve_atomic: string; reserve_bps?: number; allocatable_atomic: string; allocated_atomic: string; from_message?: boolean };
   notes: string[];
+  /**
+   * Facts only the user can give are missing (their name, projects, prices, contact details, a choice for an action
+   * in the world): Rook asks these, in the user's language, instead of planning, and `subtasks` is empty. The next
+   * message in the chat answers them (Conversation.questions); "use placeholders" is an answer too.
+   */
+  questions?: string[];
+  /** What the plan takes as given or leaves out, in plain words, shown with the plan before any money moves. */
+  assumptions?: string[];
   llm_calls: LlmCall[];
 };
 /**
@@ -94,13 +115,27 @@ export const MAX_HISTORY_HANDLES = 500;
 /** A follow-up's context: at most this many earlier messages (the first one and the latest), and this much of a report. */
 export const CONVERSATION_MESSAGES = 12;
 export const CONVERSATION_REPORT_CHARS = 12_000;
+/** The conversation's current files travel whole, outside the report's limit, up to these sizes. */
+export const CONVERSATION_FILES = 200;
+export const CONVERSATION_FILES_CHARS = 600_000;
 const Earlier = z.array(z.string().min(1)).min(1).max(CONVERSATION_MESSAGES); // each at most MAX_PROMPT_CHARS (the planner checks)
+/** A file of the conversation's current work: the latest version of each path delivered in the chat. */
+export const WorkFile = z.object({ path: z.string().min(1).max(300), text: z.string() });
+export type WorkFile = z.infer<typeof WorkFile>;
 /**
  * The conversation a task's prompt continues (docs/agentic-system.md 5.1). `earlier`: the user's earlier messages, oldest
  * first. `revising`: the prompt changes a plan that has not run, so the whole revised task is planned. `report`: the
- * newest report in the conversation, cut to CONVERSATION_REPORT_CHARS.
+ * newest report in the conversation, cut to CONVERSATION_REPORT_CHARS. `files`: the conversation's current files, whole
+ * (every report's files, later ones replacing earlier ones by path). `questions`: what Rook asked in reply to the newest
+ * earlier message, which the prompt answers. `plan`: the parts of the plan being revised, as the user saw them.
  */
-export const Conversation = z.object({ earlier: Earlier, revising: z.boolean(), report: z.string().min(1).max(CONVERSATION_REPORT_CHARS).optional() });
+export const Conversation = z.object({
+  earlier: Earlier, revising: z.boolean(), report: z.string().min(1).max(CONVERSATION_REPORT_CHARS).optional(),
+  files: z.array(WorkFile).max(CONVERSATION_FILES)
+    .refine((fs) => fs.reduce((n, f) => n + f.text.length, 0) <= CONVERSATION_FILES_CHARS, `files hold more than ${CONVERSATION_FILES_CHARS} characters`).optional(),
+  questions: z.array(z.string().min(1)).max(10).optional(),
+  plan: z.array(z.object({ title: z.string(), brief: z.string() })).max(10).optional(),
+});
 export type Conversation = z.infer<typeof Conversation>;
 export const PlanRequest = z.object({
   task_id: z.string(), prompt: z.string().min(1), budget_atomic: atomic, reserve_share: z.number().min(0).max(0.9),
@@ -113,6 +148,7 @@ export const PlanRequest = z.object({
 });
 export const SelfDoRequest = z.object({
   task_id: z.string(), subtask_id: z.string(), brief: z.string(), criteria: z.array(Criterion),
+  files: z.array(WorkFile).max(CONVERSATION_FILES).optional(), // the part's inputs, whole: an edit starts from them
 });
 export const AggregateRequest = z.object({
   task_id: z.string(), prompt: z.string(),
@@ -122,7 +158,10 @@ export const AggregateRequest = z.object({
     agent_handle: z.string().optional(), deliverable_text: z.string().optional(),
   })),
 });
-/** A code file taken out of a merged delivery as written (5.4): the web app offers it to open or save. */
+/**
+ * A code file taken out of a merged delivery as written (5.4): the web app offers it to open or save. `name` is its
+ * path inside the project ("app/pricing/page.tsx", "postcss.config.mjs"), folders separated by "/", never absolute or "..".
+ */
 export type DeliveredFile = { subtask_id: string; agent_handle: string; name: string; mime: string; text: string };
 export type AggregateResult = {
   final_markdown: string; attribution: { subtask_id: string; agent_handle: string }[];
@@ -152,7 +191,9 @@ export type Evaluation = {
 };
 
 // ---- Orchestrator (section 8) ----
-export type TaskStatus = 'draft' | 'planned' | 'approved' | 'funded' | 'running' | 'aggregating' | 'closing' | 'closed' | 'cancelled' | 'killed' | 'failed';
+// asking: the planner needs facts only the user can give (Plan.questions); nothing is planned or funded, and the next
+// message in the chat answers it.
+export type TaskStatus = 'draft' | 'asking' | 'planned' | 'approved' | 'funded' | 'running' | 'aggregating' | 'closing' | 'closed' | 'cancelled' | 'killed' | 'failed';
 export type SubtaskStatus = 'pending' | 'funded' | 'quoting' | 'working' | 'evaluating' | 'passed' | 'abandoned' | 'returned';
 export type EventType = 'task_status' | 'subtask_status' | 'plan' | 'quote' | 'quote_rejected' | 'hire_sent' | 'a2a_state'
   | 'evaluation' | 'security_alert' | 'ledger' | 'receipt' | 'final' | 'error'
