@@ -36,12 +36,44 @@ export function conversations(tasks: TaskSummary[]): Conversation[] {
   }).sort((a, b) => byAge(b.latest, a.latest));
 }
 
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/**
+ * What tells apart chats that start with the same request: the day each started ("9 Nov"), and when that is the same
+ * too, its place among them by age ("9 Nov · 2"). Only those chats get one. The day is UTC, so the server and the
+ * browser render the same text.
+ */
+export function chatDates(convs: Conversation[]): Map<string, string> {
+  const same = new Map<string, Conversation[]>();
+  for (const c of convs) {
+    const key = c.title.trim().toLowerCase();
+    same.set(key, [...(same.get(key) ?? []), c]);
+  }
+  const out = new Map<string, string>();
+  for (const group of same.values()) {
+    if (group.length < 2) continue;
+    const day = (c: Conversation) => {
+      const d = new Date(c.tasks[0].created_at);
+      return Number.isNaN(d.getTime()) ? '' : `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
+    };
+    const byAgeAsc = [...group].sort((a, b) => byAge(a.tasks[0], b.tasks[0]));
+    for (const c of group) {
+      const sameDay = byAgeAsc.filter((x) => day(x) === day(c));
+      out.set(c.id, sameDay.length > 1 ? `${day(c)} · ${sameDay.indexOf(c) + 1}`.trim() : day(c));
+    }
+  }
+  return out;
+}
+
 /** The conversation that task `id` is part of, or null when `tasks` doesn't have it. */
 export function conversationOf(tasks: TaskSummary[], id: string): Conversation | null {
   return conversations(tasks).find((c) => c.tasks.some((t) => t.id === id)) ?? null;
 }
 
-/** A failed or stopped message that never got a plan to run (a reply that isn't a task, a failed draft). Older services can't tell. */
+/**
+ * A failed or stopped message that never got a plan to run (a reply that isn't a task, a failed draft). Older services
+ * can't tell. Rook's questions (asking) are not: the next message answers them, so they are what it acts on.
+ */
 const planless = (t: TaskSummary) => (t.status === 'failed' || t.status === 'killed') && t.has_plan === false;
 
 /**
@@ -147,10 +179,37 @@ export function amountsNamed(prompt: string): bigint[] {
 /** The composer's placeholder in a conversation: what sending does there. `chain` as in waitReason. */
 export function placeholderFor(current: TaskSummary | null, budget: string, chain = false): string {
   if (!current) return 'Ask a follow-up';
+  // Rook asked for details: the next message answers it, whatever the budget field says.
+  if (current.status === 'asking') return 'Answer here, or say “use placeholders”';
   const wait = waitReason(current.status, chain);
   if (wait) return wait;
   const usdc = changedBudget(budget, current);
   if (current.status === 'planned') return usdc ? `Send to revise the plan at ${usdc} USDC, or say what to change` : 'Change the plan, or ask a follow-up';
   if (usdc) return `Send to plan this task again at ${usdc} USDC`;
-  return current.status === 'closed' || current.status === 'closing' ? 'Ask a follow-up, like going deeper on one part' : 'Change the task, or try it again';
+  if (current.status === 'closed' || current.status === 'closing') {
+    return current.missing?.length ? 'Ask to try the missing part again, or for a change' : 'Ask for a change or a follow-up';
+  }
+  return 'Change the task, or try it again';
+}
+
+/** Rook's questions, as its message opens them. */
+export const ASK_LEAD = 'Before I plan this, I need a few details:';
+/** The answer the "Use placeholders" button sends: the planner takes it as an answer to its questions. */
+export const PLACEHOLDERS_ANSWER = 'Use placeholders';
+
+/**
+ * Rook's questions to show for a task that is asking (PlanView.questions), each trimmed; when its plan carries none
+ * (an older or unexpected one), its error as the one question, if it has one.
+ */
+export function questionsOf(plan: { questions?: string[] } | null | undefined, error?: string | null): string[] {
+  const asked = (plan?.questions ?? []).map((q) => q.trim()).filter(Boolean);
+  return asked.length ? asked : error?.trim() ? [error.trim()] : [];
+}
+
+/** What a finished run's parts that delivered nothing are called (final_result.abandoned holds their ids). */
+export const missingParts = (abandoned: string[] | undefined, titles: Map<string, string>) => (abandoned ?? []).map((id) => titles.get(id) ?? id);
+
+/** The follow-up that asks Rook to try a run's missing parts again (a new plan, shown before anything is spent). */
+export function retryMessage(missing: string[]): string {
+  return missing.length === 1 ? `Try “${missing[0]}” again.` : `Try the parts that weren't delivered again: ${missing.map((t) => `“${t}”`).join(', ')}.`;
 }

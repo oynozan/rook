@@ -11,14 +11,21 @@ export const serviceHeaders = (): Record<string, string> =>
   process.env.ROOK_SERVICE_TOKEN ? { 'x-rook-token': process.env.ROOK_SERVICE_TOKEN } : {};
 
 /**
+ * A task's status (services/src/shared/types.ts TaskStatus). asking: the planner needs facts only the user can give
+ * (PlanView.questions); nothing is planned or funded, and the next message in the chat answers it.
+ */
+export type TaskStatus = 'draft' | 'asking' | 'planned' | 'approved' | 'funded' | 'running' | 'aggregating' | 'closing' | 'closed' | 'cancelled' | 'killed' | 'failed';
+
+/**
  * parent_id: the task this one follows in its conversation; null starts a conversation. has_plan: it got a plan with
- * something to run (false for a reply that wasn't a task, or a failed draft). Older orchestrators send no parent_id
- * (every task starts its own), no budget_atomic and no has_plan. supersedes / superseded_by: a message sent again or
- * edited names the one it took the place of, which names it back (chat-actions.ts shownTasks).
+ * something to run (false for a reply that wasn't a task, a question, or a failed draft). Older orchestrators send no
+ * parent_id (every task starts its own), no budget_atomic and no has_plan. supersedes / superseded_by: a message sent
+ * again or edited names the one it took the place of, which names it back (chat-actions.ts shownTasks). missing: added
+ * by this page, the titles of a finished run's parts that delivered nothing (the composer offers to try them again).
  */
 export type TaskSummary = {
-  id: string; status: string; prompt: string; created_at: string; parent_id?: string | null; budget_atomic?: string; has_plan?: boolean;
-  supersedes?: string | null; superseded_by?: string | null;
+  id: string; status: TaskStatus; prompt: string; created_at: string; parent_id?: string | null; budget_atomic?: string; has_plan?: boolean;
+  supersedes?: string | null; superseded_by?: string | null; missing?: string[];
 };
 
 /**
@@ -45,18 +52,34 @@ export type Mode = {
   max_budget_atomic?: string | null;
 };
 
+/**
+ * Why a self_do subtask is Rook's own: no agent fits it, the ones found cost more than the budget allows, or it is a
+ * small edit of delivered files Rook makes itself at once (a rename, a colour), with no agent fee and no wait.
+ */
+export type SelfDoReason = 'no_agent' | 'over_budget' | 'rook_edit';
+
 export type PlanView = {
   subtasks: {
     id: string; title: string; brief?: string; cap_atomic: string; deadline_s?: number; self_do: boolean;
-    /** Why a self_do subtask is Rook's own: no agent fits it, or the ones found cost more than the budget allows. Older plans leave it out. */
-    self_do_reason?: 'no_agent' | 'over_budget';
+    /** Older plans leave it out. */
+    self_do_reason?: SelfDoReason;
     /** over_budget: the cheapest quote found (atomic USDC), what one hire would have cost. Older plans leave it out. */
     self_do_need_atomic?: string;
+    /** Rook may write it itself when no hired agent delivers. Absent in older plans: it may not. */
+    self_do_ok?: boolean;
+    /** An edit of delivered work: the conversation's files (by path) this part changes, attached to its brief whole. */
+    inputs?: string[];
     criteria: { id: string; description: string }[];
     candidates: Candidate[];
   }[];
   dropped: { title: string; reason: string }[];
-  budget: { reserve_atomic: string; allocated_atomic: string };
+  budget: { reserve_atomic: string; allocated_atomic: string; budget_atomic?: string };
+  /** The planner's notes: some are sentences for people (they start with "Rook "), the rest are its own (plan-view.ts planNotes). */
+  notes?: string[];
+  /** Facts only the user can give, asked instead of planning (the task is 'asking' and there are no subtasks). */
+  questions?: string[];
+  /** What the plan takes as given or leaves out, in plain words, shown before any money moves. */
+  assumptions?: string[];
 };
 
 /**
@@ -103,7 +126,11 @@ export type SubtaskView = {
   evaluations?: { hire_id: string | null; verdict: 'pass' | 'fail'; failed_criteria: string[] }[];
 };
 
-/** A file a hired agent delivered (a web page, a script), kept apart from the report text. Older results have none. */
+/**
+ * A file a hired agent (or Rook) delivered, kept apart from the report text. `name` is its path inside the project
+ * ("app/pricing/page.tsx", "postcss.config.mjs"), folders separated by "/", never absolute or "..": older results have
+ * a bare name. Older results have no files at all.
+ */
 export type ReportFile = { subtask_id: string; agent_handle: string; name: string; mime: string; text: string };
 
 export type TaskSnapshot = {

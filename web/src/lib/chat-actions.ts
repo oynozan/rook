@@ -3,7 +3,7 @@
 import { currentTask, waitReason } from '@/lib/conversations';
 import { failed } from '@/lib/errors';
 import type { TaskSummary } from '@/lib/server/orchestrator';
-import { olderNotATask } from '@/lib/planner';
+import { olderNotATask, plannerReason } from '@/lib/planner';
 
 /**
  * The tasks a conversation shows: a message sent again or edited takes the place of the one it supersedes, which is
@@ -32,12 +32,13 @@ export type MessageFacts = { status: string; subtasks: number | null; ledger: bo
 
 /**
  * The newest message can be edited while no money has moved for its task (services/src/orchestrator/store.ts
- * supersedeRefusal): still planning (that stops), a plan waiting for approval (it is cancelled), a plan cancelled
- * before it ran, or a message that ended before it got a plan to run. Never once approved: a task that ran or was
- * stopped after approval has a plan, and a cancelled one whose funding went back has books.
+ * supersedeRefusal): still planning (that stops), Rook's questions about it, a plan waiting for approval (it is
+ * cancelled), a plan cancelled before it ran, or a message that ended before it got a plan to run. Never once
+ * approved: a task that ran or was stopped after approval has a plan, and a cancelled one whose funding went back has
+ * books.
  */
 export function canEdit(t: MessageFacts): boolean {
-  if (t.status === 'draft' || t.status === 'planned') return true;
+  if (t.status === 'draft' || t.status === 'asking' || t.status === 'planned') return true;
   if (t.status === 'cancelled') return !t.ledger;
   if (t.status === 'failed' || t.status === 'killed') return !t.subtasks;
   return false;
@@ -56,6 +57,16 @@ export const canSendAgain = (t: MessageFacts) => t.status === 'failed' && t.subt
 export function messageProblem(error: string | null | undefined): boolean {
   if (!error || /^Rook's services restarted|^Rook's planner set a budget your message doesn't name/.test(error)) return false;
   return !error.startsWith('planner: ') || olderNotATask(error.slice('planner: '.length));
+}
+
+/**
+ * How a message that ended with no plan shows (its task's error). The planner's sentence about the message (it isn't a
+ * task, its budget is out of range) is Rook's reply: shown as Rook's message, with no failure heading and no Send
+ * again, which would only get the same reply. Rook's own trouble says it couldn't plan, and offers Send again.
+ */
+export function failedDraft(error: string | null | undefined): { lead: string | null; text: string | null; again: boolean } {
+  if (error && messageProblem(error)) return { lead: null, text: plannerReason(error), again: false };
+  return { lead: "Rook couldn't draft a plan for this task.", text: error ? plannerReason(error) : null, again: true };
 }
 
 /** The quiet note on a message that took another's place. */
