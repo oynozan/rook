@@ -473,6 +473,21 @@ test('a follow-up on a finished task gives the planner the earlier messages and 
   await call(`${orch.url}/tasks/${third.id}/cancel`, {});
 });
 
+test('a follow-up on a delivered site gives the planner the files after the report, which only names them', async () => {
+  // The report has a marker where the page was: without the files, "make the header blue" had no page to change.
+  const first = await runToEnd({ subtasks: [sub('s1', 'Build one-page portfolio website', '200000', [cand('site-good', '100000')])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] }, 'AGG-DOWN portfolio');
+  assert.equal(first.task.status, 'closed', first.task.error);
+  assert.doesNotMatch(first.final_result.final_markdown, /<!doctype/);
+  plan = holdersPlan();
+  const follow = await call(`${orch.url}/tasks`, { prompt: 'make the header blue', budget_usdc: '1', parent_id: first.task.id });
+  assert.equal(follow.status, 'planned');
+  assert.deepEqual(planRequests.at(-1).conversation, {
+    earlier: ['AGG-DOWN portfolio'], revising: false,
+    report: `${first.final_result.final_markdown.trim()}\n\nThe files attached to the report, as delivered:\n\nindex.html:\n\`\`\`\n<!doctype html>\n<html><body>Ozan</body></html>\n\`\`\``,
+  });
+  await call(`${orch.url}/tasks/${follow.id}/cancel`, {});
+});
+
 test('a revision replaces the plan it changes once its own plan is ready, and that plan waits for it; a reply that is not a task leaves that plan usable', async () => {
   plan = holdersPlan();
   const first = await call(`${orch.url}/tasks`, { prompt: 'Due diligence on the NEAR token', budget_usdc: '3', owner: 'alice.near' });
@@ -643,6 +658,26 @@ test('the conversation sent to the planner keeps the first and the newest messag
   assert.ok(Conversation.safeParse(c).success);
   // Short ones go as they are; with no report, there is no report field.
   assert.deepEqual(conversationFor(chain.slice(-2), chain.at(-1)!), { earlier: ['m0', 'm1'], revising: true });
+
+  // With files: the newest report's files only, each fenced and named (a fence longer than any in the file).
+  const file = (name: string, text: string) => ({ subtask_id: 's1', agent_handle: 'web-dev', name, mime: 'text/html', text });
+  chain[5].final_result = { ...report('older report'), files: [file('old.html', 'never sent')] };
+  chain[3].final_result = { ...report('Here is the site.\n[file index.html, 2 lines, attached below the report]'), files: [file('index.html', '<p>a</p>\n<pre>```x```</pre>')] };
+  assert.equal(conversationFor(chain, null).report,
+    'Here is the site.\n[file index.html, 2 lines, attached below the report]\n\nThe files attached to the report, as delivered:\n\nindex.html:\n````\n<p>a</p>\n<pre>```x```</pre>\n````');
+  // Too long: the report keeps its first 4000 characters, the files fill the rest, and a note says what is left out.
+  const line = (n: number) => `<p>line ${String(n).padStart(4, '0')}</p>`; // 17 characters
+  const page = Array.from({ length: 600 }, (_, n) => line(n + 1)).join('\n');
+  chain[3].final_result = { ...report('r'.repeat(9000)), files: [file('index.html', page), file('styles.css', 'body {}'), file('app.js', 'go();')] };
+  const big = conversationFor(chain, null).report!;
+  assert.ok(Conversation.safeParse({ earlier: ['m0'], revising: false, report: big }).success, String(big.length));
+  assert.match(big, /^r{3956}\n\n\[The rest of the report is left out here\.\]\n\nThe files attached to the report, as delivered:\n\nindex\.html:\n```\n<p>line 0001<\/p>\n/);
+  const shown = big.match(/<p>line (\d+)<\/p>\n```\n\n\[Cut for length: index\.html is cut at line (\d+) of 600; 2 more files are left out\.\]$/);
+  assert.ok(shown && Number(shown[1]) === Number(shown[2]) && Number(shown[1]) > 400, big.slice(-300)); // cut at a line end, and said so
+  // A report that leaves no room cuts the file too, never past the limit.
+  chain[3].final_result = { ...report('r'.repeat(3000)), files: [file('a.html', 'x'.repeat(20_000))] };
+  const one = conversationFor(chain, null).report!;
+  assert.ok(one.length <= CONVERSATION_REPORT_CHARS && one.endsWith('\n```\n\n[Cut for length: a.html is cut at line 1 of 1.]'), one.slice(-200));
 });
 
 // ---- sending again, editing, deleting ----

@@ -25,11 +25,15 @@ const SNIPPET_CHARS = 300;
 const KIND: Record<string, string> = {
   html: 'html', htm: 'html', css: 'css', js: 'js', javascript: 'js', ts: 'ts', typescript: 'ts', json: 'json',
   py: 'py', python: 'py', sh: 'sh', bash: 'sh', svg: 'svg', xml: 'xml', yaml: 'yaml', yml: 'yaml', sql: 'sql',
+  // A web build in a framework ("a React landing page" gives App.jsx) is kept out of the text like a plain page.
+  jsx: 'jsx', tsx: 'tsx', vue: 'vue', svelte: 'svelte', scss: 'scss', sass: 'sass', less: 'less', php: 'php',
 };
 const kindOf = (w: string) => (Object.hasOwn(KIND, w) ? KIND[w] : undefined); // a fence named 'constructor' is no kind
 const MIME: Record<string, string> = {
   html: 'text/html', css: 'text/css', js: 'text/javascript', ts: 'text/typescript', json: 'application/json',
   py: 'text/x-python', sh: 'text/x-shellscript', svg: 'image/svg+xml', xml: 'application/xml', yaml: 'application/yaml', sql: 'application/sql',
+  jsx: 'text/javascript', tsx: 'text/typescript', vue: 'text/x-vue', svelte: 'text/x-svelte', scss: 'text/x-scss', sass: 'text/x-sass',
+  less: 'text/x-less', php: 'application/x-httpd-php',
 };
 
 const OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
@@ -44,7 +48,8 @@ function nameIn(line: string | undefined, kind: string): string | undefined {
   return found?.slice(0, 80);
 }
 
-type Found = { kind: string; name?: string; text: string; from: number; to: number }; // lines [from, to)
+/** `weak`: a short block named only by the line before it, which may name the file it edits ("add this to your index.html:"). */
+type Found = { kind: string; name?: string; text: string; from: number; to: number; weak?: boolean }; // lines [from, to)
 
 /** The files in one text: fenced blocks of a known language, and an unfenced HTML document. */
 function scan(lines: string[]): Found[] {
@@ -62,9 +67,11 @@ function scan(lines: string[]): Found[] {
       const first = info[0]?.toLowerCase() ?? '';
       // An untagged fence holding an HTML document is that document.
       const kind = kindOf(first) ?? kindOf(first.split('.').at(-1)!) ?? (!first && DOC_START.test(body[0] ?? '') ? 'html' : undefined);
-      const stated = kind ? info.map((w) => nameIn(w, kind)).find(Boolean) ?? nameIn(prose, kind) ?? nameIn(body[0]?.match(COMMENT_NAME)?.[1], kind) : undefined;
-      const snippet = !stated && body.length < MIN_LINES && body.join('\n').length < SNIPPET_CHARS && !DOC_START.test(body[0] ?? '');
-      if (kind && !snippet) out.push({ kind, name: stated, text: body.join('\n'), from: i, to: Math.min(j + 1, lines.length) });
+      const own = kind ? info.map((w) => nameIn(w, kind)).find(Boolean) : undefined;
+      const comment = kind ? nameIn(body[0]?.match(COMMENT_NAME)?.[1], kind) : undefined;
+      const stated = kind ? own ?? nameIn(prose, kind) ?? comment : undefined;
+      const short = body.length < MIN_LINES && body.join('\n').length < SNIPPET_CHARS && !DOC_START.test(body[0] ?? '');
+      if (kind && !(short && !stated)) out.push({ kind, name: stated, text: body.join('\n'), from: i, to: Math.min(j + 1, lines.length), weak: short && !own && !comment });
       prose = undefined; // the line before a block names that block, never the next one
       i = j;
       continue;
@@ -105,9 +112,14 @@ export function attachFiles(deliveries: Delivery[]): Attached {
     taken.add(name.toLowerCase());
     return name;
   };
-  for (const d of deliveries) {
-    const lines = d.text.split('\n');
-    const found = scan(lines);
+  // CRLF too: in an agent's \r\n reply every fence line ended in \r, so no file was found.
+  const scanned = deliveries.map((d) => { const lines = d.text.split(/\r?\n/); return { d, lines, found: scan(lines) }; });
+  // A short block named only by its prose line yields that name to any other block with it, anywhere in the result, and
+  // stays in the text as a snippet: "add this line to your index.html:" took index.html and pushed the page to index-2.html.
+  const named = new Map<string, number>();
+  for (const f of scanned.flatMap((x) => x.found)) if (f.name) named.set(f.name.toLowerCase(), (named.get(f.name.toLowerCase()) ?? 0) + 1);
+  for (const { d, lines, found: all } of scanned) {
+    const found = all.filter((f) => !(f.weak && named.get(f.name!.toLowerCase())! > 1));
     const out: string[] = [];
     let at = 0;
     for (const f of found) {

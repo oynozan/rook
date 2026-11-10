@@ -767,7 +767,10 @@ test('the draft prompt plans one artifact as one subtask, lets Rook write what a
   const { DRAFT_SYSTEM } = await import('../src/planner/prompts.ts');
   // On mainnet "make me a portfolio websites like oynozan.com" became a design brief, a build (self_do_ok false) and the
   // copy, run in parallel: the builder never saw the other two, its agents failed, and the report had no website.
-  assert.match(DRAFT_SYSTEM, /when the user wants a single artifact \(a website, a page, an app, a script, one document\), plan ONE subtask that delivers the whole thing, with the design, structure, copy and content requirements written into its brief/);
+  assert.match(DRAFT_SYSTEM, /when the user wants a single artifact \(a website, a page, an app, a script, or one document the user wants written, such as an essay, a post or a letter\), plan ONE subtask that delivers the whole thing, with the design, structure, copy and content requirements written into its brief/);
+  // "Due diligence report on the NEAR token: holders, wallets, contract and market data" is research, not one document:
+  // one agent with all of it would lose the whole report to one stall.
+  assert.match(DRAFT_SYSTEM, /A report of research, findings or analysis is not an artifact, even when the user calls it one report: plan it as 3 to 5 separate questions, one subtask each, and Rook combines their results into the report\.\n- Return 1 to 5/);
   assert.match(DRAFT_SYSTEM, /Never split an artifact into parts whose results would have to be put together/);
   assert.match(DRAFT_SYSTEM, /Return 1 to 5 subtasks, at most 5: one per artifact or independent deliverable/);
   assert.doesNotMatch(DRAFT_SYSTEM, /Return 3 to 5 subtasks|Keep each subtask narrow/);

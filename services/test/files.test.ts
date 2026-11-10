@@ -63,13 +63,42 @@ test('known languages only; a short unnamed snippet and prose stay in the text, 
 });
 
 test('every listed language is attached with its mime type; a fence cut short still gives its file', () => {
-  const langs = [['html', 'text/html'], ['css', 'text/css'], ['js', 'text/javascript'], ['javascript', 'text/javascript'], ['ts', 'text/typescript'],
+  const langs = [['html', 'text/html'], ['htm', 'text/html'], ['css', 'text/css'], ['js', 'text/javascript'], ['javascript', 'text/javascript'], ['ts', 'text/typescript'],
     ['typescript', 'text/typescript'], ['json', 'application/json'], ['py', 'text/x-python'], ['python', 'text/x-python'], ['sh', 'text/x-shellscript'],
-    ['bash', 'text/x-shellscript'], ['svg', 'image/svg+xml'], ['xml', 'application/xml'], ['yaml', 'application/yaml'], ['sql', 'application/sql']];
+    ['bash', 'text/x-shellscript'], ['svg', 'image/svg+xml'], ['xml', 'application/xml'], ['yaml', 'application/yaml'], ['yml', 'application/yaml'], ['sql', 'application/sql'],
+    // A framework build: "a React landing page" came back as App.jsx, and all its code went to the aggregator.
+    ['jsx', 'text/javascript'], ['tsx', 'text/typescript'], ['vue', 'text/x-vue'], ['svelte', 'text/x-svelte'], ['scss', 'text/x-scss'],
+    ['sass', 'text/x-sass'], ['less', 'text/x-less'], ['php', 'application/x-httpd-php']];
   const r = attachFiles([d('s1', 'Code', langs.map(([l]) => `\`\`\`${l}\n1\n2\n3\n\`\`\``).join('\n\n'))]);
   assert.deepEqual(r.files.map((f) => f.mime), langs.map(([, m]) => m));
+  const app = attachFiles([d('s1', 'React landing page', 'App.jsx\n```jsx\nexport default function App() {\n  return <h1>Hi</h1>;\n}\n```')]);
+  assert.deepEqual(app.files.map((f) => [f.name, f.mime]), [['App.jsx', 'text/javascript']]);
+  assert.equal(app.texts.get('s1'), 'App.jsx\n[file App.jsx, 3 lines, attached below the report]');
   const cut = attachFiles([d('s1', 'Page', `\`\`\`html\n${PAGE.slice(0, 40)}`)]);
   assert.deepEqual(cut.files.map((f) => f.text), [PAGE.slice(0, 40)]);
+});
+
+test('a reply with CRLF line endings gives the same files, named the same, with LF endings', () => {
+  const css = 'body {\n  margin: 0;\n}';
+  const lf = `Here is the site.\n\nindex.html\n\`\`\`html\n${PAGE}\n\`\`\`\n\nstyles.css\n\`\`\`css\n${css}\n\`\`\`\n\nOpen it.`;
+  const crlf = attachFiles([d('s1', 'Site', lf.replace(/\n/g, '\r\n'))]);
+  assert.deepEqual(crlf.files.map((f) => [f.name, f.text]), [['index.html', PAGE], ['styles.css', css]]);
+  assert.equal(crlf.texts.get('s1'), attachFiles([d('s1', 'Site', lf)]).texts.get('s1'));
+  assert.equal(crlf.texts.get('s1'), 'Here is the site.\n\nindex.html\n[file index.html, 5 lines, attached below the report]\n\nstyles.css\n[file styles.css, 3 lines, attached below the report]\n\nOpen it.');
+});
+
+test('a short block named only by the line before it never takes the name of another file: it stays in the text', () => {
+  const link = '<link rel="stylesheet" href="styles.css">';
+  const r = attachFiles([d('s1', 'Site', `Add this line to the <head> of your index.html:\n\`\`\`html\n${link}\n\`\`\`\n\nThe full page, index.html:\n\`\`\`html\n${PAGE}\n\`\`\``)]);
+  assert.deepEqual(r.files.map((f) => [f.name, f.text]), [['index.html', PAGE]]);
+  assert.equal(r.texts.get('s1'), `Add this line to the <head> of your index.html:\n\`\`\`html\n${link}\n\`\`\`\n\nThe full page, index.html:\n[file index.html, 5 lines, attached below the report]`);
+  // Across parts too: the page from another agent keeps its name.
+  const two = attachFiles([d('s1', 'Tweak', `In index.html, add:\n\`\`\`html\n${link}\n\`\`\``), d('s2', 'Site', `index.html\n\`\`\`html\n${PAGE}\n\`\`\``)]);
+  assert.deepEqual(two.files.map((f) => [f.subtask_id, f.name]), [['s2', 'index.html']]);
+  assert.equal(two.texts.get('s1'), `In index.html, add:\n\`\`\`html\n${link}\n\`\`\``);
+  // Named by the fence or its own first line, a short block is that file: two of them are both kept.
+  const own = attachFiles([d('s1', 'Site', `For index.html:\n\`\`\`html index.html\n${link}\n\`\`\`\nThe page, index.html:\n\`\`\`html\n${PAGE}\n\`\`\``)]);
+  assert.deepEqual(own.files.map((f) => f.name), ['index.html', 'index-2.html']);
 });
 
 test('a file over 1 MB, or past 3 MB in all, is not attached: its marker and the gaps say so, and its code is still out of the text', () => {
