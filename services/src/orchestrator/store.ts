@@ -25,6 +25,8 @@ export type Sub = PlanSubtask & {
   n: number; status: SubtaskStatus; final_outcome: 'passed' | 'abandoned' | null; rehire_count: number;
   tried: string[]; hires: Hire[]; evaluations: (Evaluation & { hire_id: string | null })[];
   accepted: { hire_id: string | null; agent_handle: string; text: string } | null;
+  // Agents whose paid send got -32603 ("no reachable backend right now"), and those of them asked again since.
+  unreachable?: string[]; retried?: string[];
 };
 
 export type Task = {

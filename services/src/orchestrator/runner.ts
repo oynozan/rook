@@ -4,7 +4,7 @@
 // skipping what is done and polling hires whose payment header was out; unwind() returns what a stopped task, or a
 // closing one whose close failed, still holds, and keeps trying until the books close.
 // Error events carry `message` (for logs and the CLI) and `kind`, which a client words for people: eval_retry,
-// close_retry (retried); payment_lookup, receipt, paid_anyway, unpaid, aggregate, restore_note, rook_writes (notes); abandoned,
+// close_retry, unreachable_retry (retried); payment_lookup, receipt, paid_anyway, unpaid, aggregate, restore_note, rook_writes (notes); abandoned,
 // unchecked, return, close, unwind, run, restore (problems). Agent-related ones name `agent_handle`.
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
@@ -503,9 +503,9 @@ async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Defer
       hire = h.paid ? h : await resumeHire(ledger, t, s, h);
     } else {
       // The plan's order (lowest expected cost first, docs 5.2 step 4), never re-sorted by price here.
-      const c = s.candidates.find((x) => !s.tried.includes(x.handle));
+      const c = s.candidates.find((x) => !s.tried.includes(x.handle)) ?? await unreachableAgain(t, s);
       if (!c) return giveUp(t, s, done);
-      s.tried.push(c.handle);
+      if (!s.tried.includes(c.handle)) s.tried.push(c.handle);
       setSub(t, s, 'quoting');
       const row = await quote(ledger, t, s, c);
       if (!row) continue;
@@ -535,6 +535,21 @@ async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Defer
     }
     if (failedVerdict(s)) return giveUp(t, s, done);
   }
+}
+
+/**
+ * -32603 on a paid send is the market's "no reachable backend right now, retry in a few minutes" (its x402 caller
+ * skill). Once every other candidate is tried, such an agent is asked again, once, after ROOK_UNREACHABLE_RETRY_S: on
+ * mainnet the only affordable agent of a part answered it and the part was lost, though the agent was fine later.
+ */
+async function unreachableAgain(t: Task, s: Sub): Promise<Candidate | undefined> {
+  const c = s.candidates.find((x) => s.unreachable?.includes(x.handle) && !s.retried?.includes(x.handle));
+  if (!c) return undefined;
+  (s.retried ??= []).push(c.handle);
+  saveTask(t);
+  emit(t, 'error', { kind: 'unreachable_retry', agent_handle: c.handle, message: `${c.handle} had no reachable backend; asking it again in ${config.unreachableRetryS} s` }, s.id);
+  await sleep(config.unreachableRetryS * 1000, undefined, { signal: t.abort.signal });
+  return c;
 }
 
 /**
@@ -696,6 +711,7 @@ async function hire1(ledger: Ledger, t: Task, s: Sub, c: Candidate, row: Accepts
       // task id came back, so no deliverable can: Rook voids it, and a payment that landed first counts as paid.
       if (await endUnpaid(ledger, t, s, hire, sent.error.code === 402 ? 'terminal' : 'void')) return hire;
       hire.state = 'SEND_FAILED'; hire.ended_at = now();
+      if (sent.error.code === -32603 && !s.unreachable?.includes(c.handle)) (s.unreachable ??= []).push(c.handle);
       rejectQuote(t, s, c.handle, `send failed: ${sent.error.code} ${sent.error.message}`);
       return null;
     }

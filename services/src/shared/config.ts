@@ -95,6 +95,8 @@ export const config = {
    * cancel): its SLA + ROOK_PAYMENT_GRACE_S, at most this. An advertised 1-day SLA must not hold a run for a day.
    */
   get hirePatienceS() { return num('ROOK_HIRE_PATIENCE_S', 1_800); },
+  /** How long Rook waits before asking an agent again whose backend was unreachable (-32603), once. */
+  get unreachableRetryS() { return num('ROOK_UNREACHABLE_RETRY_S', 180); },
 
   /** `live`: `pnpm live`, nothing simulated (checkProfile). Anything else: the simulation profile of `pnpm dev`. */
   get profile() { return process.env.ROOK_PROFILE === 'live' ? 'live' as const : 'sim' as const; },

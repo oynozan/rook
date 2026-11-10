@@ -104,6 +104,7 @@ export function problemLine(data: { kind?: string; message?: string; agent_handl
     case 'paid_anyway': return note(who ? `${who}'s payment went through after all, so it counts as spent.` : 'A payment Rook made before it restarted went through, so it counts as spent.');
     case 'unpaid': return null; // the receipt line says it: delivered, nothing paid
     case 'aggregate': return note("Rook couldn't write the report itself, so the report puts the deliverables together as they are.");
+    case 'unreachable_retry': return retry(`${who ?? 'The agent'} couldn't take the job just now, so Rook asks it again in a few minutes.`);
     case 'rook_writes': return note(`No agent could deliver ${it}, so Rook writes it itself. That part's USDC goes back to you.`);
     case 'restore_note': return note("Rook restarted and found its records differ from the contract's, so it goes by the contract.");
     case 'abandoned': return problem(`Rook couldn't finish ${it} because of a problem on its side${why(/^\S+ abandoned: /)}.`, hired);

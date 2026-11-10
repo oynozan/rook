@@ -6,6 +6,7 @@ process.env.ROOK_LLM = 'canned';
 process.env.ROOK_MARKET = 'sim';
 process.env.ROOK_POLL_MS = '20';
 process.env.ROOK_PAYMENT_GRACE_S = '1';
+process.env.ROOK_UNREACHABLE_RETRY_S = '0.2';
 
 const { serve, call, HttpError } = await import('../src/shared/http.ts');
 const { start } = await import('../src/orchestrator/index.ts');
@@ -18,8 +19,8 @@ const cand = (handle: string, price: string, sla = 5) => ({
 });
 // profile: what GetTask returns once the agent "finishes"
 // quoted: price at hire time if it differs; polls: GetTask calls before the final state; sendDelay: ms /send holds;
-// unknown: /send reports outcome_unknown; noCancel: CancelTask refused.
-type Profile = { price: string; state: string; text?: string; quoted?: string; polls?: number; sendDelay?: number; unknown?: boolean; noCancel?: boolean };
+// unknown: /send reports outcome_unknown; noCancel: CancelTask refused; down: that many paid sends get -32603 first.
+type Profile = { price: string; state: string; text?: string; quoted?: string; polls?: number; sendDelay?: number; unknown?: boolean; noCancel?: boolean; down?: number };
 const PROFILES: Record<string, Profile> = {
   'holders-bad': { price: '150000', state: 'COMPLETED', text: 'Top 10 holders share: 291.2%' },
   'holders-good': { price: '300000', state: 'COMPLETED', text: 'Total supply: 1,250,000,000 NEAR' },
@@ -31,7 +32,10 @@ const PROFILES: Record<string, Profile> = {
   'slow-send': { price: '100000', state: 'WORKING', sendDelay: 400 },
   unknown: { price: '100000', state: 'COMPLETED', unknown: true },
   late: { price: '100000', state: 'COMPLETED', text: 'Late but complete', polls: 40, noCancel: true },
+  'down-once': { price: '100000', state: 'COMPLETED', text: 'Total supply: 1,250,000,000 NEAR', down: 1 },
+  'down-always': { price: '100000', state: 'COMPLETED', text: 'never delivered', down: 99 },
 };
+const downs = new Map<string, number>();
 let planGate: Promise<void> = Promise.resolve();
 let planDown = false; // the planner's model is out of reach, as when NEAR AI answered 500
 
@@ -85,6 +89,10 @@ before(async () => {
       sent.push({ handle: body.handle, payment: body.payment });
       if (p.sendDelay) await new Promise((ok) => setTimeout(ok, p.sendDelay));
       if (p.unknown) return { ok: false, error: { code: 'outcome_unknown', message: 'after a 502 the agent answered HTTP 402' } };
+      if ((downs.get(body.handle) ?? 0) < (p.down ?? 0)) {
+        downs.set(body.handle, (downs.get(body.handle) ?? 0) + 1);
+        return { ok: false, error: { code: -32603, message: 'internal error' } };
+      }
       const id = `a2a-${a2a.size + 1}`;
       a2a.set(id, { handle: body.handle, polls: 0 });
       return { ok: true, task: { id, context_id: 'ctx', state: 'SUBMITTED', artifacts: [] } };
@@ -388,6 +396,20 @@ test('no hired agent delivers: a part Rook may write is written by Rook and its 
   assert.deepEqual([s.ledger.spent_atomic, s.ledger.closed], ['0', true]); // both caps went back
   const evs = (await fetch(`${orch.url}/tasks/${s.task.id}/events`).then((r) => r.text())).split('\n').filter((l) => l.startsWith('data: ')).map((l) => JSON.parse(l.slice(6)));
   assert.deepEqual(evs.filter((e) => e.type === 'error' && e.data.kind === 'rook_writes').map((e) => e.subtask_id), ['s1']);
+});
+
+test('an agent with no reachable backend (-32603) is asked again once, after the other candidates: once is enough, twice is not', async () => {
+  const s = await runToEnd({
+    subtasks: [sub('s1', 'Retry', '100000', [cand('down-once', '100000'), cand('check-fails', '100000')]), sub('s2', 'Still down', '100000', [cand('down-always', '100000')])],
+    dropped: [], budget: budget('200000'), notes: [], llm_calls: [],
+  });
+  assert.equal(s.task.status, 'closed', s.task.error);
+  assert.deepEqual(s.subtasks.map((x: any) => x.final_outcome), ['passed', 'abandoned']);
+  assert.deepEqual(s.subtasks[0].hires.map((h: any) => [h.agent_handle, h.state]), [['down-once', 'SEND_FAILED'], ['check-fails', 'FAILED'], ['down-once', 'COMPLETED']]);
+  assert.deepEqual(s.subtasks[1].hires.map((h: any) => h.state), ['SEND_FAILED', 'SEND_FAILED']); // asked twice, then left
+  spentMatchesReceipts(s);
+  const evs = (await fetch(`${orch.url}/tasks/${s.task.id}/events`).then((r) => r.text())).split('\n').filter((l) => l.startsWith('data: ')).map((l) => JSON.parse(l.slice(6)));
+  assert.deepEqual(evs.filter((e) => e.data?.kind === 'unreachable_retry').map((e) => [e.subtask_id, e.data.agent_handle]).sort(), [['s1', 'down-once'], ['s2', 'down-always']]);
 });
 
 // ---- conversations ----
