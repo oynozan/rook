@@ -3,6 +3,7 @@
 import type { AggregateRequest, Criterion } from '../shared/types.ts';
 import type { z } from 'zod';
 import type { DraftSubtask } from './plan.ts';
+import { attachFiles, unattachedLine, type Attached } from './files.ts';
 
 const brief = (title: string, body: string) => `${title}\n\n${body}`;
 
@@ -88,14 +89,19 @@ const SELF_DO_SOURCE = 'Rook (its own model)';
 /** Who wrote a part, in the report's words: the agent's handle, or Rook for its own work ('rook:self-do' is internal). */
 export const sourceOf = (s: AggIn['subtasks'][number]) => (!s.agent_handle || s.agent_handle === 'rook:self-do' ? SELF_DO_SOURCE : s.agent_handle);
 
-export function cannedAggregate(req: AggIn): string {
+/** The code files in the merged deliveries, and each one's text with markers in their place (files.ts). */
+export const attach = (subtasks: AggIn['subtasks']): Attached =>
+  attachFiles(subtasks.filter(isMerged).map((s) => ({ subtask_id: s.id, agent_handle: agentOf(s), title: s.title, text: s.deliverable_text! })));
+
+/** The deterministic merge. Files stay out of it as markers, like the aggregator's report: they come attached. */
+export function cannedAggregate(req: AggIn, attached: Attached = attach(req.subtasks)): string {
   // In a conversation the latest message can be just a change ("make it shorter"): the first message names the task.
   const out = [`# ${(req.earlier?.[0] ?? req.prompt).split('\n')[0].trim()}`, ''];
   for (const s of req.subtasks.filter(isMerged)) {
     const source = sourceOf(s);
-    out.push(`## ${s.title}`, '', `_Source: ${source === SELF_DO_SOURCE ? source : `\`${source}\``}._`, '', s.deliverable_text!.trim(), '');
+    out.push(`## ${s.title}`, '', `_Source: ${source === SELF_DO_SOURCE ? source : `\`${source}\``}._`, '', attached.texts.get(s.id)!.trim(), '');
   }
-  const gaps = req.subtasks.filter((s) => !isMerged(s));
-  if (gaps.length) out.push('## Gaps', '', ...gaps.map((s) => `- ${s.title}: not delivered`), '');
+  const gaps = [...req.subtasks.filter((s) => !isMerged(s)).map((s) => `- ${s.title}: not delivered`), ...attached.unattached.map((u) => `- ${unattachedLine(u)}`)];
+  if (gaps.length) out.push('## Gaps', '', ...gaps, '');
   return out.join('\n');
 }
