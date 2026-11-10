@@ -1453,7 +1453,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
           {task.status === 'planned' && (
             <div className="rook-in mt-4 flex flex-wrap gap-3" style={{ animationDelay: `${250 + plan.subtasks.length * 90}ms` }}>
               <ActionButton primary onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account || paymentsOff || !!funds.short || revised || redoing}
-                title={paymentsOff ? 'Paying live agents is not switched on yet' : !wallet.account ? 'Connect your wallet first' : funds.short ? 'Your wallet holds less USDC than this budget' : revised ? 'Wait for the revised plan below' : undefined}>
+                title={paymentsOff ? undefined : !wallet.account ? 'Connect your wallet first' : funds.short ? 'Your wallet holds less USDC than this budget' : revised ? 'Wait for the revised plan below' : undefined}>
                 {busy === 'approve' ? (funds.checking ? 'Checking your USDC balance…' : chain && !free ? 'Preparing the transfer…' : 'Starting…') : free ? 'Start' : paymentsOff ? 'Approve' : noMoney ? 'Run simulation' : `Fund ${usdc(task.budget_atomic)} USDC and start`}
               </ActionButton>
               {funds.short && <ActionButton onClick={() => void funds.check()} busy={funds.checking}>{funds.checking ? 'Checking…' : 'Check again'}</ActionButton>}
@@ -1464,7 +1464,6 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
           {task.status === 'planned' && !free && !paymentsOff && noMoney && <p className="mt-2 text-sm text-ink/60">A simulated {usdc(task.budget_atomic)} USDC budget: nothing leaves your wallet and no agent is paid.</p>}
           {task.status === 'planned' && funds.short && <p role="alert" className="mt-2 text-sm text-alert">{funds.short}</p>}
           {task.status === 'planned' && !free && !paymentsOff && !noMoney && !funds.short && <p className="mt-2 text-sm text-ink/60">One click: your wallet opens to send the {usdc(task.budget_atomic)} USDC budget to the Rook contract on NEAR {network}, and the run starts once it lands. Each subtask spends at most its cap plus what Rook tops up from the reserve, and whatever isn&apos;t spent comes back to you.</p>}
-          {task.status === 'planned' && !free && paymentsOff && <p className="mt-2 text-sm text-ink/60">Live agents and prices. Paying them isn&apos;t switched on yet, so nothing can be spent.</p>}
         </RookMessage>
       )}
 
