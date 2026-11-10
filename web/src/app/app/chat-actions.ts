@@ -103,15 +103,28 @@ export function conversationIds(tasks: TaskSummary[], id: string): string[] {
 export const fundingHeld = (status: string, hasLedger: boolean, sent: { refunded: boolean } | null) =>
   !!sent && !sent.refunded && (status === 'approved' || (status === 'killed' && !hasLedger));
 
-/** Why the chat can't be deleted while a task of it holds its funding: the page links that task. */
-export const FUNDING_HELD = "Your wallet's funding for a task in this chat hasn't come back yet. Open that task and refund it to your wallet first, then delete the chat.";
+/**
+ * Why the chat can't be deleted while a task of it holds its wallet's funding (fundingHeld), in the words of what that
+ * task's page offers, which the dialog links: approved, it waits there to start the run or to be stopped (and then
+ * refunded); stopped, its refund button is there.
+ */
+export const fundingHeldRefusal = (status: string) => status === 'approved'
+  ? "Your wallet's funding for a task in this chat is waiting on its page: start the run there, or stop it and take the USDC back, then delete the chat."
+  : "Your wallet's funding for a task in this chat hasn't come back yet. Refund it to your wallet on that task's page, then delete the chat.";
+
+/** A task id as the orchestrator makes them, safe in a link. */
+const TASK_ID = /^[\w-]{1,64}$/;
 
 /**
  * Rook refused to delete a conversation, in plain words. `gone`: it was deleted already (from another tab, say), so
- * there is nothing left to do. The orchestrator's 409s are written for people and shown as they are.
+ * there is nothing left to do. The orchestrator's 409s are written for people and shown as they are, with the task
+ * that holds the money (`details.task_id`) for the dialog to link.
  */
-export function deleteRefusal(status: number | null, message: string): { gone: true } | { gone: false; message: string; known: boolean } {
+export function deleteRefusal(status: number | null, message: string, details?: unknown): { gone: true } | { gone: false; message: string; known: boolean; task?: string } {
   if (status === 404 && /^no task /.test(message)) return { gone: true };
-  if (status === 409 && /delete the chat\.$|Delete the chat once/.test(message)) return { gone: false, message, known: true };
+  if (status === 409 && /delete the chat\.$|Delete the chat once/.test(message)) {
+    const task = (details as { task_id?: unknown } | null | undefined)?.task_id;
+    return { gone: false, message, known: true, ...(typeof task === 'string' && TASK_ID.test(task) ? { task } : {}) };
+  }
   return { gone: false, message: "Rook couldn't delete this chat right now. Try again in a moment.", known: false };
 }

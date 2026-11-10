@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  attemptNote, canEdit, canSendAgain, conversationIds, deleteRefusal, fundingHeld, messageProblem, redoRefusal, redoWait, shownInstead, shownTasks,
+  attemptNote, canEdit, canSendAgain, conversationIds, deleteRefusal, fundingHeld, fundingHeldRefusal, messageProblem, redoRefusal, redoWait, shownInstead, shownTasks,
 } from './chat-actions';
 import { conversationOf, conversations } from './conversations';
 import type { TaskSummary } from './orchestrator';
@@ -101,10 +101,21 @@ test('deleting a chat takes every task of it, the replaced ones too; refused whi
   assert.ok(!fundingHeld('closed', true, { refunded: false }));
   assert.ok(!fundingHeld('approved', false, null));
 
+  // Its words follow what that task's page offers: waiting to start (or to be stopped), or stopped with a refund button.
+  assert.match(fundingHeldRefusal('approved'), /waiting on its page: start the run there, or stop it and take the USDC back, then delete the chat\.$/);
+  assert.match(fundingHeldRefusal('killed'), /hasn't come back yet\. Refund it to your wallet on that task's page, then delete the chat\.$/);
+
+  // Rook's refusals name the task that holds the chat, which the dialog links; an older orchestrator names none.
   const run = 'A run in this chat is still under way. Stop it or let it finish, then delete the chat.';
+  assert.deepEqual(deleteRefusal(409, run, { task_id: 't_1a2b3c4d' }), { gone: false, message: run, known: true, task: 't_1a2b3c4d' });
   assert.deepEqual(deleteRefusal(409, run), { gone: false, message: run, known: true });
+  assert.deepEqual(deleteRefusal(409, run, { task_id: '../x' }), { gone: false, message: run, known: true }); // never an odd link
+  const waiting = 'A plan in this chat is waiting for its funding. Cancel it on its page first, then delete the chat.';
+  assert.deepEqual(deleteRefusal(409, waiting, { task_id: 't_9' }), { gone: false, message: waiting, known: true, task: 't_9' });
   const back = 'Rook is still returning the unspent USDC of a task in this chat. Delete the chat once it is back in your wallet.';
-  assert.deepEqual(deleteRefusal(409, back), { gone: false, message: back, known: true });
+  assert.deepEqual(deleteRefusal(409, back, { task_id: 't_2' }), { gone: false, message: back, known: true, task: 't_2' });
+  const operator = "A task in this chat still holds USDC that Rook can't send back by itself, so Rook's operator will. Delete the chat once it is back in your wallet.";
+  assert.deepEqual(deleteRefusal(409, operator, { task_id: 't_3' }), { gone: false, message: operator, known: true, task: 't_3' });
   assert.deepEqual(deleteRefusal(404, 'no task t_1'), { gone: true }); // deleted from another tab already
   assert.deepEqual(deleteRefusal(500, 'boom'), { gone: false, message: "Rook couldn't delete this chat right now. Try again in a moment.", known: false });
   assert.equal(deleteRefusal(null, '').gone, false);

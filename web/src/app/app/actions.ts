@@ -2,7 +2,7 @@
 
 import { revalidatePath } from 'next/cache';
 import { forgetFundingOf, forgetUnreadFunding, fundingSent, giveBackDraftSlot, markFundingRefunded, recordFundingSent, takeDraftSlot } from './db';
-import { conversationIds, deleteRefusal, FUNDING_HELD, fundingHeld, redoRefusal } from './chat-actions';
+import { conversationIds, deleteRefusal, fundingHeld, fundingHeldRefusal, redoRefusal } from './chat-actions';
 import { amountsNamed } from './conversations';
 import { checkDraft, draftRefusal, followUpRefusal } from './draft';
 import { CONTRACT_TASK, draftShortfall, TX_HASH, untilFinal, type Funding } from './funding';
@@ -121,13 +121,16 @@ async function asOwner(action: TaskAction, run: (owner: string) => Promise<objec
   return act(() => run(owner), action);
 }
 
-/** `deleted`: the ids of every task of the chat. `task`: the task whose page has the way back for its funding. */
+/**
+ * `deleted`: the ids of every task of the chat. `task`: the task that holds the chat, whose page the dialog links: the
+ * way back for its funding, or the run or refund under way.
+ */
 export type DeleteResult = { ok: true; deleted: string[] } | { ok: false; message: string; task?: string };
 
 /**
  * Deletes the chat (conversation) task `id` is in. Refused first while a funding transfer this server remembers for one
- * of its tasks hasn't come back, since that refund is on the task's page; then Rook refuses while a task of it holds
- * money. A chat already gone (deleted from another tab) counts as deleted.
+ * of its tasks hasn't come back, since what brings it back is on the task's page; then Rook refuses while a task of it
+ * holds money, naming that task. A chat already gone (deleted from another tab) counts as deleted.
  */
 export async function deleteChat(id: string): Promise<DeleteResult> {
   const owner = await currentAccount();
@@ -140,16 +143,16 @@ export async function deleteChat(id: string): Promise<DeleteResult> {
       const sent = fundingSent(task, owner);
       if (!sent || sent.refunded) continue;
       const snap = await getTask(task, owner).catch((e) => { if (e instanceof OrchestratorError && e.status === 404) return null; throw e; });
-      if (snap && fundingHeld(snap.task.status, !!snap.ledger, sent)) return { ok: false, message: FUNDING_HELD, task };
+      if (snap && fundingHeld(snap.task.status, !!snap.ledger, sent)) return { ok: false, message: fundingHeldRefusal(snap.task.status), task };
     }
     deleted = (await deleteConversation(chat, owner)).deleted;
   } catch (e) {
     if (e instanceof OrchestratorDown) return { ok: false, message: DOWN };
-    const out = deleteRefusal(e instanceof OrchestratorError ? e.status : null, e instanceof Error ? e.message : '');
+    const out = e instanceof OrchestratorError ? deleteRefusal(e.status, e.message, e.details) : deleteRefusal(null, e instanceof Error ? e.message : '');
     if (!out.gone) {
       if (!out.known) console.error('[web] deleteChat:', e instanceof Error ? e.message : e);
       refreshSidebar(); // the chat may have moved on (a run started from another tab, say)
-      return { ok: false, message: out.message };
+      return { ok: false, message: out.message, ...(out.task ? { task: out.task } : {}) };
     }
   }
   refreshSidebar();

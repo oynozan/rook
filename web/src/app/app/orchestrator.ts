@@ -113,10 +113,14 @@ export type RookEvent = { seq: number; type: string; subtask_id?: string; data: 
 
 export class OrchestratorDown extends Error {}
 
-/** The orchestrator answered with an error: its HTTP status and its own message. */
+/**
+ * The orchestrator answered with an error: its HTTP status, its own message, and what it adds for some (`details`: a
+ * refused chat delete names the task that holds the money as `task_id`).
+ */
 export class OrchestratorError extends Error {
   status: number;
-  constructor(status: number, message: string) { super(message); this.status = status; }
+  details: unknown;
+  constructor(status: number, message: string, details?: unknown) { super(message); this.status = status; this.details = details; }
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -128,7 +132,7 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
   const data = await r.json().catch(() => null);
   if (r.status === 401) throw new OrchestratorError(401, 'The orchestrator refused this web server: ROOK_SERVICE_TOKEN differs between them.');
-  if (!r.ok) throw new OrchestratorError(r.status, data?.error ?? `orchestrator answered HTTP ${r.status}`);
+  if (!r.ok) throw new OrchestratorError(r.status, data?.error ?? `orchestrator answered HTTP ${r.status}`, data?.details);
   return data as T;
 }
 
