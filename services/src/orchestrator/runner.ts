@@ -628,7 +628,9 @@ const judgeOnly = (ev: Evaluation) => ev.verdict === 'fail' && ev.failed_criteri
 function judgeOnlyStop(ledger: Ledger, t: Task, s: Sub, next: Candidate): boolean {
   const judged = s.evaluations.filter((e) => e.hire_id !== null && judgeOnly(e));
   if (!judged.length) return false;
-  const left = ledger.view(t.id)!.subtasks.find((x) => x.n === s.n)!.balance_atomic;
+  // What is left of the cap, never the balance: a top-up an unpaid hire left there is the reserve's money.
+  const v = ledger.view(t.id)!.subtasks.find((x) => x.n === s.n)!;
+  const left = v.cap_atomic > v.spent_atomic ? v.cap_atomic - v.spent_atomic : 0n;
   const why = judged.length > 1 ? ''
     : s.rehire_count > 1 ? ', and Rook already hired again once for this part'
     : BigInt(next.price_atomic) > left ? `, and the next agent, ${next.handle}, asks ${formatUsdc(next.price_atomic)} USDC, more than the ${formatUsdc(left)} USDC left of this part's cap`
