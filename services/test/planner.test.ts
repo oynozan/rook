@@ -386,7 +386,7 @@ test('the reply shape in the draft prompt carries no literal amount, nor any oth
   // It once ended with "budget_usdc":1.5: a low-effort model could copy that into a message naming no budget.
   const [[system]] = await promptsSent(({ draft }) => draft('Due diligence on the NEAR token', 3_000_000n, 2_400_000n));
   const shape = system.content.slice(system.content.indexOf('Reply shape')).split('\n\n')[0];
-  assert.match(shape, /^Reply shape \(leave "budget_usdc" out unless the message names a total budget\):\n\{"subtasks":/);
+  assert.match(shape, /^Reply shape \(leave "budget_usdc" out unless the message names a total budget, and "action" out unless the task is an action in the world\)\.[^\n]*\n\{"subtasks":/);
   assert.match(shape, /"budget_usdc":<[^>]+>\}$/); // where it goes, as a placeholder
   assert.doesNotMatch(shape, /\d/);
   assert.doesNotMatch(shape, /:\s*(true|false|null)\b/);
@@ -781,7 +781,7 @@ test('the draft prompt plans one artifact as one subtask, lets Rook write what a
   assert.match(DRAFT_SYSTEM, /Return 1 to 5 subtasks, at most 5: one per artifact or independent deliverable/);
   assert.doesNotMatch(DRAFT_SYSTEM, /Return 3 to 5 subtasks|Keep each subtask narrow/);
   assert.match(DRAFT_SYSTEM, /"self_do_ok"[^\n]*true when a language model alone can produce it from its brief: writing, copy, translation, design briefs, code \(a complete web page or a script included\)/);
-  assert.match(DRAFT_SYSTEM, /false only when it needs live, current, on-chain or market data, media a model cannot write as text \(images, audio, video\), or acting in the world/);
+  assert.match(DRAFT_SYSTEM, /false only when it needs on-chain data or live market data \(balances, holders, prices, volumes as of now\), media a model cannot write as text \(images, audio, video\), or acting in the world/);
   assert.match(DRAFT_SYSTEM, /never invent facts about a site, person or product/);
   assert.match(DRAFT_SYSTEM, /When Rook could not read a page the task names, the brief gives the URL and asks the agent to look at it, and does not describe it/);
 });
