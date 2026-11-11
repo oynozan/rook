@@ -24,6 +24,12 @@ export const Criterion = z.discriminatedUnion('kind', [
   // Each path must come back as a whole file (planner/files.ts reads the delivery's files): a project or an edit is
   // checked file by file, and a file holding a placeholder such as "rest of the code here" fails.
   z.object({ ...base, kind: z.literal('files'), spec: z.object({ paths: z.array(z.string().min(1)).min(1).max(60) }) }),
+  // An image, video or audio the delivery gives (a file part or a link) must load through the guarded reader as that
+  // kind of media, at least `min` of them (default 1): a logo or a video is checked as media, not by the reply's prose.
+  z.object({ ...base, kind: z.literal('media'), spec: z.object({ kinds: z.array(z.enum(['image', 'video', 'audio'])).min(1), min: z.number().int().min(1).max(20).optional() }) }),
+  // The links the delivery cites as sources must load as public pages, at least `min` of them (default 2), and a figure a
+  // label line states must appear on a page cited for it when `figures` is true: a source is checked, not believed.
+  z.object({ ...base, kind: z.literal('sources'), spec: z.object({ min: z.number().int().min(1).max(10).optional(), figures: z.boolean().optional() }) }),
 ]);
 export type Criterion = z.infer<typeof Criterion>;
 
@@ -88,7 +94,8 @@ export type PlanSubtask = {
 };
 export type Plan = {
   subtasks: PlanSubtask[];
-  dropped: { title: string; reason: string }[];
+  // need_atomic: the cheapest quoted price of a part dropped as over budget, so the user sees the budget that hires one.
+  dropped: { title: string; reason: string; need_atomic?: string }[];
   /**
    * reserve_bps: the reserve the funding transfer asks the contract for; every budget unit no cap takes, at most 90%.
    * from_message: budget_atomic is the total the message itself names ("make it 1 USDC"), not the one sent with it.
@@ -103,6 +110,16 @@ export type Plan = {
   questions?: string[];
   /** What the plan takes as given or leaves out, in plain words, shown with the plan before any money moves. */
   assumptions?: string[];
+  /**
+   * The task is an action in the world on the user's behalf (book, call, post, buy, deploy to their account): Rook never
+   * offers placeholders for it, and an action brief holding a [bracketed] placeholder is refused at planning.
+   */
+  action?: boolean;
+  /**
+   * Why this plan can't be funded as it is, in plain words (for example the files a part edits pass the 300 KB Rook
+   * sends): the plan is shown, its funding button is not.
+   */
+  blocked?: string;
   llm_calls: LlmCall[];
 };
 /**
@@ -173,6 +190,9 @@ export type AggregateResult = {
 export const EvaluateRequest = z.object({
   task_id: z.string(), subtask_id: z.string(), brief: z.string(),
   criteria: z.array(Criterion),
+  // An edit's input files as they were before it: the evaluator checks the edit against them (only what was asked
+  // changed, nothing cut off) and never flags text the files already held as the agent's own.
+  inputs: z.array(WorkFile).max(CONVERSATION_FILES).optional(),
   deliverable: z.object({ text: z.string(), parts: z.array(z.object({ text: z.string().optional(), url: z.string().optional(), raw: z.string().optional() })) }),
   peers: z.array(z.object({ subtask_id: z.string(), text: z.string() })).default([]),
 });
