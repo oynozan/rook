@@ -141,6 +141,16 @@ export type SubtaskView = {
  */
 export type ReportFile = { subtask_id: string; agent_handle: string; name: string; mime: string; text: string };
 
+/**
+ * A paid delivery that failed Rook's checks, for a part the run left out: shown apart from the report, marked as not
+ * passing. `failed`: each check it failed, in the criterion's words (`description`) and the evaluator's (`detail`).
+ */
+export type Unaccepted = {
+  subtask_id: string; hire_id: string; agent_handle: string;
+  failed: { id: string; description: string; detail: string }[];
+  text: string;
+};
+
 export type TaskSnapshot = {
   task: Omit<TaskView, 'plan'>;
   plan: PlanView | null;
@@ -153,8 +163,11 @@ export type TaskSnapshot = {
     closed?: boolean;
     contract_id?: string | null; contract_task_id?: string; subtasks?: LedgerSub[];
   } | null;
-  /** changed: the paths this run delivered new or changed (the others were carried over); older reports leave it out. */
-  final_result: { final_markdown: string; abandoned: string[]; files?: ReportFile[]; changed?: string[] } | null;
+  /**
+   * changed: the paths this run delivered new or changed (the others were carried over); older reports leave it out.
+   * unaccepted: for a part left out after paid deliveries failed their checks, the best of them; older reports leave it out.
+   */
+  final_result: { final_markdown: string; abandoned: string[]; files?: ReportFile[]; changed?: string[]; unaccepted?: Unaccepted[] } | null;
   /**
    * Added by this web server (api/tasks/[id]): a funding transfer the browser reported for a task not yet running.
    * contract_task_id is null while only its hash is known; refunded once the funder's close_task took the USDC back.

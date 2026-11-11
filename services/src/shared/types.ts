@@ -202,6 +202,16 @@ export type AggregateResult = {
   files: DeliveredFile[]; // always present, possibly empty
   llm_calls: LlmCall[];
 };
+/**
+ * A part that ended abandoned after paid deliveries failed their checks: the best of them, shown to the user marked as
+ * not passing, with the checks it failed (`description`: the criterion's, or what a built-in check asks). Kept apart
+ * from the report: never in its text or files, so an edit never builds on it.
+ */
+export type Unaccepted = {
+  subtask_id: string; hire_id: string; agent_handle: string;
+  failed: { id: string; description: string; detail: string }[];
+  text: string;
+};
 
 // ---- Evaluator (section 6) ----
 export const EvaluateRequest = z.object({

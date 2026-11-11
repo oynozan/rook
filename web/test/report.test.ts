@@ -119,3 +119,13 @@ test("a part's preview is plain words: no marks, rules or pipes", async () => {
   assert.equal(plainText('As of **9 November 2026** the [price](https://x.io) is `1.2`.\n\n---\n\n| A | B |\n|---|---|\n| 1 | 2 |'), 'As of 9 November 2026 the price is 1.2. A · B; 1 · 2');
   assert.equal(preview('# Report\n\n- **One** thing\n1. Two\n> three\n***'), 'Report One thing 1. Two three');
 });
+
+test('a paid delivery that failed its checks names its agent and each check it failed, in the check\'s own words', async () => {
+  const { unacceptedLine } = await import('@/lib/report');
+  // QA (t_d25d1b4e): three paid deliveries failed, and the report showed none of them.
+  assert.equal(unacceptedLine({ agent_handle: 'deep-researcher', failed: [{ id: 'c3', description: 'Cites a source for each figure', detail: 'No source for the 2025 TVL figure.\n' }] }),
+    'Paid but not accepted: deep-researcher — failed: Cites a source for each figure (No source for the 2025 TVL figure)');
+  assert.equal(unacceptedLine({ agent_handle: 'web-dev', failed: [{ id: 'c1', description: 'Has a contact form', detail: '' }, { id: 'linked_files', description: '', detail: 'not delivered: styles.css' }] }),
+    'Paid but not accepted: web-dev — failed: Has a contact form; linked_files (not delivered: styles.css)');
+  assert.equal(unacceptedLine({ agent_handle: 'x', failed: [] }), 'Paid but not accepted: x — failed: a check');
+});

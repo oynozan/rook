@@ -3,7 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   CONVERSATION_FILES, CONVERSATION_FILES_CHARS, MAX_HISTORY_HANDLES, type AgentHistory, type DeliveredFile, type EventType, type Evaluation, type LlmCall,
-  type Part, type Plan, type PlanSubtask, type Receipt, type RookEvent, type SubtaskStatus, type TaskStatus,
+  type Part, type Plan, type PlanSubtask, type Receipt, type RookEvent, type SubtaskStatus, type TaskStatus, type Unaccepted,
 } from '../shared/types.ts';
 import { cutShort, onInputs } from '../planner/files.ts';
 import type { ChainBinding } from './chain-ledger.ts';
@@ -49,7 +49,12 @@ export type Task = {
   workspace?: DeliveredFile[];
   // files: the chat's current files once this run is done (planner 5.4 plus the workspace); absent on reports stored
   // before Rook attached files. changed: the paths this run delivered new or changed; absent on reports stored before.
-  final_result: { final_markdown: string; attribution: { subtask_id: string; agent_handle: string }[]; files?: DeliveredFile[]; changed?: string[]; abandoned: string[] } | null;
+  // unaccepted: for each abandoned part, its best paid delivery that failed the checks (runner.ts unacceptedOf); absent
+  // on reports stored before it.
+  final_result: {
+    final_markdown: string; attribution: { subtask_id: string; agent_handle: string }[]; files?: DeliveredFile[]; changed?: string[]; abandoned: string[];
+    unaccepted?: Unaccepted[];
+  } | null;
   llm_calls: LlmCall[]; // self-do and aggregate calls (plan and evaluation calls live on the plan and evaluations)
   ledger_saved?: unknown; // the ledger's last view, kept so a reloaded task still shows what it spent
   chain?: ChainBinding | null; // ROOK_LEDGER=chain: its contract task, sub-accounts and outstanding authorizations
