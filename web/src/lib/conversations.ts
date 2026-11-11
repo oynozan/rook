@@ -163,21 +163,32 @@ const NAMED = new RegExp([
   String.raw`\b(?:reduce|lower|cut|raise|increase|drop|bring)\b[^\d\n]{0,30}?\bto\s+${AMOUNT}`, // "cut it to two dollars"
   String.raw`\bfor\s+${MONEY}`, // "do it for 2 USDC", "for $1.5"
 ].join('|'), 'gi');
+// Any language: a number next to a currency word ("1,5 USDC", "2 dolar", "$3", "5 dólares", "1,5 USDC'ye") in a message
+// that names the budget in a word of its language ("Bütçeyi 1,5 USDC yap.", "presupuesto de 2 USD").
+// \b sees no edge before a letter outside ASCII (Cyrillic), so the start is "no letter before".
+const BUDGET_WORD = /(?<![\p{L}\d])(?:budget|bütçe|butce|presupuest|orçamento|orcamento|budżet|бюджет|anggaran|ngân sách|bajet)|预算|予算|예산|ميزانية|बजट|งบประมาณ/iu;
+const DIGITS = String.raw`(\d+(?:[.,]\d+)?)(?![.,]?\d)`;
+const CURRENCY_ANY = String.raw`(?:usdc|usd|dollars?|dolar\p{L}*|dólar\p{L}*|dolares|bucks?|долл\p{L}*|ドル|美元|달러)`;
+const MONEY_ANY = new RegExp(String.raw`\$\s*${DIGITS}|(?<![\p{L}\d.,])${DIGITS}\s*${CURRENCY_ANY}(?![\p{L}\d])(?:['’]\p{L}*)?`, 'giu');
 
 /**
- * Amounts the message itself names as its budget ("make it 1.5 USDC", "budget: 2", "reduce it to 1", "for $2"), in
- * atomic USDC. Rook plans at a total the message names instead of the Budget field, so the wallet check before drafting
- * takes the smallest of these and the field. Other amounts ("tokens under $1", "a 1 USD fee", "budget for 1 week")
- * don't count, so a wallet short of the field's budget still hears it before planning is paid for. The plan's own
- * budget is checked again before it is funded.
+ * Amounts the message itself names as its budget ("make it 1.5 USDC", "budget: 2", "reduce it to 1", "for $2",
+ * "Bütçeyi 1,5 USDC yap."), in atomic USDC, each once. Rook plans at a total the message names instead of the Budget
+ * field, so the wallet check before drafting takes the smallest of these and the field. Other amounts ("tokens under
+ * $1", "a 1 USD fee", "budget for 1 week") don't count, so a wallet short of the field's budget still hears it before
+ * planning is paid for. The plan's own budget is checked again before it is funded.
  */
 export function amountsNamed(prompt: string): bigint[] {
   const out: bigint[] = [];
-  for (const m of prompt.matchAll(NAMED)) {
-    const raw = m.slice(1).find((g) => g !== undefined) ?? '';
+  const add = (raw: string) => {
     const b = parseBudget(WORD_NUMBERS[raw.toLowerCase()] ?? raw);
-    if (b.ok) out.push(b.atomic);
+    if (b.ok && !out.includes(b.atomic)) out.push(b.atomic);
+  };
+  for (const m of prompt.matchAll(NAMED)) {
+    const raw = m.slice(1).find((g) => g !== undefined);
+    if (raw) add(raw);
   }
+  if (BUDGET_WORD.test(prompt)) for (const m of prompt.matchAll(MONEY_ANY)) add(m[1] ?? m[2]);
   return out;
 }
 
