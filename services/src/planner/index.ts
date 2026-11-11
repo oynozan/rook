@@ -2,11 +2,11 @@
 // Reaches the market only through the market gateway (section 9).
 import { config, MAX_PROMPT_CHARS } from '../shared/config.ts';
 import { HttpError, bigintReplacer, call, serve, type Running } from '../shared/http.ts';
-import { AggregateRequest, PlanRequest, SelfDoRequest, type AgentSummary, type AggregateResult, type LlmCall, type Plan, type X402Config } from '../shared/types.ts';
+import { PlanRequest, SelfDoRequest, type AgentSummary, type AggregateResult, type LlmCall, type Plan, type X402Config } from '../shared/types.ts';
 import { budgetBacked, formatUsdc, namedBudgetProblem, share } from '../shared/money.ts';
 import { MAX_CATEGORY_LISTED, applySelection, buildPlan, filterSearch, hireable, isRookEdit, marketCategory, type QuoteResult } from './plan.ts';
 import { aggregate, draft, select, selfDo } from './prompts.ts';
-import { agentOf, isMerged } from './canned.ts';
+import { AggregateIn, agentOf, isMerged } from './canned.ts';
 import { readReferences } from './reference.ts';
 
 const gw = () => config.urls.marketGateway;
@@ -129,14 +129,16 @@ export function start(port = config.ports.planner): Promise<Running> {
       return undefined;
     },
     // `files`: an edit's inputs, whole. `sources`: the pages Rook's model read or cited (also listed after the text).
+    // `truncated`: the reply was cut at the model's max_tokens, so its last file lacks its end: the runner never uses it.
     'POST /self-do': async ({ body }) => {
       const req = SelfDoRequest.parse(body);
       const calls: LlmCall[] = [];
-      const { text, sources } = await llmStep(calls, () => selfDo(req.brief, req.criteria, req.files));
-      return { text, sources, llm_calls: calls };
+      const { text, sources, truncated } = await llmStep(calls, () => selfDo(req.brief, req.criteria, req.files));
+      return { text, sources, llm_calls: calls, truncated };
     },
+    // A part may name the files it edits (`inputs`) and the ones it is asked for (`paths`): they name its delivery's files.
     'POST /aggregate': async ({ body }): Promise<AggregateResult> => {
-      const req = AggregateRequest.parse(body);
+      const req = AggregateIn.parse(body);
       const calls: LlmCall[] = [];
       const { final_markdown, files } = await llmStep(calls, () => aggregate(req));
       const attribution = req.subtasks.filter(isMerged).map((s) => ({ subtask_id: s.id, agent_handle: agentOf(s) }));

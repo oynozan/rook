@@ -8,7 +8,7 @@ import { CONVERSATION_MESSAGES, CONVERSATION_REPORT_CHARS, type AgentHistory, ty
 import { attack } from './attack.ts';
 import { createChainLedger } from './chain-ledger.ts';
 import { createLedger, type Ledger } from './ledger.ts';
-import { contractTaskOf, inputsTooLarge, kill, restoreTask, runTask, SHUTDOWN } from './runner.ts';
+import { blockedBy, contractTaskOf, kill, restoreTask, runTask, SHUTDOWN } from './runner.ts';
 import { openStore } from './db.ts';
 import {
   ancestors, attempts, emit, fromDoc, headOf, isFree, isTerminal, newTask, openPlan, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task,
@@ -318,12 +318,14 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
           // A plan that asks has nothing to run: never funded on facts it says it lacks.
           const asking = !!plan.questions?.length;
           if (asking && plan.subtasks.length) plan.subtasks = [];
-          // What the user should know before funding, in plain words: files this chat couldn't send whole, and a part
-          // whose files are too large to send.
+          // What the user should know before funding, in plain words: files this chat couldn't send whole. A part whose
+          // files are too large to send blocks the plan: it is shown, with why, and /approve refuses it (a note was
+          // hidden, the plan funded, and the part left out only at run time).
           plan.notes ??= [];
           if (ws.left.length) plan.notes.push(`This chat's files are too many or too large to send whole, so Rook left out the ones delivered longest ago: ${named(ws.left)}.`);
           setPlan(t, plan);
-          for (const s of t.subtasks) { const why = inputsTooLarge(t, s); if (why) plan.notes.push(why); }
+          const blocked = blockedBy(t);
+          if (blocked) plan.blocked = plan.blocked ? `${plan.blocked} ${blocked}` : blocked; // after the planner's own, if any
           emit(t, 'plan', plan);
           if (asking) {
             // Facts only the user can give are missing: Rook asks them instead of planning. Not a failure (no error),
@@ -350,8 +352,8 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
             saveTask(replaced);
           }
           // Small edits of the chat's files that Rook makes itself (a rename, a colour) pay no one and wait on no agent:
-          // they start at once, as an approved plan that hires no agent does, with no button to press.
-          if (isFree(t) && t.subtasks.every((s) => s.self_do_reason === 'rook_edit')) startFree(t, 'funder.sim');
+          // they start at once, as an approved plan that hires no agent does, with no button to press. Not when blocked.
+          if (!plan.blocked && isFree(t) && t.subtasks.every((s) => s.self_do_reason === 'rook_edit')) startFree(t, 'funder.sim');
         } catch (e: any) {
           if (isTerminal(t.status)) return; // killed while planning: stays killed
           // A 422 is the planner's sentence for a message that isn't a task: kept as is, for the user. The rest is internal.
@@ -407,6 +409,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       const reprint = chain && !isFree(t) && t.status === 'approved' && !chain.contractTaskOf(t.id); // funding instructions again
       if (t.status !== 'planned' && !reprint) throw new HttpError(409, `task is ${t.status}, approve needs planned`);
       if (!t.subtasks.length) throw new HttpError(409, 'the plan has no subtasks');
+      if (t.plan?.blocked) throw new HttpError(409, t.plan.blocked); // its sentence, for the user as it is
       if (config.market === 'live' && !chain) {
         throw new HttpError(409, 'live market: paying agents needs ROOK_LEDGER=chain (signer, chain-gateway, budget contract); see docs/x402-payments-plan.md');
       }

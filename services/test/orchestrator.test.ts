@@ -45,6 +45,9 @@ const PROFILES: Record<string, Profile> = {
   'site-good': { price: '100000', state: 'COMPLETED', text: 'Here is the site.\n\nindex.html\n```html\n<!doctype html>\n<html><body>Ozan</body></html>\n```' },
   'site-two': { price: '100000', state: 'COMPLETED', text: `Here is the site.\n\n${fenced('index.html', 'html', PAGE('Alex Doe'))}\n\n${fenced('styles.css', 'css', CSS)}` },
   'edit-good': { price: '100000', state: 'COMPLETED', text: `Done.\n\n${fenced('index.html', 'html', PAGE('Ozan Andaç'))}` },
+  // The same edit given back in a folder, and in a bare block with no path at all.
+  'edit-folder': { price: '100000', state: 'COMPLETED', text: `Done.\n\n${fenced('portfolio/index.html', 'html', PAGE('Ozan Andaç'))}` },
+  'edit-bare': { price: '100000', state: 'COMPLETED', text: `Here is the updated page:\n\n${'`'.repeat(4)}html\n${PAGE('Elif Şahin')}\n${'`'.repeat(4)}` },
   // A picture, a palette as data, a text file and a photo sent as bytes: none of them a text part.
   media: { price: '100000', state: 'COMPLETED', artifacts: [
     { name: 'logo.png', parts: [{ url: 'https://cdn.example/a/9f2' }] },
@@ -79,9 +82,15 @@ before(async () => {
     },
     'POST /self-do': ({ body }) => {
       selfDoRequests.push(body);
-      // An edit returns the file it changes whole, as Rook's writer does (planner 5.3).
+      // An edit returns the file it changes whole, as Rook's writer does (planner 5.3). "CUT": the model's reply stops at
+      // max_tokens (CUT-ONCE: only on the first try); "BORDER": the change adds a rule instead of the orange.
       const f = body.files?.[0];
-      return { text: f ? `Changed.\n\n${fenced(f.path, 'css', f.text.replace('teal', 'orange'))}` : 'Rook wrote this part.', llm_calls: [] };
+      const tries = selfDoRequests.filter((r) => r.task_id === body.task_id && r.subtask_id === body.subtask_id).length;
+      if (body.brief.includes('CUT') && (!body.brief.includes('CUT-ONCE') || tries === 1)) {
+        return { text: `Changed.\n\n${f.path}\n${'`'.repeat(4)}css\nh1 {\n  color: ora`, llm_calls: [], truncated: true };
+      }
+      const change = (x: string) => (body.brief.includes('BORDER') ? `${x}\nh2 {\n  border: 0;\n}` : x.replace('teal', 'orange'));
+      return { text: f ? `Changed.\n\n${fenced(f.path, 'css', change(f.text))}` : 'Rook wrote this part.', llm_calls: [] };
     },
     'POST /aggregate': ({ body }) => {
       aggRequests.push(body);
@@ -995,21 +1004,105 @@ test("an edit sends the agent the chat's files it changes, whole; the report hol
   await call(`${orch.url}/tasks/${waits.id}/cancel`, {});
 });
 
-test('a part whose files are too large to send whole is never sent: the plan and the run say why, and its cap goes back', async () => {
+test('a part whose files are too large to send blocks its plan: shown with why, never approved or started, nothing sent', async () => {
+  // QA: the 300 KB limit was a note the plan card hid; the plan was funded, and only the run said so, garbled.
   PROFILES['site-big'] = { price: '100000', state: 'COMPLETED', text: `index.html\n${'`'.repeat(3)}html\n<!doctype html>\n${'<p>x</p>\n'.repeat(35_000)}</html>\n${'`'.repeat(3)}` };
   const site = await runToEnd({ subtasks: [sub('s1', 'Build the site', '200000', [cand('site-big', '100000')])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] });
   assert.equal(site.final_result.files[0].name, 'index.html');
   plan = { subtasks: [{ ...sub('s1', 'Change the name', '200000', [cand('edit-good', '100000')]), inputs: ['index.html'] }], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] };
-  const sends = sent.length;
+  const sends = sent.length, writes = selfDoRequests.length;
   const edit = await call(`${orch.url}/tasks`, { prompt: 'change the name', budget_usdc: '1', parent_id: site.task.id });
-  const why = 'The files "Change the name" changes come to 308 KB, more than the 300 KB Rook can send with one part, so that part isn\'t sent.';
-  assert.deepEqual(edit.plan.notes, [why]);
-  await call(`${orch.url}/tasks/${edit.id}/approve`, {});
-  const s = await ended(edit.id);
+  const why = 'This plan can\'t run: "Change the name" changes 308 KB of files, more than the 300 KB Rook can send with one part. Ask for the change on fewer or smaller files.';
+  assert.deepEqual([edit.status, edit.plan.blocked, edit.plan.notes], ['planned', why, []]);
+  await assert.rejects(call(`${orch.url}/tasks/${edit.id}/approve`, {}), (e: any) => e.status === 409 && e.message === why);
+  // A change Rook would make itself at once waits too: it never starts.
+  plan = { subtasks: [{ ...sub('s1', 'Make the accent orange', '0', []), self_do: true, self_do_reason: 'rook_edit', inputs: ['index.html'] }], dropped: [], budget: budget('0'), notes: [], llm_calls: [] };
+  const free = await call(`${orch.url}/tasks`, { prompt: 'make the accent orange', budget_usdc: '1', parent_id: edit.id });
+  await new Promise((ok) => setTimeout(ok, 100));
+  assert.deepEqual([(await snap(free.id)).task.status, free.plan.blocked], ['planned', why.replace('"Change the name"', '"Make the accent orange"')]);
+  assert.deepEqual([sent.length, selfDoRequests.length], [sends, writes]); // no agent paid, and Rook wrote nothing
+  await call(`${orch.url}/tasks/${free.id}/cancel`, {});
+  // A plan approved before plans were blocked still never sends the part, in a plain sentence.
+  const { inputsTooLarge } = await import('../src/orchestrator/runner.ts');
+  assert.equal(inputsTooLarge({ workspace: [{ name: 'index.html', text: 'x'.repeat(310 * 1024) }] } as any, { title: 'Change the name', inputs: ['index.html'] } as any),
+    '"Change the name" changes 310 KB of files, more than the 300 KB Rook can send with one part, so Rook didn\'t send it.');
+});
+
+test("an edit's files reach the checker as they were; given back in a folder or a bare block, the edit still replaces its file", async () => {
+  const { send, approve } = as('folder.near');
+  plan = { subtasks: [sub('s1', 'Build the site', '200000', [cand('site-two', '100000')])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] };
+  const first = await send({ prompt: 'make me a portfolio website' });
+  await approve(first.id);
+  assert.equal((await ended(first.id)).task.status, 'closed');
+  // QA: "portfolio/index.html" left the chat with two index.html files, and the next edit worked on the old one.
+  plan = { subtasks: [{ ...sub('s1', 'Change the name', '200000', [cand('edit-folder', '100000')]), inputs: ['index.html'] }], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] };
+  const rename = await send({ prompt: 'change the name to Ozan Andaç', parent_id: first.id });
+  await approve(rename.id);
+  const renamed = await ended(rename.id);
+  assert.equal(renamed.task.status, 'closed', renamed.task.error);
+  assert.deepEqual([renamed.final_result.files.map((f: any) => [f.name, f.text]), renamed.final_result.changed],
+    [[['index.html', PAGE('Ozan Andaç')], ['styles.css', CSS]], ['index.html']]);
+  // The checker got the page as it was before the edit, and the aggregator what names the delivery's files.
+  const ev = evalRequests.filter((r) => r.task_id === rename.id).at(-1);
+  assert.deepEqual(ev.inputs, [{ path: 'index.html', text: PAGE('Alex Doe') }]);
+  assert.deepEqual([aggRequests.at(-1).subtasks[0].inputs, aggRequests.at(-1).subtasks[0].paths], [['index.html'], []]);
+  // QA: a bare ```html block was saved as "rename-to-....html" beside the old page.
+  plan = { subtasks: [{ ...sub('s1', 'Rename to Elif Şahin', '200000', [cand('edit-bare', '100000')]), inputs: ['index.html'] }], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] };
+  const bare = await send({ prompt: 'now call me Elif Şahin', parent_id: rename.id });
+  await approve(bare.id);
+  const named = await ended(bare.id);
+  assert.deepEqual(named.final_result.files.map((f: any) => [f.name, f.text]), [['index.html', PAGE('Elif Şahin')], ['styles.css', CSS]]);
+  assert.deepEqual(evalRequests.filter((r) => r.task_id === bare.id).at(-1).inputs, [{ path: 'index.html', text: PAGE('Ozan Andaç') }]);
+  // A part that edits nothing sends the checker no inputs.
+  assert.equal(evalRequests.filter((r) => r.task_id === first.id).at(-1).inputs, undefined);
+});
+
+test('two parts that edit the same file run one after the other, the second from the first one\'s version: one file, both changes', async () => {
+  // QA (scripts/collide.mts): side by side, both changed the file as it was; one change was lost to "page-2".
+  const { send, approve } = as('collide.near');
+  plan = { subtasks: [sub('s1', 'Build the site', '200000', [cand('site-two', '100000')])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] };
+  const first = await send({ prompt: 'make me a portfolio website' });
+  await approve(first.id);
+  assert.equal((await ended(first.id)).task.status, 'closed');
+  const edit = (id: string, title: string) => ({ ...sub(id, title, '0', []), self_do: true, self_do_reason: 'rook_edit', inputs: ['styles.css'] });
+  plan = { subtasks: [edit('s1', 'Make the accent orange'), edit('s2', 'Add a BORDER rule')], dropped: [], budget: budget('0'), notes: [], llm_calls: [] };
+  const two = await send({ prompt: 'make it orange and add a border rule', parent_id: first.id });
+  const s = await ended(two.id);
   assert.equal(s.task.status, 'closed', s.task.error);
-  assert.equal(sent.length, sends); // no agent was paid for a request it could not see whole
-  assert.deepEqual([s.subtasks[0].final_outcome, s.ledger.spent_atomic, s.final_result.changed], ['abandoned', '0', []]);
-  assert.deepEqual((await eventsOf(edit.id)).filter((e) => e.type === 'error').map((e) => [e.subtask_id, e.data.kind, e.data.message]), [['s1', 'inputs_too_large', why]]);
+  const asked = selfDoRequests.filter((r) => r.task_id === two.id);
+  assert.deepEqual(asked.map((r) => [r.subtask_id, r.files[0].text]), [['s1', CSS], ['s2', CSS.replace('teal', 'orange')]]);
+  const both = `${CSS.replace('teal', 'orange')}\nh2 {\n  border: 0;\n}`;
+  assert.deepEqual([s.final_result.files.map((f: any) => [f.name, f.subtask_id, f.text]), s.final_result.changed],
+    [[['index.html', '', PAGE('Alex Doe')], ['styles.css', 's2', both]], ['styles.css']]);
+  // The second part's checker compared it with the version the first part left.
+  assert.deepEqual(evalRequests.filter((r) => r.task_id === two.id && r.subtask_id === 's2').at(-1).inputs, [{ path: 'styles.css', text: CSS.replace('teal', 'orange') }]);
+});
+
+test("Rook's answer cut off at its model's limit is a failed try, never checked or used: the files stay as they were", async () => {
+  const { send, approve } = as('cut.near');
+  plan = { subtasks: [sub('s1', 'Build the site', '200000', [cand('site-two', '100000')])], dropped: [], budget: budget('200000'), notes: [], llm_calls: [] };
+  const first = await send({ prompt: 'make me a portfolio website' });
+  await approve(first.id);
+  assert.equal((await ended(first.id)).task.status, 'closed');
+  const edit = (title: string) => ({ subtasks: [{ ...sub('s1', title, '0', []), self_do: true, self_do_reason: 'rook_edit', inputs: ['styles.css'] }], dropped: [], budget: budget('0'), notes: [], llm_calls: [] });
+  // Cut off once: Rook tries again, and the whole answer is the one checked and kept.
+  plan = edit('Make the accent orange CUT-ONCE');
+  const once = await send({ prompt: 'make the accent orange', parent_id: first.id });
+  const s1 = await ended(once.id);
+  assert.equal(s1.task.status, 'closed', s1.task.error);
+  const cutEvents = async (id: string) => (await eventsOf(id)).filter((e) => e.type === 'error').map((e) => [e.data.kind, e.data.message]);
+  const said = 'Rook\'s answer for "Make the accent orange CUT-ONCE" was cut off before its end (longer than its model writes in one answer), so Rook didn\'t use it, and your files stay as they were.';
+  assert.deepEqual(await cutEvents(once.id), [['cut_off', `${said} Rook tries again.`]]);
+  assert.equal(evalRequests.filter((r) => r.task_id === once.id).length, 1); // only the whole answer was checked
+  assert.deepEqual([s1.final_result.files.find((f: any) => f.name === 'styles.css').text, s1.final_result.changed], [CSS.replace('teal', 'orange'), ['styles.css']]);
+  // Cut off every time: after the last try the part is left out, and the chat's file is the whole one it had.
+  plan = edit('Add a BORDER rule CUT');
+  const always = await send({ prompt: 'add a border rule', parent_id: once.id });
+  const s2 = await ended(always.id);
+  assert.deepEqual([s2.subtasks[0].final_outcome, s2.final_result.changed], ['abandoned', []]);
+  assert.equal(s2.final_result.files.find((f: any) => f.name === 'styles.css').text, CSS.replace('teal', 'orange'));
+  assert.equal(evalRequests.filter((r) => r.task_id === always.id).length, 0);
+  assert.deepEqual((await cutEvents(always.id)).filter(([k]) => k === 'cut_off').map(([, m]) => m.endsWith('Rook tries again.')), [true, true, false]);
 });
 
 test('an image link, data, a text file and a photo sent as bytes are all kept: the evaluator, the report and the files see them', async () => {
@@ -1051,4 +1144,19 @@ test('deliveryOf reads data urls and a file part with its bytes inline, and neve
     'table.csv\n```csv\na,b\n1,2\n```',
     'delivery-3.txt\n```txt\nplain words, not base64\n```',
   ]);
+});
+
+test("withWorkspace: an edit's file at another path replaces the one it stands for; a page cut off never replaces a whole one", async () => {
+  const { withWorkspace } = await import('../src/orchestrator/store.ts');
+  const file = (subtask_id: string, name: string, text: string) => ({ subtask_id, agent_handle: 'web-dev', name, mime: 'text/html', text });
+  const ws = [file('s1', 'index.html', PAGE('Alex Doe')), file('s1', 'styles.css', CSS)];
+  const moved = withWorkspace(ws, [file('s1', 'portfolio/index.html', PAGE('Ozan Andaç'))], { s1: ['index.html'] });
+  assert.deepEqual([moved.files.map((f) => [f.name, f.subtask_id, f.text]), moved.changed], [[['index.html', 's1', PAGE('Ozan Andaç')], ['styles.css', '', CSS]], ['index.html']]);
+  // A part that edits nothing, or gives the path itself too, keeps the new path as a new file.
+  assert.deepEqual(withWorkspace(ws, [file('s1', 'portfolio/index.html', PAGE('B'))]).files.map((f) => f.name), ['index.html', 'styles.css', 'portfolio/index.html']);
+  const both = withWorkspace(ws, [file('s1', 'index.html', PAGE('A')), file('s1', 'portfolio/index.html', PAGE('B'))], { s1: ['index.html'] });
+  assert.deepEqual(both.files.map((f) => [f.name, f.text]), [['index.html', PAGE('A')], ['styles.css', CSS], ['portfolio/index.html', PAGE('B')]]);
+  // QA: a reply cut off mid-table replaced the whole games.html; a page with no </html> never replaces one that has it.
+  const cut = withWorkspace(ws, [file('s1', 'index.html', PAGE('Ozan').replace('</html>', ''))], { s1: ['index.html'] });
+  assert.deepEqual([cut.files[0].text, cut.changed], [PAGE('Alex Doe'), []]);
 });
