@@ -224,6 +224,11 @@ function printSummary(snap: any) {
     console.log(bold('\n======================'));
     if (snap.final_result.attribution?.length) console.log(`Attribution: ${snap.final_result.attribution.map((a: any) => `${a.subtask_id} <- ${a.agent_handle}`).join(', ')}`);
     if (snap.final_result.abandoned?.length) console.log(yellow(`Abandoned: ${snap.final_result.abandoned.join(', ')}`));
+    for (const u of snap.final_result.unaccepted ?? []) {
+      const failed = u.failed.map((f: any) => `${f.description}${f.detail ? ` (${f.detail})` : ''}`).join('; ');
+      console.log(yellow(`\nPaid but not accepted, ${u.subtask_id} <- ${u.agent_handle}: failed ${failed}`));
+      console.log(u.text.trim());
+    }
   }
 
   if (snap.receipts?.length) {

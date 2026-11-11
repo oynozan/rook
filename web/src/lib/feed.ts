@@ -130,6 +130,8 @@ export function problemLine(data: { kind?: string; message?: string; agent_handl
     // Rook's own answer stopped at its model's output limit (runner.ts selfDo), never used: a sentence for the user, as
     // written. A retry while Rook tries again; the last one leaves the part out.
     case 'cut_off': return / Rook tries again\.$/.test(message) ? retry(message) : { text: message, tone: 'alert', label: 'Cut off' };
+    // Rook stopped re-hiring after the judge alone failed the work (runner.ts judgeOnlyStop): a choice, not a fault.
+    case 'judge_only': return note(`${who ? `${who}'s` : 'The'} work on ${it} passed every machine check but not the judge. Another agent would likely fail it too, so Rook hires no one else for it.`);
     // A part whose files are past what Rook sends with one part (runner.ts inputsTooLarge): the user's request is too
     // big, not Rook broken, so never "a problem on its side". Older services said "The files "X" changes come to 325 KB".
     case 'inputs_too_large': {

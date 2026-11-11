@@ -149,6 +149,14 @@ test("Rook's own answer cut off at its model's limit reads as written, never as 
   assert.deepEqual(problemLine({ kind: 'cut_off', message: last }, 'Rename the site'), { text: last, tone: 'alert', label: 'Cut off' });
 });
 
+test('Rook stopping re-hires after a judge-only failure is a note, never "a problem on its side"', () => {
+  const message = 'A delivery for s1 passed every machine check but failed the judge, and Rook already hired again once for this part. Another agent would likely fail it too, so Rook hires no one else for s1.';
+  assert.deepEqual(problemLine({ kind: 'judge_only', agent_handle: 'research-pro', message }, '“Token research”'), {
+    text: 'research-pro\'s work on “Token research” passed every machine check but not the judge. Another agent would likely fail it too, so Rook hires no one else for it.',
+    tone: 'muted', label: 'Note',
+  });
+});
+
 test("a failed evaluation names the evaluator's file checks in plain words: a cut-off file, an edit that isn't the change asked", () => {
   const plan: FeedContext = { ...ctx([['s1', 'Rename site'], ['s2', 'Add a card']]), selfDo: new Set(['s2']) };
   const lines = feedFrom([

@@ -626,7 +626,8 @@ const judgeOnly = (ev: Evaluation) => ev.verdict === 'fail' && ev.failed_criteri
  * not passing (unacceptedOf).
  */
 function judgeOnlyStop(ledger: Ledger, t: Task, s: Sub, next: Candidate): boolean {
-  const judged = s.evaluations.filter((e) => e.hire_id !== null && judgeOnly(e));
+  // One per hire: a restart between a hire's evaluation and its receipt judges it again, and that is still one failure.
+  const judged = [...new Map(s.evaluations.filter((e) => e.hire_id !== null && judgeOnly(e)).map((e) => [e.hire_id, e])).values()];
   if (!judged.length) return false;
   // What is left of the cap, never the balance: a top-up an unpaid hire left there is the reserve's money.
   const v = ledger.view(t.id)!.subtasks.find((x) => x.n === s.n)!;
