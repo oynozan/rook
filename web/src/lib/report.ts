@@ -183,6 +183,18 @@ export function plainText(markdown: string): string {
 /** Who made a file, in plain words: Rook's own work shows as Rook, an agent by its handle. */
 export const madeBy = (handle: string) => (handle.startsWith('rook:') ? 'Rook' : handle);
 
+/**
+ * The line for a paid delivery that failed Rook's checks (final_result.unaccepted): "Paid but not accepted: agent —
+ * failed: Cites a source for each figure (no source for the 2025 figure)", each failed check by its own words.
+ */
+export function unacceptedLine(u: { agent_handle: string; failed: { id: string; description?: string; detail?: string }[] }): string {
+  const checks = u.failed.map((f) => {
+    const what = f.description?.trim() || f.id, why = f.detail?.replace(/\s+/g, ' ').trim().replace(/[.\s]+$/, '');
+    return why ? `${what} (${why})` : what;
+  });
+  return `Paid but not accepted: ${madeBy(u.agent_handle)} — failed: ${checks.join('; ') || 'a check'}`;
+}
+
 /** Lines in a file's text; a final newline ends the last line rather than starting another. */
 export const lineCount = (text: string) => (text ? text.replace(/\r?\n$/, '').split(/\r?\n/).length : 0);
 

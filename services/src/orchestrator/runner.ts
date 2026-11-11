@@ -4,7 +4,7 @@
 // skipping what is done and polling hires whose payment header was out; unwind() returns what a stopped task, or a
 // closing one whose close failed, still holds, and keeps trying until the books close.
 // Error events carry `message` (for logs and the CLI) and `kind`, which a client words for people: eval_retry,
-// close_retry, unreachable_retry (retried); payment_lookup, receipt, paid_anyway, unpaid, aggregate, restore_note, rook_writes (notes); abandoned,
+// close_retry, unreachable_retry (retried); payment_lookup, receipt, paid_anyway, unpaid, aggregate, restore_note, rook_writes, judge_only (notes); abandoned,
 // unchecked, return, close, unwind, run, restore, inputs_too_large, cut_off (problems; the last two's messages are
 // plain sentences for the user). Agent-related ones name `agent_handle`.
 import { randomUUID } from 'node:crypto';
@@ -16,7 +16,7 @@ import { call } from '../shared/http.ts';
 import { formatUsdc } from '../shared/money.ts';
 import {
   TERMINAL, type A2AState, type A2ATask, type AcceptsRow, type AggregateResult, type Candidate, type Evaluation,
-  type GatewayResult, type LlmCall, type Part, type TaskStatus, type WorkFile, type X402Config,
+  type GatewayResult, type LlmCall, type Part, type TaskStatus, type Unaccepted, type WorkFile, type X402Config,
 } from '../shared/types.ts';
 import { OtherContract, Unrebuildable, type ChainLedger } from './chain-ledger.ts';
 import { LedgerError, type Ledger, type Recipient } from './ledger.ts';
@@ -160,9 +160,12 @@ export async function runTask(ledger: Ledger, t: Task) {
       // only the one file an edit changed, and an edit's file given back in another folder still replaces its input.
       const { files, changed } = withWorkspace(t.workspace ?? [], agg.files ?? [], Object.fromEntries(t.subtasks.map((s) => [s.id, s.inputs])));
       // Stored before the close: the report is paid for, so a close that fails (or a restart) never loses it.
+      // A part left out after paid deliveries that failed: the best one comes along apart from the report (unacceptedOf).
+      const unaccepted = t.subtasks.map(unacceptedOf).filter((u) => u !== null);
       t.final_result = {
         final_markdown: agg.final_markdown, attribution: agg.attribution ?? [], files, changed,
         abandoned: t.subtasks.filter((s) => s.final_outcome === 'abandoned').map((s) => s.id),
+        ...(unaccepted.length ? { unaccepted } : {}),
       };
       saveTask(t);
     }
@@ -193,9 +196,9 @@ export async function runTask(ledger: Ledger, t: Task) {
 /** The books are closed: the run ends with its report and what it spent and refunded. */
 function closed(ledger: Ledger, t: Task) {
   const v = ledger.view(t.id)!;
-  // The files (up to 3 MB) stay out of the event, which every reconnect replays and the task doc keeps: a client
-  // reads them from the snapshot, as it does the report.
-  const { files: _, ...result } = t.final_result!;
+  // The files (up to 3 MB) and the unaccepted deliveries stay out of the event, which every reconnect replays and the
+  // task doc keeps: a client reads them from the snapshot, as it does the report.
+  const { files: _, unaccepted: __, ...result } = t.final_result!;
   emit(t, 'final', { ...result, spent_atomic: v.spent_atomic, refunded_atomic: v.refunded_atomic, reserve_used_atomic: v.reserve_used_atomic });
   setStatus(t, 'closed');
 }
@@ -606,6 +609,69 @@ function failedVerdict(s: Sub) {
   return s.rehire_count > config.maxRehires;
 }
 
+/** The checks a failed evaluation failed, each with its kind and detail. */
+const failedChecks = (ev: Evaluation) =>
+  ev.failed_criteria.map((id) => ({ id, ...(ev.results.find((r) => r.criterion_id === id) ?? { kind: id, detail: '' }) }));
+
+/** It failed only llm_judge criteria: every machine check passed. */
+const judgeOnly = (ev: Evaluation) => ev.verdict === 'fail' && ev.failed_criteria.length > 0 && failedChecks(ev).every((c) => c.kind === 'llm_judge');
+
+/**
+ * Re-hire rule once a delivery of the part failed only llm_judge criteria (every machine check passed). The next agent
+ * meets the same judge, so a re-hire mostly pays again for the same verdict: on mainnet (t_d25d1b4e) a part paid 0.90
+ * USDC for three deliveries, two of them failed only by the judge, and the user got none. So from then on Rook hires
+ * `next` only as the part's first re-hire, and only when its price fits what is left of the part's cap (no top-up from
+ * the reserve); a second such failure ends the hiring. Checked before every hire, on top of ROOK_MAX_REHIRES. True
+ * when Rook stops here: it says why (error kind judge_only), and the report offers the best paid delivery, marked as
+ * not passing (unacceptedOf).
+ */
+function judgeOnlyStop(ledger: Ledger, t: Task, s: Sub, next: Candidate): boolean {
+  const judged = s.evaluations.filter((e) => e.hire_id !== null && judgeOnly(e));
+  if (!judged.length) return false;
+  const left = ledger.view(t.id)!.subtasks.find((x) => x.n === s.n)!.balance_atomic;
+  const why = judged.length > 1 ? ''
+    : s.rehire_count > 1 ? ', and Rook already hired again once for this part'
+    : BigInt(next.price_atomic) > left ? `, and the next agent, ${next.handle}, asks ${formatUsdc(next.price_atomic)} USDC, more than the ${formatUsdc(left)} USDC left of this part's cap`
+    : null;
+  if (why === null) return false;
+  const which = judged.length > 1 ? `Two deliveries for ${s.id}` : `A delivery for ${s.id}`;
+  const agent = s.hires.find((h) => h.id === judged.at(-1)!.hire_id)?.agent_handle;
+  emit(t, 'error', {
+    kind: 'judge_only', ...(agent ? { agent_handle: agent } : {}),
+    message: `${which} passed every machine check but failed the judge${why}. Another agent would likely fail it too, so Rook hires no one else for ${s.id}.`,
+  }, s.id);
+  return true;
+}
+
+/** Checks whose failure means the delivery is never offered as usable: an injection, a file cut off, nothing delivered. */
+const UNSAFE = ['injection', 'cut_off', 'non_empty'];
+/** What a built-in check asks, for one a delivery can fail and still be offered (evaluator 6.2). */
+const BUILT_IN: Record<string, string> = { linked_files: 'Every file its pages load is delivered', edit_scope: 'Changes only what was asked' };
+
+/**
+ * A part abandoned after paid deliveries that were judged and failed: the best of them, to show apart from the report,
+ * marked as not passing. Best: fewest failed checks, then the latest. Never one that failed a check in UNSAFE. Null when
+ * the part passed, or none was paid and judged. Read from the hires and evaluations the task stores, so a restart
+ * loses nothing. On mainnet (t_d25d1b4e) a part paid 0.90 USDC for three good deliveries a strict judge failed, and the
+ * user got none of them.
+ */
+export function unacceptedOf(s: Sub): Unaccepted | null {
+  if (s.final_outcome !== 'abandoned') return null;
+  let best: Unaccepted | null = null;
+  for (const h of s.hires) {
+    const ev = s.evaluations.findLast((e) => e.hire_id === h.id);
+    if (!h.paid || ev?.verdict !== 'fail' || !h.deliverable_text?.trim()) continue;
+    const checks = failedChecks(ev);
+    if (checks.some((c) => UNSAFE.includes(c.kind))) continue;
+    if (best && checks.length > best.failed.length) continue; // a later one with as few failures wins
+    best = {
+      subtask_id: s.id, hire_id: h.id, agent_handle: h.agent_handle, text: h.deliverable_text,
+      failed: checks.map((c) => ({ id: c.id, description: s.criteria.find((x) => x.id === c.id)?.description ?? BUILT_IN[c.id] ?? c.id, detail: c.detail })),
+    };
+  }
+  return best;
+}
+
 /** Every paid hire gets a receipt (8.8); verdict and attestation are null when it was never judged. */
 async function writeReceipt(ledger: Ledger, t: Task, s: Sub, hire: Hire, ev: Evaluation | null) {
   hire.verdict = ev?.verdict ?? null;
@@ -671,10 +737,13 @@ async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Defer
       pending = null;
       hire = h.paid ? h : await resumeHire(ledger, t, s, h);
     } else {
-      // The plan's order (lowest expected cost first, docs 5.2 step 4), never re-sorted by price here.
-      const c = s.candidates.find((x) => !s.tried.includes(x.handle)) ?? await unreachableAgain(t, s);
-      if (!c) return giveUp(t, s, done);
-      if (!s.tried.includes(c.handle)) s.tried.push(c.handle);
+      // The plan's order (lowest expected cost first, docs 5.2 step 4), never re-sorted by price here. Then an agent
+      // that had no reachable backend, once (unreachableAgain).
+      const c = s.candidates.find((x) => !s.tried.includes(x.handle))
+        ?? s.candidates.find((x) => s.unreachable?.includes(x.handle) && !s.retried?.includes(x.handle));
+      if (!c || judgeOnlyStop(ledger, t, s, c)) return giveUp(t, s, done);
+      if (s.tried.includes(c.handle)) await unreachableAgain(t, s, c);
+      else s.tried.push(c.handle);
       setSub(t, s, 'quoting');
       const row = await quote(ledger, t, s, c);
       if (!row) continue;
@@ -711,14 +780,11 @@ async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Defer
  * skill). Once every other candidate is tried, such an agent is asked again, once, after ROOK_UNREACHABLE_RETRY_S: on
  * mainnet the only affordable agent of a part answered it and the part was lost, though the agent was fine later.
  */
-async function unreachableAgain(t: Task, s: Sub): Promise<Candidate | undefined> {
-  const c = s.candidates.find((x) => s.unreachable?.includes(x.handle) && !s.retried?.includes(x.handle));
-  if (!c) return undefined;
+async function unreachableAgain(t: Task, s: Sub, c: Candidate) {
   (s.retried ??= []).push(c.handle);
   saveTask(t);
   emit(t, 'error', { kind: 'unreachable_retry', agent_handle: c.handle, message: `${c.handle} had no reachable backend; asking it again in ${config.unreachableRetryS} s` }, s.id);
   await sleep(config.unreachableRetryS * 1000, undefined, { signal: t.abort.signal });
-  return c;
 }
 
 /**

@@ -27,7 +27,8 @@ import {
   type CloseResult, type Funding, type FundingResult, type KeptTransfer, type Terms,
 } from '@/lib/funding';
 import { explorerTx, NETWORK, rpcFor, type Network } from '@/lib/network';
-import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary } from '@/lib/server/orchestrator';
+import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary, Unaccepted } from '@/lib/server/orchestrator';
+import { unacceptedLine } from '@/lib/report';
 import { detail, pageUnreachable } from '@/lib/errors';
 import { useMode } from '@/hooks/mode';
 import { allSelfDoWhy, budgetToHire, selfDoWhy } from '@/lib/planner';
@@ -469,6 +470,46 @@ function MoneyCard({ ledger, receipts, network, simNote, titles }: { ledger: Tas
         </ol>
       )}
     </div>
+  );
+}
+
+/**
+ * For each part the run left out, the best paid delivery that failed Rook's checks (final_result.unaccepted), closed
+ * until opened: who sent it and which checks it failed, then the delivery itself. It isn't part of the report, and a
+ * later change never builds on it. Agent text: shown as plain React text only (Markdown).
+ */
+function UnacceptedWork({ items, titles }: { items: Unaccepted[]; titles: Map<string, string> }) {
+  return (
+    <section className="mt-6">
+      <h3 className="text-xl font-medium tracking-[-0.01em]">Work that didn&apos;t pass</h3>
+      <p className="text-sm text-ink/65">Rook paid for this work, but it failed Rook&apos;s checks, so it isn&apos;t part of the report and later changes don&apos;t build on it.</p>
+      <ul className="mt-2 rounded-2xl border border-ink/15">
+        {items.map((u) => <UnacceptedRow key={u.subtask_id} u={u} part={titles.get(u.subtask_id)} />)}
+      </ul>
+    </section>
+  );
+}
+
+function UnacceptedRow({ u, part }: { u: Unaccepted; part?: string }) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  return (
+    <li className="min-w-0 border-b border-ink/10 px-4 py-3 last:border-b-0">
+      {part && <p className="font-medium wrap-break-word">{part}</p>}
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={open ? id : undefined}
+        onClick={() => setOpen((o) => !o)}
+        className="-mx-2 flex min-h-11 max-w-full cursor-pointer items-baseline gap-2 rounded-lg px-2 py-2 text-left text-sm text-alert transition-colors hover:bg-ink/5 motion-reduce:transition-none"
+      >
+        <span className={`shrink-0 transition-transform duration-200 motion-reduce:transition-none ${open ? 'rotate-90' : ''}`} aria-hidden="true">›</span>
+        <span className="min-w-0 wrap-break-word">{unacceptedLine(u)}</span>
+      </button>
+      <Reveal open={open}>
+        <div id={id}><Markdown markdown={u.text} className="mt-1" /></div>
+      </Reveal>
+    </li>
   );
 }
 
@@ -1495,6 +1536,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
           {/* The zip carries the chat's name (its first request), not this message's: QA got "make-the-accent-color-orange.zip" for a whole site. */}
           {!!final_result.files?.length && <ReportFiles files={final_result.files} titles={titles} name={chat ?? titles.get(final_result.files[0].subtask_id) ?? task.prompt}
             changed={final_result.changed} edit={planned.some((s) => !!s.inputs?.length)} />}
+          {!!final_result.unaccepted?.length && <UnacceptedWork items={final_result.unaccepted} titles={titles} />}
 
           {!free && <MoneyCard ledger={ledger} receipts={receipts} network={network} simNote={simNote} titles={titles} />}
         </RookMessage>
