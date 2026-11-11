@@ -1,8 +1,9 @@
 // Canned planner output for ROOK_LLM=canned (docs/agentic-system.md 5.2 last paragraph, 5.3, 5.4).
 // The labels here are the shared demo contract with the simulator and the evaluator: keep them identical.
-import type { AggregateRequest, Criterion } from '../shared/types.ts';
+import type { AggregateRequest, Criterion, WorkFile } from '../shared/types.ts';
 import type { z } from 'zod';
 import type { DraftSubtask } from './plan.ts';
+import { attachFiles, fenceFor, fenceLang, fileGaps, kindOfPath, type Attached } from './files.ts';
 
 const brief = (title: string, body: string) => `${title}\n\n${body}`;
 
@@ -63,9 +64,26 @@ export const CANNED_DRAFT: DraftSubtask[] = [
   },
 ];
 
-/** Fixed self-do text that satisfies plain-text `contains` and every `numeric_match` it can. */
-export function cannedSelfDo(brief: string, criteria: Criterion[]): string {
+/** A stand-in file for canned mode: one line that says so, in the file's own comment syntax. */
+function cannedFile(path: string): string {
+  const k = kindOfPath(path) ?? '';
+  const say = `SIMULATED ${path}, written by Rook's canned mode without a model.`;
+  if (k === 'json') return '{\n  "simulated": true\n}';
+  if (k === 'html') return `<!doctype html>\n<html>\n<body><p>${say}</p></body>\n</html>`;
+  if (['css', 'scss', 'less'].includes(k)) return `/* ${say} */`;
+  if (['js', 'mjs', 'cjs', 'jsx', 'ts', 'mts', 'cts', 'tsx'].includes(k)) return `// ${say}\nexport {};`;
+  if (['py', 'sh', 'yaml', 'toml', 'env', 'dockerfile', 'gitignore', 'ini', 'conf', 'prisma', 'graphql'].includes(k)) return `# ${say}`;
+  return say;
+}
+const fenced = (path: string, text: string) => { const f = fenceFor(text); return [path, `${f}${fenceLang(path)}`, text, f]; };
+
+/**
+ * Fixed self-do text that satisfies plain-text `contains`, every `numeric_match` and every `files` path it can. An
+ * edit's `files` come back whole and unchanged (canned mode changes nothing), so a run can carry a project through.
+ */
+export function cannedSelfDo(brief: string, criteria: Criterion[], files: WorkFile[] = []): string {
   const lines = [`# ${brief.split('\n')[0].trim()}`, '', '_SIMULATED self-do: written by Rook without a hired agent._', ''];
+  const given = new Set(files.map((f) => f.path));
   for (const c of criteria) {
     if (c.kind === 'contains' && /^[\w\s,.'()%-]+$/.test(c.spec.pattern)) lines.push(`Covers: ${c.spec.pattern}`);
     if (c.kind === 'numeric_match') {
@@ -74,7 +92,9 @@ export function cannedSelfDo(brief: string, criteria: Criterion[]): string {
       if (c.spec.max !== undefined && v > c.spec.max) v = c.spec.max;
       lines.push(`${c.spec.label}: ${v}`);
     }
+    if (c.kind === 'files') for (const p of c.spec.paths.filter((p) => !given.has(p))) { lines.push('', ...fenced(p, cannedFile(p))); given.add(p); }
   }
+  for (const f of files) lines.push('', ...fenced(f.path, f.text));
   lines.push('', 'This section was produced without market data and repeats placeholder values only.');
   return lines.join('\n');
 }
@@ -88,14 +108,19 @@ const SELF_DO_SOURCE = 'Rook (its own model)';
 /** Who wrote a part, in the report's words: the agent's handle, or Rook for its own work ('rook:self-do' is internal). */
 export const sourceOf = (s: AggIn['subtasks'][number]) => (!s.agent_handle || s.agent_handle === 'rook:self-do' ? SELF_DO_SOURCE : s.agent_handle);
 
-export function cannedAggregate(req: AggIn): string {
+/** The code files in the merged deliveries, and each one's text with markers in their place (files.ts). */
+export const attach = (subtasks: AggIn['subtasks']): Attached =>
+  attachFiles(subtasks.filter(isMerged).map((s) => ({ subtask_id: s.id, agent_handle: agentOf(s), title: s.title, text: s.deliverable_text! })));
+
+/** The deterministic merge. Files stay out of it as markers, like the aggregator's report: they come attached. */
+export function cannedAggregate(req: AggIn, attached: Attached = attach(req.subtasks)): string {
   // In a conversation the latest message can be just a change ("make it shorter"): the first message names the task.
   const out = [`# ${(req.earlier?.[0] ?? req.prompt).split('\n')[0].trim()}`, ''];
   for (const s of req.subtasks.filter(isMerged)) {
     const source = sourceOf(s);
-    out.push(`## ${s.title}`, '', `_Source: ${source === SELF_DO_SOURCE ? source : `\`${source}\``}._`, '', s.deliverable_text!.trim(), '');
+    out.push(`## ${s.title}`, '', `_Source: ${source === SELF_DO_SOURCE ? source : `\`${source}\``}._`, '', attached.texts.get(s.id)!.trim(), '');
   }
-  const gaps = req.subtasks.filter((s) => !isMerged(s));
-  if (gaps.length) out.push('## Gaps', '', ...gaps.map((s) => `- ${s.title}: not delivered`), '');
+  const gaps = [...req.subtasks.filter((s) => !isMerged(s)).map((s) => `- ${s.title}: not delivered`), ...fileGaps(attached).map((g) => `- ${g}`)];
+  if (gaps.length) out.push('## Gaps', '', ...gaps, '');
   return out.join('\n');
 }

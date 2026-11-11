@@ -22,6 +22,7 @@ const contract = new Map<string, { task: any; subs: CSub[] }>();
 const bal = new Map<string, bigint>();
 const auths = new Map<string, { amount: bigint; landed: boolean; until: number }>(); // account -> outstanding authorization
 const expireWaits = new Map<string, number>(); // account -> /expire calls answered 409 (still valid)
+const onVoid = new Map<string, () => void>(); // account -> what happens while its void is in flight (the agent delivers)
 const calls: string[] = [];
 const acct = (cid: string, n: number) => `t${cid}-${n}.rook.test`;
 const openContractTask = (cid: string, caps: string[]) =>
@@ -39,7 +40,7 @@ const hiccup = (route: string) => {
 };
 
 // ---- the fake market: an agent's A2A task stays WORKING until a test moves it ----
-const PRICE: Record<string, string> = { slowpoke: '300000', stubborn: '100000', hangs: '100000', alpha: '100000', beta: '100000', unsure: '100000' };
+const PRICE: Record<string, string> = { slowpoke: '300000', stubborn: '100000', hangs: '100000', alpha: '100000', beta: '100000', unsure: '100000', next: '100000' };
 const X402 = { network: 'near:testnet', asset: 'usdc.test', payTo: 'treasury.test' };
 const row = (amount: string) => ({ scheme: 'exact', ...X402, amount, maxTimeoutSeconds: 60 });
 const a2a = new Map<string, { handle: string; state: string }>();
@@ -59,6 +60,7 @@ before(async () => {
     'POST /expire': ({ body }) => {
       const a = acct(body.task_id, body.n), out = auths.get(a);
       if (!out) return { cleared: false, outstanding: false };
+      if (body.void) { onVoid.get(a)?.(); onVoid.delete(a); }
       // void: the signer spends the delegate's nonce, so it clears at once (landed when the payment ran first).
       if (!out.landed && !body.terminal_unpaid && !body.void && Date.now() <= out.until) {
         expireWaits.set(a, (expireWaits.get(a) ?? 0) + 1);
@@ -153,20 +155,28 @@ before(async () => {
       ? { ok: false, error: { code: -32002, message: 'Task cannot be canceled in state WORKING' } }
       : (a2a.get(body.id)!.state = 'CANCELED', { ok: true })),
   }, 0));
-  const planFor = (handle: string) => ({
-    subtasks: [{
-      id: 's1', title: 'Holders', brief: 'Holders\nPlease report.', search_terms: ['holders'], cap_atomic: PRICE[handle], deadline_s: 60, self_do: false,
-      criteria: [{ id: 'c1', kind: 'contains', description: 'x', spec: { pattern: '.' } }],
-      candidates: [{ handle, name: handle, description: handle, sla_seconds: 60, success_rate: null, delivered_jobs: 0, price_atomic: PRICE[handle], quote: row(PRICE[handle]) }],
-    }],
-    dropped: [], notes: [], llm_calls: [],
-    budget: { budget_atomic: '1000000', reserve_atomic: '200000', allocatable_atomic: '800000', allocated_atomic: PRICE[handle] },
-  });
+  // A prompt names the candidates, in order ("stubborn,alpha"); the cap is the first one's price.
+  const planFor = (prompt: string) => {
+    const handles = prompt.split(','), cap = PRICE[handles[0]];
+    return {
+      subtasks: [{
+        id: 's1', title: 'Holders', brief: 'Holders\nPlease report.', search_terms: ['holders'], cap_atomic: cap, deadline_s: 60, self_do: false,
+        criteria: [{ id: 'c1', kind: 'contains', description: 'x', spec: { pattern: '.' } }],
+        candidates: handles.map((handle) => ({ handle, name: handle, description: handle, sla_seconds: 60, success_rate: null, delivered_jobs: 0, price_atomic: PRICE[handle], quote: row(PRICE[handle]) })),
+      }],
+      dropped: [], notes: [], llm_calls: [],
+      budget: { budget_atomic: '1000000', reserve_atomic: '200000', allocatable_atomic: '800000', allocated_atomic: cap },
+    };
+  };
   servers.push(await serve('fake-planner', {
     // 'zero cap': a plan drafted before 0 USDC quotes were dropped, with a hired part capped at 0
+    // 'rook edit': a small edit Rook makes itself, with no agent
     'POST /plan': ({ body }) => body.prompt === 'zero cap'
       ? { ...planFor('alpha'), subtasks: [{ ...planFor('alpha').subtasks[0], cap_atomic: '0' }] }
+      : body.prompt === 'rook edit'
+      ? { ...planFor('alpha'), subtasks: [{ ...planFor('alpha').subtasks[0], cap_atomic: '0', candidates: [], self_do: true, self_do_reason: 'rook_edit' }] }
       : planFor(body.prompt),
+    'POST /self-do': () => ({ text: 'Edited.', llm_calls: [] }),
     'POST /aggregate': () => ({ final_markdown: 'final', attribution: [], llm_calls: [] }),
   }, 0));
   servers.push(await serve('fake-evaluator', {
@@ -194,7 +204,7 @@ const events = async (orch: Running, id: string) =>
 async function fundedAndWorking(orch: Running, handle: string, cid: string) {
   const t = await call(`${orch.url}/tasks`, { prompt: handle, budget_usdc: '1' });
   await call(`${orch.url}/tasks/${t.id}/approve`, {});
-  openContractTask(cid, [PRICE[handle]]);
+  openContractTask(cid, [PRICE[handle.split(',')[0]]]);
   await call(`${orch.url}/tasks/${t.id}/funded`, { contract_task_id: cid });
   await until(async () => (await snap(orch, t.id)).subtasks[0].status === 'working');
   return t.id as string;
@@ -251,7 +261,55 @@ test("kill in chain mode: an agent that refuses CancelTask has its payment voide
     assert.deepEqual(evs.find((e) => e.type === 'ledger' && e.data.op === 'kill').data, { op: 'kill', returning: true });
     assert.deepEqual(evs.slice(at + 1).filter((e) => e.type === 'ledger').map((e) => e.data.op), ['clearing', 'release', 'returnLeftover', 'closeTask']);
     assert.equal(evs.find((e) => e.data.op === 'clearing').data.how, 'void');
+    assert.equal(evs.find((e) => e.data.op === 'release').data.agent_handle, 'stubborn'); // the page names whose payment ended
   } finally { await orch.close(); }
+});
+
+test('a hire past its patience is voided and the next candidate hired at once, whether the agent accepts CancelTask or not', async () => {
+  // Each authorization is valid for a minute here (2 h 10 min on mainnet, where a part waited 1 h 40 min after its
+  // agent had accepted CancelTask): Rook must not wait that out before it hires the next candidate.
+  process.env.ROOK_HIRE_PATIENCE_S = '1';
+  const orch = await start(0);
+  try {
+    for (const [first, cid] of [['alpha', 'pa'], ['stubborn', 'pb']]) {
+      const id = await fundedAndWorking(orch, `${first},next`, cid);
+      const account = acct(cid, 1);
+      const [nextId] = await until(async () => [...a2a].find(([, x]) => x.handle === 'next' && x.state === 'WORKING') ?? false);
+      a2a.get(nextId)!.state = 'COMPLETED';
+      auths.get(account)!.landed = true; // the marketplace settles next's payment
+      bal.set(account, bal.get(account)! - 100000n);
+      const s = await until(async () => { const x = await snap(orch, id); return ['closed', 'failed'].includes(x.task.status) ? x : false; });
+      assert.equal(s.task.status, 'closed', s.task.error);
+      assert.deepEqual(s.subtasks[0].hires.map((h: any) => [h.agent_handle, h.state, h.paid]), [[first, 'TIMEOUT', false], ['next', 'COMPLETED', true]], first);
+      assert.ok(calls.includes(`expire ${account} landed=false void`), first);
+      assert.deepEqual([s.ledger.spent_atomic, s.ledger.refunded_atomic], ['100000', '900000'], first);
+    }
+  } finally { delete process.env.ROOK_HIRE_PATIENCE_S; await orch.close(); }
+});
+
+test('a hire past its patience whose payment landed while it was voided: its delivery is read, judged and kept, and no one else is hired', async () => {
+  // The agent refuses CancelTask, the last look still shows WORKING, then it delivers and the market settles while the
+  // void is in flight. Rook paid for that work: it must not throw it away and pay the next candidate for the same part.
+  process.env.ROOK_HIRE_PATIENCE_S = '1';
+  const account = acct('lv', 1);
+  onVoid.set(account, () => {
+    const [id] = [...a2a].findLast(([, x]) => x.handle === 'stubborn')!; // this test's: older ones refused CancelTask too
+    a2a.get(id)!.state = 'COMPLETED';
+    auths.get(account)!.landed = true;
+    bal.set(account, bal.get(account)! - 100000n);
+  });
+  const orch = await start(0), from = calls.length;
+  try {
+    const id = await fundedAndWorking(orch, 'stubborn,next', 'lv');
+    const s = await until(async () => { const x = await snap(orch, id); return ['closed', 'failed'].includes(x.task.status) ? x : false; });
+    assert.equal(s.task.status, 'closed', s.task.error);
+    assert.ok(calls.includes(`expire ${account} landed=true void`));
+    assert.deepEqual(s.subtasks[0].hires.map((h: any) => [h.agent_handle, h.state, h.paid, h.deliverable_text]), [['stubborn', 'COMPLETED', true, 'Holders report']]);
+    assert.equal(s.subtasks[0].final_outcome, 'passed');
+    assert.ok(!calls.slice(from).some((c) => c.startsWith('send next')));
+    assert.deepEqual(s.receipts.map((r: any) => [r.agent_handle, r.amount_atomic, r.verdict]), [['stubborn', '100000', 'pass']]);
+    assert.deepEqual([s.ledger.spent_atomic, s.ledger.refunded_atomic], ['100000', '900000']); // booked once, by the release
+  } finally { delete process.env.ROOK_HIRE_PATIENCE_S; await orch.close(); }
 });
 
 test('a kill while fund_subtask is in flight still brings that sub-account back', async () => {
@@ -372,6 +430,36 @@ test('after a restart an older unpaid hire never stands in for an outstanding au
     assert.equal(calls.filter((c) => c.startsWith(`sign ${account}`)).length, 1);
     assert.ok(calls.indexOf(`expire ${account} landed=false`) < calls.indexOf(`sign ${account} 100000`));
     assert.deepEqual(s.receipts.map((r: any) => [r.agent_handle, r.amount_atomic, r.verdict]), [['beta', '100000', 'pass']]);
+    assert.deepEqual([s.ledger.spent_atomic, s.ledger.refunded_atomic], ['100000', '900000']);
+  } finally { await orch.close(); }
+});
+
+test('after a restart, a hire Rook had already given up on (TIMEOUT, payment not yet cleared) is voided at once, not polled or reported again', async () => {
+  process.env.ROOK_DB = join(dir, 'timedout.sqlite');
+  const account = acct('to', 1);
+  openContractTask('to', ['200000']);
+  contract.get('to')!.subs.push(fundedSub('to', 1, '200000'));
+  bal.set(account, 200_000n);
+  a2a.set('a2a-tout', { handle: 'stubborn', state: 'WORKING' });
+  auths.set(account, { amount: 100_000n, landed: false, until: Date.now() + 60_000 }); // a minute left: waiting it out would fail the test
+  const ts = new Date(Date.now() - 3_600_000).toISOString();
+  const gaveUp = {
+    id: 'h_tout', subtask_id: 's1', agent_handle: 'stubborn', amount_atomic: '100000', payment_hash: `ph-${account}`, a2a_task_id: 'a2a-tout', context_id: 'ctx',
+    state: 'TIMEOUT', paid: false, deliverable_text: null, parts: [], verdict: null, started_at: ts, ended_at: ts, pay_to: X402.payTo, expires_at: new Date(Date.now() + 60_000).toISOString(),
+  };
+  storeTask('t_tout', 'running', 'to', { cap_atomic: '200000', candidates: [cand('stubborn'), cand('next')], tried: ['stubborn'], hires: [gaveUp] },
+    { 1: { payment_hash: `ph-${account}`, amount: '100000', expires_at_block: 1, nonce: '1' } }, '200000');
+  const orch = await start(0);
+  try {
+    const [nextId] = await until(async () => [...a2a].find(([, x]) => x.handle === 'next' && x.state === 'WORKING') ?? false);
+    assert.ok(calls.includes(`expire ${account} landed=false void`));
+    a2a.get(nextId)!.state = 'COMPLETED';
+    auths.get(account)!.landed = true;
+    bal.set(account, 100_000n);
+    const s = await until(async () => { const x = await snap(orch, 't_tout'); return ['closed', 'failed'].includes(x.task.status) ? x : false; });
+    assert.equal(s.task.status, 'closed', s.task.error);
+    assert.deepEqual(s.subtasks[0].hires.map((h: any) => [h.agent_handle, h.state, h.paid]), [['stubborn', 'TIMEOUT', false], ['next', 'COMPLETED', true]]);
+    assert.deepEqual((await events(orch, 't_tout')).filter((e) => e.type === 'a2a_state' && e.data.hire_id === 'h_tout'), []);
     assert.deepEqual([s.ledger.spent_atomic, s.ledger.refunded_atomic], ['100000', '900000']);
   } finally { await orch.close(); }
 });
@@ -767,6 +855,20 @@ test('a plan with a 0 USDC cap is refused before the wallet opens, and the task 
     await assert.rejects(call(`${orch.url}/tasks/${t.id}/approve`, {}), (e: any) => e.status === 409 && e.message === 'this plan has a 0 USDC cap; draft the task again');
     assert.equal((await snap(orch, t.id)).task.status, 'planned');
     assert.equal((await call(`${orch.url}/tasks/${t.id}/cancel`, {})).status, 'cancelled');
+  } finally { await orch.close(); }
+});
+
+test('a plan of small edits Rook makes itself starts at once in chain mode too: no button, no funding transfer, nothing on chain', async () => {
+  process.env.ROOK_DB = join(dir, 'rook-edit.sqlite');
+  const orch = await start(0);
+  try {
+    const before = calls.length;
+    const t = await call(`${orch.url}/tasks`, { prompt: 'rook edit', budget_usdc: '1', owner: 'robin.test' });
+    const s = await until(async () => { const x = await snap(orch, t.id); return ['closed', 'failed'].includes(x.task.status) ? x : false; });
+    assert.equal(s.task.status, 'closed', s.task.error);
+    assert.deepEqual([s.task.funder, s.subtasks[0].accepted.text, s.final_result.final_markdown], ['robin.test', 'Edited.', 'final']);
+    assert.deepEqual([s.ledger.budget_atomic, s.ledger.spent_atomic, s.ledger.refunded_atomic], ['0', '0', '0']);
+    assert.equal(calls.length, before); // nothing read, signed, funded or closed on chain
   } finally { await orch.close(); }
 });
 

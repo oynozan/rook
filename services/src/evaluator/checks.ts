@@ -149,6 +149,37 @@ export function checkSchema(text: string, jsonSchema: object): { passed: boolean
   return { passed: false, detail: lastErr };
 }
 
+// ---- Links the delivery gives (live_url criterion) ----
+
+/**
+ * The link on the delivery's "<label>: <url>" line ("**Live URL:** https://x.netlify.app", a Markdown link or <url>
+ * too): the first such line that holds one. '' when the label is there with no link ("Live URL: none"), null when no
+ * line has the label.
+ */
+export function linkOn(text: string, label: string): string | null {
+  const re = new RegExp(String.raw`^[ \t>*_#-]*${escapeRe(label)}[*_]*[ \t]*:[ \t]*(.*)$`, 'gim');
+  let labelled: string | null = null;
+  for (const m of text.matchAll(re)) {
+    const url = m[1].match(/https?:\/\/[^\s<>"'`)\]]+/i)?.[0].replace(/[.,;:!?]+$/, '');
+    if (url) return url;
+    labelled = '';
+  }
+  return labelled;
+}
+
+const flatLower = (s: string) => s.replace(/\s+/g, ' ').trim().toLowerCase();
+/**
+ * Whether a loaded page shows `want`: in what the reader extracted (title, description, headings, the first 4000
+ * characters of text), else anywhere in the page's text with its tags taken out (linear: no tag pattern runs past the
+ * last ">").
+ */
+export function pageShows(p: { title: string; description: string; headings: string[]; text: string }, html: string, want: string): boolean {
+  const w = flatLower(want);
+  if (flatLower([p.title, p.description, ...p.headings, p.text].join(' ')).includes(w)) return true;
+  const end = html.lastIndexOf('>') + 1;
+  return flatLower(html.slice(0, end).replace(/<[^>]*>/g, ' ') + html.slice(end)).includes(w);
+}
+
 // ---- Hash (6.4) ----
 
 export function canonicalJson(v: unknown): string {

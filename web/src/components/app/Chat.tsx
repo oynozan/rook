@@ -1,8 +1,8 @@
 'use client';
 
-import { AnimatePresence, motion } from 'motion/react';
+import { motion } from 'motion/react';
 import { usePathname, useRouter } from 'next/navigation';
-import { Fragment, useCallback, useEffect, useId, useRef, useState, type ReactNode, type Ref } from 'react';
+import { useCallback, useEffect, useId, useRef, useState, type ReactNode, type Ref } from 'react';
 import { Mark } from '@/components/Navbar';
 import { useSmoothScroll } from '@/components/SmoothScroll';
 import { AiStatus } from '@/components/ui/ai-status';
@@ -10,10 +10,16 @@ import { WebSearch, type WebSource } from '@/components/ui/web-search';
 import { approve, cancel, confirmFunding, draftTask, forgetContractTask, forgetTransfer, fundingInstructions, fundingRefunded, rememberTransfer, stop, type ActResult } from '@/lib/server/actions';
 import { go } from '@/components/app/AppShell';
 import { Composer, type ComposerErrors, type ComposerThread } from '@/components/app/Composer';
-import { attemptNote, canEdit, canSendAgain, messageProblem, redoWait, shownInstead, shownTasks } from '@/lib/chat-actions';
-import { conversationOf, revisedPlan } from '@/lib/conversations';
+import { ActionButton, Reveal } from '@/components/app/controls';
+import { InlineText, Markdown } from '@/components/app/Markdown';
+import { ReportFiles } from '@/components/app/ReportFiles';
+import { clockTime, RunParts, useClock } from '@/components/app/RunParts';
+import { attemptNote, canEdit, canSendAgain, failedDraft, messageProblem, redoWait, shownInstead, shownTasks } from '@/lib/chat-actions';
+import { ASK_LEAD, conversationOf, missingParts, PLACEHOLDERS_ANSWER, questionsOf, retryMessage, revisedPlan } from '@/lib/conversations';
 import { checkDraft, parseBudget } from '@/lib/draft';
-import { alertLine, deliveredParts, problemLine, skipReason } from '@/lib/feed';
+import { deliveredParts, feedFrom, type FeedLine, type Now } from '@/lib/feed';
+import { costLabel, editLine, fallbackLine, planCost, planNotes, reserveSpent, spendLabel, timeLine } from '@/lib/plan-view';
+import { nowLine, partViews, runHeadline, type Line } from '@/lib/run-view';
 import {
   balanceProblem, closeTaskTransaction, confirmFailure, contractHasTask, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
   keptTransferKey, keptValue, moneyMoved, plainReason, planTerms, readCloseOutcome, readFundingOutcome, readUsdcBalance, restoreKept, termsOf, TX_HASH, txHashOf,
@@ -24,12 +30,15 @@ import { explorerTx, NETWORK, rpcFor, type Network } from '@/lib/network';
 import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary } from '@/lib/server/orchestrator';
 import { detail, pageUnreachable } from '@/lib/errors';
 import { useMode } from '@/hooks/mode';
-import { allSelfDoWhy, budgetToHire, plannerReason, selfDoWhy } from '@/lib/planner';
+import { allSelfDoWhy, budgetToHire, selfDoWhy } from '@/lib/planner';
 import { FUNDING_NOT_READY } from '@/lib/refusals';
 import { useEase } from '@/hooks/useEase';
 import { useWallet, WalletAccountMismatch } from '@/hooks/wallet';
 
 const TERMINAL = new Set(['closed', 'cancelled', 'killed', 'failed']);
+// Nothing more happens to these: the ended statuses, and Rook's questions (the next message answers them, as a task of
+// its own). The event stream may end there, and history shows at once.
+const QUIET = new Set([...TERMINAL, 'asking']);
 const reducedMotion = () => window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const LINE_MS = 420;
 const CATCH_UP_MS = 70; // a refresh mid-run replays history quickly, then returns to the live pace
@@ -89,7 +98,8 @@ function useTask(id: string | null, account: string | null): Loaded {
     const seen = new Set<number>();
     let ended = false; // the task reached a terminal status
     let soon: ReturnType<typeof setTimeout> | undefined;
-    const types = ['task_status', 'subtask_status', 'planning', 'plan', 'quote_rejected', 'hire_sent', 'a2a_state', 'evaluation', 'security_alert', 'ledger', 'receipt', 'final', 'error'];
+    // 'quote': a price came in, so the run's status moves from getting it to sending the job.
+    const types = ['task_status', 'subtask_status', 'planning', 'plan', 'quote', 'quote_rejected', 'hire_sent', 'a2a_state', 'evaluation', 'security_alert', 'ledger', 'receipt', 'final', 'error'];
     const onEvent = (m: MessageEvent) => {
       // The browser fires its own 'error' event, with no data, when the connection drops or is refused (signed out,
       // not your task, services restarting). That shares a name with Rook's 'error' events, so skip anything empty.
@@ -100,7 +110,7 @@ function useTask(id: string | null, account: string | null): Loaded {
       seen.add(e.seq);
       fresh++;
       setEvents((all) => [...all, e]);
-      if (e.type === 'task_status' && TERMINAL.has(e.data.to)) ended = true;
+      if (e.type === 'task_status' && QUIET.has(e.data.to)) ended = true;
       if (e.type === 'task_status' || e.type === 'final' || (ended && e.type === 'ledger')) refetch();
       // During the run a payment, top-up or return changes what each subtask has spent: load the books again, at most
       // once a second, so the plan's rows keep up with the header.
@@ -284,94 +294,64 @@ function Working({ label }: { label: string }) {
   );
 }
 
-/** `submit`: the form's submit button (no onClick needed). `buttonRef`: for focus to come back to it. */
-function ActionButton({ onClick, busy, disabled, title, primary, submit, buttonRef, children }: {
-  onClick?: () => void; busy?: boolean; disabled?: boolean; title?: string; primary?: boolean; submit?: boolean; buttonRef?: Ref<HTMLButtonElement>; children: ReactNode;
-}) {
-  const off = disabled || busy;
-  return (
-    <button
-      ref={buttonRef}
-      type={submit ? 'submit' : 'button'}
-      onClick={onClick}
-      disabled={off}
-      title={title}
-      className={`inline-flex min-h-11 items-center justify-center rounded-full px-4 font-medium whitespace-nowrap transition-colors max-sm:grow sm:px-5 duration-200 motion-reduce:transition-none ${
-        primary
-          ? disabled ? 'cursor-not-allowed bg-ink/10 text-ink/55' : `bg-accent text-on-accent ${busy ? 'cursor-wait' : 'cursor-pointer hover:bg-accent-hover active:translate-y-px'}`
-          : `border border-ink/25 ${off ? 'cursor-wait text-ink/55' : 'cursor-pointer hover:border-ink hover:bg-ink/5 active:translate-y-px'}`
-      }`}
-    >
-      {children}
-    </button>
-  );
-}
-
-/** Opens and closes by height. */
-function Reveal({ open, children }: { open: boolean; children: ReactNode }) {
-  const ease = useEase();
-  return (
-    <AnimatePresence initial={false}>
-      {open && (
-        <motion.div
-          initial={{ height: 0, opacity: 0 }}
-          animate={{ height: 'auto', opacity: 1 }}
-          exit={{ height: 0, opacity: 0 }}
-          transition={ease}
-          className="overflow-hidden"
-        >
-          {children}
-        </motion.div>
-      )}
-    </AnimatePresence>
-  );
-}
-
 /**
- * What a subtask can cost: Rook's own work, or a cap in USDC (the planner drops 0 USDC quotes, so a hired subtask's cap
- * is never 0). During a run, what it has spent of its cap.
+ * What a subtask can cost: Rook's own work, or the most it can cost (its cap, or more once Rook hires the next agent
+ * from the reserve; the planner drops 0 USDC quotes, so a hired subtask's cap is never 0). During a run, what it has
+ * spent of its cap, and what came from the reserve when it spent more.
  */
-function CapLabel({ subtask: s, usage, why }: { subtask: PlanView['subtasks'][number]; usage?: LedgerSub; why: string }) {
-  const topped = usage ? BigInt(usage.topped_up_atomic) : 0n;
+function CapLabel({ subtask: s, usage, reserve, why }: { subtask: PlanView['subtasks'][number]; usage?: LedgerSub; reserve: bigint; why: string }) {
+  const cost = costLabel(s, reserve);
   return (
-    <span title={s.self_do ? why : usage ? 'Spent of this subtask\'s cap, plus any top-up from the reserve' : undefined}
+    <span title={s.self_do ? why : usage ? "Spent of this subtask's cap, and what came from the reserve when it spent more" : cost.line ?? undefined}
       className={`shrink-0 pl-3 text-sm text-ink/65 sm:pl-0 ${s.self_do ? '' : 'font-mono tabular-nums'}`}>
-      {s.self_do ? 'Rook does this' : usage ? `${usdc(usage.spent_atomic)} of ${usdc(usage.cap_atomic)}${topped > 0n ? ` +${usdc(topped)} reserve` : ''}` : `Cap ${usdc(s.cap_atomic)}`}
+      {s.self_do ? 'Rook does this' : usage ? spendLabel(usage) : cost.label}
     </span>
   );
 }
 
-/** `why`: why Rook does a self_do part itself (selfDoWhy). */
-function PlanRow({ subtask: s, usage, why }: { subtask: PlanView['subtasks'][number]; usage?: LedgerSub; why: string }) {
+/**
+ * `why`: why Rook does a self_do part itself (selfDoWhy). `started`: the run is under way, so the brief shows with each
+ * part's progress (as sent, or to be sent) instead of here, once. Under its title, always in view: the delivered files
+ * it edits, and what happens if no agent delivers.
+ */
+function PlanRow({ subtask: s, usage, reserve, why, started }: { subtask: PlanView['subtasks'][number]; usage?: LedgerSub; reserve: bigint; why: string; started: boolean }) {
   const [open, setOpen] = useState(false);
+  const id = useId();
+  const edits = editLine(s), fallback = fallbackLine(s), cost = costLabel(s, reserve).line, time = timeLine(s);
   return (
     <>
       <button
         type="button"
         aria-expanded={open}
+        aria-controls={open ? id : undefined}
         onClick={() => setOpen((o) => !o)}
         className="flex w-full cursor-pointer flex-col justify-between gap-x-4 gap-y-0.5 rounded-2xl px-4 py-3 text-left hover:bg-ink/5 sm:flex-row sm:items-baseline"
       >
         <span className="flex min-w-0 items-baseline gap-2">
           <span className={`text-ink/55 transition-transform duration-200 motion-reduce:transition-none ${open ? 'rotate-90' : ''}`} aria-hidden="true">›</span>
-          <span className="font-medium">{s.title}</span>
+          <span className="min-w-0">
+            <span className="block font-medium wrap-break-word">{s.title}</span>
+            {edits && <span className="block text-sm text-ink/65 wrap-break-word">{edits}</span>}
+            {!started && fallback && <span className="block text-sm text-ink/65">{fallback}</span>}
+          </span>
         </span>
-        <CapLabel subtask={s} usage={usage} why={why} />
+        <CapLabel subtask={s} usage={usage} reserve={reserve} why={why} />
       </button>
       <Reveal open={open}>
-        <div className="px-4 pt-1 pb-4 pl-8 text-ink/80">
+        <div id={id} className="px-4 pt-1 pb-4 pl-8 text-ink/80">
           {/* The label's tooltip says the same, but a phone shows no tooltips. */}
           {s.self_do && <p className="mb-3 text-sm text-ink/65">{why}</p>}
-          {s.brief && (
-            // The planner's own words for the agent; plain text, never markup.
+          {!s.self_do && !usage && cost && <p className="mb-3 text-sm text-ink/65">{cost}</p>}
+          {s.brief && !started && (
+            // The planner's own words for the agent; plain text, never markup. Nothing is sent before the plan runs.
             <details className="mb-3">
-              <summary className="cursor-pointer text-sm text-ink/65 hover:text-ink">{s.self_do ? 'Brief' : 'Brief sent to the agent'}</summary>
+              <summary className="cursor-pointer text-sm text-ink/65 hover:text-ink">{s.self_do ? 'Brief' : 'Brief for the agent'}</summary>
               <p className="mt-1 text-sm whitespace-pre-wrap">{s.brief}</p>
             </details>
           )}
           <p className="text-sm text-ink/65">Must pass</p>
           <ul className="mt-1 space-y-0.5">{s.criteria.map((c) => <li key={c.id}>{c.description}</li>)}</ul>
-          {!!s.deadline_s && <p className="mt-3 text-sm text-ink/65">Deadline: delivered within {turnaround(s.deadline_s)}</p>}
+          {time && <p className="mt-3 text-sm text-ink/65">{time}</p>}
           {s.candidates.length > 0 && (
             <>
               <p className="mt-3 text-sm text-ink/65">Candidates, in the order Rook hires them: lowest expected cost first</p>
@@ -384,12 +364,10 @@ function PlanRow({ subtask: s, usage, why }: { subtask: PlanView['subtasks'][num
   );
 }
 
-const turnaround = (s: number) =>
-  s < 120 ? `${s} s` : s < 7200 ? `${Math.round(s / 60)} min` : s < 172800 ? `${Math.round(s / 3600)} h` : `${Math.round(s / 86400)} days`;
-
 /**
  * One candidate: its name, handle and price, what the market says about it, and why it sits where it does (expected
- * cost: price divided by its chance to pass). Agent text is shown as plain text.
+ * cost: price divided by its chance to pass). Agent text is shown as plain text. Its own promised time is left out:
+ * Rook's wait for it (timeLine) is the one that holds.
  */
 function CandidateLine({ c }: { c: Candidate }) {
   // success_rate is a percentage. A rate with no delivered jobs behind it says nothing, so it is left out, not shown as 0%.
@@ -397,7 +375,6 @@ function CandidateLine({ c }: { c: Candidate }) {
   const facts = [
     rate !== null && `${rate}% success`,
     c.delivered_jobs > 0 && `${c.delivered_jobs} job${c.delivered_jobs === 1 ? '' : 's'} delivered`,
-    c.sla_seconds > 0 && `within ${turnaround(c.sla_seconds)}`,
   ].filter(Boolean);
   return (
     <li>
@@ -412,13 +389,14 @@ function CandidateLine({ c }: { c: Candidate }) {
   );
 }
 
-function PlanCard({ plan, usage }: { plan: PlanView; usage?: Map<string, LedgerSub> }) {
+function PlanCard({ plan, usage, started }: { plan: PlanView; usage?: Map<string, LedgerSub>; started: boolean }) {
   const { mode } = useMode();
+  const reserve = /^\d+$/.test(plan.budget.reserve_atomic) ? BigInt(plan.budget.reserve_atomic) : 0n;
   return (
     <ol className="mt-3 rounded-2xl border border-ink/15">
       {plan.subtasks.map((s, i) => (
         <li key={s.id} className="rook-in border-b border-ink/10 last:border-b-0" style={{ animationDelay: `${150 + i * 90}ms` }}>
-          <PlanRow subtask={s} usage={usage?.get(s.id)}
+          <PlanRow subtask={s} usage={usage?.get(s.id)} reserve={reserve} started={started}
             why={s.self_do ? selfDoWhy(s, budgetToHire(plan, s.id), plan.subtasks.slice(0, i).some((x) => !x.self_do), mode?.max_budget_atomic) : ''} />
         </li>
       ))}
@@ -426,12 +404,35 @@ function PlanCard({ plan, usage }: { plan: PlanView; usage?: Map<string, LedgerS
   );
 }
 
+/** What Rook takes as given, and the notes to read before paying (planNotes), in plain lines under the plan. */
+function PlanFacts({ plan }: { plan: PlanView }) {
+  const { mode } = useMode();
+  const assumed = (plan.assumptions ?? []).map((a) => a.trim()).filter(Boolean);
+  const notes = planNotes(plan, mode?.max_budget_atomic);
+  if (!assumed.length && !notes.length) return null;
+  return (
+    <div className="rook-in mt-3 space-y-3 text-sm" style={{ animationDelay: `${200 + plan.subtasks.length * 90}ms` }}>
+      {assumed.length > 0 && (
+        <div>
+          <p className="text-ink/65">Rook will assume</p>
+          <ul className="mt-1 space-y-0.5">{assumed.map((a, i) => <li key={i} className="pl-4 -indent-3">• <InlineText text={a} /></li>)}</ul>
+        </div>
+      )}
+      {notes.length > 0 && (
+        <ul className="space-y-1">{notes.map((n, i) => <li key={i} className={n.tone === 'alert' ? 'text-alert' : 'text-ink/65'}>{n.text}</li>)}</ul>
+      )}
+    </div>
+  );
+}
+
 const short = (s: string) => (s.length > 14 ? `${s.slice(0, 6)}…${s.slice(-4)}` : s);
 const LINK = 'underline decoration-ink/30 underline-offset-2 hover:decoration-ink';
 
-/** What backs a receipt: the agent's A2A task, the evaluator's verdict hash, and the transactions on NEAR. */
-/** What the run spent and refunded, and a receipt per paid hire. The refund shows once the contract closed the task. */
-function MoneyCard({ ledger, receipts, network, simNote }: { ledger: TaskSnapshot['ledger']; receipts: Receipt[]; network: Network; simNote: string }) {
+/**
+ * What the run spent and refunded, and a receipt per paid hire, named by the part it paid for (`titles`). The refund
+ * shows once the contract closed the task.
+ */
+function MoneyCard({ ledger, receipts, network, simNote, titles }: { ledger: TaskSnapshot['ledger']; receipts: Receipt[]; network: Network; simNote: string; titles: Map<string, string> }) {
   // Not closed yet: a payment still in flight holds the refund back; otherwise Rook is still sending it (a close that failed).
   const inFlight = !!ledger?.subtasks?.some((s) => s.authorized_atomic != null);
   return (
@@ -449,7 +450,10 @@ function MoneyCard({ ledger, receipts, network, simNote }: { ledger: TaskSnapsho
             <li key={r.id} className="border-b border-ink/10 py-1.5 text-sm last:border-b-0">
               <div className="grid grid-cols-[1.5rem_minmax(0,1fr)_auto_2.5rem] items-baseline gap-2">
                 <span className="font-mono text-ink/55">{n + 1}</span>
-                <span className="truncate font-mono">{r.agent_handle}</span>
+                <span className="min-w-0">
+                  <span className="block truncate font-mono">{r.agent_handle}</span>
+                  {r.subtask_id && titles.get(r.subtask_id) && <span className="block truncate text-ink/60" title={titles.get(r.subtask_id)}>for {titles.get(r.subtask_id)}</span>}
+                </span>
                 <span className="font-mono tabular-nums">{usdc(r.amount_atomic)}</span>
                 <span className={r.verdict === 'fail' ? 'text-alert' : r.verdict === 'pass' ? '' : 'text-ink/65'}>{r.verdict === 'fail' ? 'Fail' : r.verdict === 'pass' ? 'Pass' : 'N/A'}</span>
               </div>
@@ -837,7 +841,7 @@ function FundingStep({ id, plan, budget, funding, trouble, onRetry, sent, contra
       <dl className="mt-3 border-t border-ink/10 text-sm">
         <div className={row}><dt className="text-ink/65">Network</dt><dd>NEAR {funding.network}</dd></div>
         <div className={row}><dt className="shrink-0 text-ink/65">Contract</dt><dd className="min-w-0 font-mono break-all">{funding.contract_id}</dd></div>
-        <div className={row}><dt className="shrink-0 text-ink/65">Token</dt><dd className="min-w-0 font-mono break-all">{funding.usdc}</dd></div>
+        <div className={row}><dt className="shrink-0 text-ink/65">Token</dt><dd className="min-w-0 text-right">USDC <span className="font-mono text-ink/60 break-all" title={funding.usdc}>({short(funding.usdc)})</span></dd></div>
         {terms?.caps.map((c, i) => (
           <div key={i} className={row}><dt className="min-w-0 truncate">Cap: {hired[i]?.title ?? `subtask ${i + 1}`}</dt><dd className="font-mono tabular-nums">{usdc(c)}</dd></div>
         ))}
@@ -1065,84 +1069,6 @@ function AgentSearch({ plan, planning, animate, onGrow, onDone }: { plan: PlanVi
   );
 }
 
-type Now = { state: string; label: string; detail?: string };
-/**
- * started/ended: an agent hired and done; writing/written: a part Rook does itself (its title). detail: the raw text
- * behind a reworded line, as a tooltip. flag: an agent's delivery or quote was flagged (what "flagged" counts).
- */
-type FeedLine = {
-  key: number; text: string; tone: 'normal' | 'muted' | 'alert'; now: Now; paid?: number; fromReserve?: number;
-  started?: string; ended?: string; writing?: string; written?: string; detail?: string; flag?: true;
-};
-/** What the feed needs from the plan: titles by subtask, the self_do ones, and whether no agent is hired at all. */
-type FeedContext = { titles: Map<string, string>; selfDo: Set<string>; free: boolean; simNote: string };
-
-/** Turns the run's events into plain lines. Agent text is never shown as instructions: only handles and Rook's verdicts. */
-function feedFrom(events: RookEvent[], ctx: FeedContext): FeedLine[] {
-  const lines: FeedLine[] = [];
-  let receipt = 0;
-  const hired = new Map<string | undefined, string>(); // subtask -> the agent its payment authorization is for
-  const tries = new Map<string, number>(); // self_do subtask -> times Rook started on it
-  const part = (id?: string) => (id && ctx.titles.get(id)) || 'this part';
-  for (const { seq: key, type, data, subtask_id } of events) {
-    const agent = data?.agent_handle;
-    const self = !!subtask_id && ctx.selfDo.has(subtask_id);
-    if (agent && (type === 'hire_sent' || (type === 'ledger' && data.op === 'clearing'))) hired.set(subtask_id, agent);
-    if (type === 'hire_sent') lines.push({ key, text: `Hired ${agent}, quoted ${usdc(data.amount_atomic)} USDC.`, tone: 'normal', started: agent, now: { state: 'researching', label: 'Hired', detail: agent } });
-    // Rook does a self_do part with its own model: no hire, so never "rook:self-do" or a hire's wording.
-    else if (type === 'subtask_status' && self && data.to === 'working') {
-      const n = (tries.get(subtask_id!) ?? 0) + 1;
-      tries.set(subtask_id!, n);
-      const title = part(subtask_id);
-      lines.push({ key, text: n === 1 ? `Rook is doing ${title} itself.` : `Rook is trying ${title} again.`, tone: 'normal', writing: title, now: { state: 'writing', label: 'Rook is working on', detail: title } });
-    }
-    else if (type === 'evaluation' && (self || agent === 'rook:self-do')) {
-      const title = part(subtask_id), pass = data.verdict === 'pass';
-      lines.push({ key, text: `Rook's own work on ${title} ${pass ? 'passed every check' : 'failed a check'}.`, tone: 'normal', written: title, now: { state: 'analyzing', label: pass ? 'Passed' : 'Failed a check', detail: title } });
-    }
-    // Whether an unpaid hire cost anything is known only once its authorization is released (it can still land).
-    else if (type === 'a2a_state' && ['FAILED', 'REJECTED', 'CANCELED'].includes(data.state)) lines.push({ key, text: `${agent} didn't deliver.`, tone: 'normal', ended: agent, now: { state: 'analyzing', label: 'No delivery', detail: agent } });
-    else if (type === 'a2a_state' && data.state === 'TIMEOUT') lines.push({ key, text: `${agent} timed out.`, tone: 'normal', ended: agent, now: { state: 'analyzing', label: 'Timed out', detail: agent } });
-    else if (type === 'ledger' && data.op === 'release' && data.settled === false) {
-      const who = agent ?? hired.get(subtask_id);
-      lines.push({ key, text: `No charge${who ? ` for ${who}` : ''}: its payment authorization was released unpaid.`, tone: 'muted', now: { state: 'analyzing', label: 'No charge', detail: who } });
-    }
-    else if (type === 'evaluation') {
-      if (data.verdict === 'pass') lines.push({ key, text: `${agent} passed every check.`, tone: 'normal', ended: agent, now: { state: 'analyzing', label: 'Passed', detail: agent } });
-      else if (data.failed_criteria?.includes('injection')) lines.push({ key, text: `${agent}'s delivery tried to give Rook instructions. Flagged and rejected.`, tone: 'alert', flag: true, ended: agent, now: { state: 'analyzing', label: 'Flagged', detail: agent } });
-      else lines.push({ key, text: `${agent} failed a check.`, tone: 'alert', flag: true, ended: agent, now: { state: 'analyzing', label: 'Failed a check', detail: agent } });
-    } else if (type === 'security_alert' && data.source === 'quote') lines.push({ key, text: alertLine(data.flag, agent), detail: data.flag, tone: 'alert', flag: true, now: { state: 'analyzing', label: 'Security alert' } });
-    else if (type === 'quote_rejected') lines.push({ key, text: `Skipped ${agent}: ${skipReason(data.reason)}.`, detail: data.reason, tone: 'muted', now: { state: 'researching', label: 'Skipped', detail: agent } });
-    else if (type === 'ledger' && data.op === 'topUp') lines.push({ key, text: `Topped up ${usdc(data.amount_atomic)} USDC from the reserve.`, tone: 'muted', fromReserve: Number(data.amount_atomic), now: { state: 'analyzing', label: 'Topped up', detail: `${usdc(data.amount_atomic)} USDC` } });
-    else if (type === 'receipt' && data.amount_atomic === '0') lines.push({ key, text: `Receipt ${++receipt}: ${agent} delivered, but no payment showed on chain, so nothing was paid.`, tone: 'muted', now: { state: 'analyzing', label: 'Unpaid', detail: agent } });
-    else if (type === 'receipt') lines.push({ key, text: `Receipt ${++receipt}: paid ${usdc(data.amount_atomic)} USDC to ${agent}.`, tone: 'muted', paid: Number(data.amount_atomic), now: { state: 'analyzing', label: 'Paid', detail: agent } });
-    // What happens to the money after a kill, a failure or a restart (runner.ts unwind and restoreTask). Older kill
-    // events carried a near-cli command (human_action) for the funder: never shown, the unwind refunds on its own.
-    else if (type === 'ledger' && data.op === 'kill') {
-      const text = ctx.free ? 'Stopped.' : data.returning || data.human_action
-        ? "Stopped. Rook pays no more agents and is sending what's left back to your wallet."
-        : 'Stopped. Rook pays no more agents.';
-      lines.push({ key, text, tone: 'muted', now: { state: 'analyzing', label: 'Stopped' } });
-    }
-    else if (type === 'ledger' && data.op === 'clearing') lines.push({ key, text: data.how === 'void' ? `Cancelling the unused payment to ${data.agent_handle ?? 'an agent'} on NEAR before returning its funds.` : `Waiting for ${data.agent_handle ?? 'an agent'}'s payment authorization to ${data.how === 'terminal' ? 'clear' : 'settle or expire'} before returning its funds.`, tone: 'muted', now: { state: 'analyzing', label: 'Clearing', detail: data.agent_handle ?? undefined } });
-    else if (type === 'ledger' && data.op === 'restored') lines.push({ key, text: `Rook restarted and picked this task up again from contract task ${data.contract_task_id}.`, tone: 'muted', now: { state: 'analyzing', label: 'Restored' } });
-    // A plan that hires no agent held no money: no budget to close, nothing refunded.
-    else if (type === 'ledger' && data.op === 'closeTask' && data.amount_atomic != null && !ctx.free) lines.push({ key, text: `Closed the budget: ${usdc(data.amount_atomic)} USDC went back to your wallet${ctx.simNote}.`, tone: 'muted', now: { state: 'analyzing', label: 'Closed' } });
-    // Rook's own errors: plain words, the raw text as a tooltip, never counted as an agent's flag.
-    else if (type === 'error') {
-      // A part given up on (abandoned, or its work unchecked) ends its agent's wait too, not only Rook's own work.
-      const p = problemLine(data ?? {}, subtask_id && ctx.titles.get(subtask_id), self || !subtask_id ? undefined : hired.get(subtask_id));
-      if (p) {
-        lines.push({
-          key, text: p.text, tone: p.tone, detail: data?.message, ...(p.ended ? { ended: p.ended } : {}),
-          ...(self && p.tone === 'alert' ? { written: part(subtask_id) } : {}), now: { state: 'analyzing', label: p.label },
-        });
-      }
-    }
-  }
-  return lines;
-}
-
 const TONE = { normal: '', muted: 'text-ink/65 text-sm', alert: 'text-alert' };
 
 const STOPPED = (
@@ -1152,28 +1078,24 @@ const RUN_STATES = { stopped: { label: 'Stopped', active: false, icon: STOPPED }
 
 /**
  * Collapsed to one line that says what is happening now; the full list is one click away. `refunding`: the report is
- * written and only the refund is left, which Rook keeps sending until the contract closes the task.
+ * written and only the refund is left, which Rook keeps sending until the contract closes the task. `current`: what
+ * the parts are doing (nowLine), null when none is doing anything specific.
  */
-function Activity({ lines, live, caughtUp, closing, refunding, outcome, timed, free }: { lines: FeedLine[]; live: boolean; caughtUp: boolean; closing: boolean; refunding: boolean; outcome: string; timed: boolean; free: boolean }) {
+function Activity({ lines, live, caughtUp, closing, refunding, outcome, timed, free, current }: {
+  lines: FeedLine[]; live: boolean; caughtUp: boolean; closing: boolean; refunding: boolean; outcome: string; timed: boolean; free: boolean; current: Line | null;
+}) {
   const [open, setOpen] = useState(false);
   const latest = lines[lines.length - 1];
-  const working = new Set<string>(), writing = new Set<string>();
-  for (const l of lines) {
-    if (l.started) working.add(l.started);
-    if (l.ended) working.delete(l.ended);
-    if (l.writing) writing.add(l.writing);
-    if (l.written) writing.delete(l.written);
-  }
   const rejected = lines.filter((l) => l.flag).length;
 
   let now: Now;
   if (refunding && caughtUp) now = { state: 'analyzing', label: 'Sending the unspent USDC back' };
   else if (!live) now = { state: outcome === 'killed' ? 'stopped' : outcome === 'failed' ? 'error' : 'done', label: '', detail: `${lines.length} step${lines.length === 1 ? '' : 's'}${rejected ? `, ${rejected} flagged` : ''}` };
-  else if (!latest) now = { state: 'thinking', label: 'Starting the run' };
-  else if (!caughtUp) now = latest.now;
+  else if (!latest && !current) now = { state: 'thinking', label: 'Starting the run' };
+  else if (!caughtUp && latest) now = latest.now;
   else if (closing) now = { state: 'writing', label: 'Combining the report' };
-  else if (working.size) now = { state: 'analyzing', label: 'Waiting on', detail: [...working, ...(writing.size ? ['Rook'] : [])].join(', ') };
-  else if (writing.size) now = { state: 'writing', label: 'Rook is working on', detail: [...writing].join(', ') };
+  else if (current) now = current;
+  // Only when nothing more specific is known: between one agent's release and the next one's quote, for a moment.
   else now = free ? { state: 'writing', label: 'Rook is working' } : { state: 'researching', label: 'Lining up the next hire' };
 
   return (
@@ -1197,32 +1119,6 @@ function Activity({ lines, live, caughtUp, closing, refunding, outcome, timed, f
   );
 }
 
-/** Inline Markdown only: `code`, **bold**, _emphasis_. Report text comes from agents, so it stays plain React text. */
-function inline(text: string): ReactNode[] {
-  return text.split(/(`[^`]+`|\*\*[^*]+\*\*|\b_[^_]+_\b)/g).map((part, i) => {
-    if (/^`.+`$/.test(part)) return <code key={i} className="font-mono text-[0.9em]">{part.slice(1, -1)}</code>;
-    if (/^\*\*.+\*\*$/.test(part)) return <strong key={i} className="font-medium">{part.slice(2, -2)}</strong>;
-    if (/^_.+_$/.test(part)) return <em key={i}>{part.slice(1, -1)}</em>;
-    return <Fragment key={i}>{part}</Fragment>;
-  });
-}
-
-function Report({ markdown }: { markdown: string }) {
-  const delay = (i: number) => ({ animationDelay: `${Math.min(i * 25, 900)}ms` });
-  return (
-    <div className="mt-3 space-y-2 leading-relaxed">
-      {markdown.split('\n').map((raw, i) => {
-        const line = raw.trim();
-        if (!line) return null;
-        const heading = line.match(/^(#{1,4})\s+(.*)$/);
-        if (heading) return <h3 key={i} style={delay(i)} className={`rook-in font-medium tracking-[-0.01em] ${heading[1].length <= 1 ? 'mt-4 text-2xl' : 'mt-4 text-xl'}`}>{inline(heading[2])}</h3>;
-        if (/^[-*]\s/.test(line)) return <p key={i} style={delay(i)} className="rook-in pl-4 -indent-3">• {inline(line.slice(2))}</p>;
-        return <p key={i} style={delay(i)} className="rook-in">{inline(line)}</p>;
-      })}
-    </div>
-  );
-}
-
 // ---- one conversation ----
 
 /** A server action call that never got an answer: the network dropped, or the web server was restarting. */
@@ -1235,14 +1131,18 @@ const REPLACED = 'You revised this plan below, so it was cancelled.';
  */
 type Redo = (old: { id: string; parent_id: string | null; prompt: string; budget_atomic: string }, prompt: string, budget: string) => Promise<ComposerErrors | null>;
 
+/** The next message in the conversation, sent from a button here as if typed in the composer (an answer, a retry). */
+type Answer = (prompt: string, budget: string) => Promise<boolean>;
+
 /**
  * `revised`: a newer message is revising this plan and is still being planned, so the plan waits for it. `onRedo`: this
  * is the newest message and nothing above it is planning or running, so it can be sent again or edited; `redoing`:
- * that is under way; `locked`: another message is being sent.
+ * that is under way; `locked`: another message is being sent. `onAnswer`: this is the newest message, so a button
+ * may send the next one (Use placeholders, Try this part again).
  */
-function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo, redoing, locked }: {
+function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo, redoing, locked, onAnswer }: {
   id: string; loaded: Loaded; tasks: TaskSummary[] | null; onGrow: () => void; fresh: boolean; onRevealed: (id: string) => void; revised: boolean;
-  onRedo?: Redo; redoing: boolean; locked: boolean;
+  onRedo?: Redo; redoing: boolean; locked: boolean; onAnswer?: Answer;
 }) {
   const { snap, events, problem, down, refetch } = loaded;
   const router = useRouter();
@@ -1307,7 +1207,17 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
   const planning = planningFrom(events);
   const [shown, setShown] = useState(0);
   const instant = useRef<boolean | null>(null);
-  if (status && instant.current === null) instant.current = TERMINAL.has(status) || refundPending;
+  if (status && instant.current === null) instant.current = QUIET.has(status) || refundPending;
+  // Rook's questions show at once: no agents were searched for, so there are none to land first.
+  const asking = status === 'asking';
+  useEffect(() => { if (asking && revealing) onAgentsDone(); }, [asking, revealing, onAgentsDone]);
+  const [answering, setAnswering] = useState(false);
+  async function answer(prompt: string) {
+    if (!snap || !onAnswer) return;
+    setAnswering(true);
+    await onAnswer(prompt, usdc(snap.task.budget_atomic)).catch(() => false);
+    setAnswering(false);
+  }
   // The run's clock starts when this page sees it start. Joining mid-run, it would show a time that's too short.
   const timed = useRef<boolean | null>(null);
   if (status && timed.current === null) timed.current = status === 'draft' || status === 'planned';
@@ -1321,6 +1231,8 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
   const caughtUp = shown >= feed.length;
   const settled = !!status && (TERMINAL.has(status) || refundPending) && caughtUp;
   useEffect(() => { onGrow(); }, [shown, status, settled, onGrow]);
+  // Elapsed times and give-up times move on their own while a run is under way.
+  const now = useClock(!!status && ['funded', 'running', 'aggregating'].includes(status));
 
   // Keep the sidebar's status honest when the run moves on without an action from this page: every step, so it never
   // says "Needs funding" while the funded run is starting.
@@ -1375,23 +1287,34 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
   const unfunded = (task.status === 'approved' || task.status === 'killed') && !moneyMoved(snap, events);
   // A task that failed with nothing to run (planning failed, or every part was dropped) never started, whatever its
   // feed shows (that failure is an error event too).
-  const started = !['draft', 'planned', 'cancelled'].includes(task.status) && !unfunded && !(task.status === 'failed' && !plan?.subtasks.length);
+  // Rook's questions never started anything either: nothing was planned or funded.
+  const started = !['draft', 'asking', 'planned', 'cancelled'].includes(task.status) && !unfunded && !(task.status === 'failed' && !plan?.subtasks.length);
   const live = started && !settled;
   const spent = visible.reduce((sum, l) => sum + (l.paid ?? 0), 0);
-  const reserveUsed = visible.reduce((sum, l) => sum + (l.fromReserve ?? 0), 0);
+  // From the reserve: only what parts spent beyond their caps (a top-up returned unspent isn't spent), from Rook's books
+  // once it has them; never more than the spending shown so far.
+  const fromReserve = ledger?.subtasks ? Number(reserveSpent(ledger.subtasks)) : visible.reduce((sum, l) => sum + (l.fromReserve ?? 0), 0);
+  const reserveUsed = Math.min(fromReserve, spent);
   const simNote = noMoney ? ' (simulated)' : '';
   const usage = new Map<string, LedgerSub>();
   if (started) for (const s of snap.subtasks ?? []) { const l = ledger?.subtasks?.find((x) => x.n === s.n); if (l) usage.set(s.id, l); }
   const delivered = deliveredParts(snap.subtasks ?? [], titles);
+  // Each part's progress, live from the events, with the hires and deliveries of the last snapshot.
+  const parts = started && plan ? partViews(plan, snap.subtasks, events, { now, time: clockTime }, TERMINAL.has(task.status) || refundPending) : [];
+  // A finished run's parts that delivered nothing: the header names them, and the next step is trying them again.
+  const missing = final_result ? missingParts(final_result.abandoned, titles) : [];
+  const questions = asking ? questionsOf(plan, task.error) : [];
 
   // The message's own problem (not a task, a budget out of range): editing it is what helps, so that comes first.
   const aboutMessage = messageProblem(task.error);
+  const failure = failedDraft(task.error);
   const editMessage = editable && !editing && (
     <ActionButton primary={aboutMessage || !resendable} onClick={openEditor} disabled={locked || redoing || !!busy} buttonRef={blockEditButton}>Edit message</ActionButton>
   );
   // The failure offers Edit message itself (the planner's sentence about the message, or every part dropped): the
   // bubble's Edit would be a second button of the same name beside it.
-  const failureEdits = !!editMessage && ((task.status === 'failed' && !plan && resendable && aboutMessage) || (!!plan && !revealing && plan.subtasks.length === 0));
+  const failureEdits = !!editMessage && ((task.status === 'failed' && !plan && aboutMessage) || (!!plan && !asking && !revealing && plan.subtasks.length === 0));
+  const cost = plan ? planCost(plan) : null;
 
   return (
     <>
@@ -1399,19 +1322,37 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
         ? <MessageEditor prompt={task.prompt} budget={usdc(task.budget_atomic)} saving={redoing} errors={editErrors} onSave={(p, b) => void saveEdit(p, b)} onCancel={closeEditor} />
         : <UserMessage prompt={task.prompt} budget={usdc(task.budget_atomic)} note={attemptNote(task)} onEdit={editable && !locked && !redoing && !busy && !failureEdits ? openEditor : undefined} editRef={editButton} />}
 
-      {(task.status === 'draft' || (plan && (revealing || plan.subtasks.some((s) => s.candidates.length > 0)))) && (
+      {(task.status === 'draft' || (plan && !asking && (revealing || plan.subtasks.some((s) => s.candidates.length > 0)))) && (
         <RookMessage still={fresh}>
           <AgentSearch plan={plan} planning={planning} animate={fresh && planning.found.length === 0} onGrow={onGrow} onDone={revealing ? onAgentsDone : undefined} />
         </RookMessage>
       )}
+
+      {/* Rook asks for facts only the user knows, as its own message: the composer below takes the answer. */}
+      {asking && (
+        <RookMessage>
+          <p>{questions.length ? ASK_LEAD : 'Rook needs a few details from you before it plans this.'}</p>
+          {questions.length > 0 && (
+            <ul className="mt-2 space-y-1.5">{questions.map((q, i) => <li key={i} className="pl-4 -indent-3">• <InlineText text={q} /></li>)}</ul>
+          )}
+          <p className="mt-3 text-sm text-ink/65">Answer below. Or Rook can use clearly marked placeholders for you to replace later.</p>
+          {onAnswer && (
+            <div className="mt-3 flex flex-wrap gap-3">
+              <ActionButton onClick={() => void answer(PLACEHOLDERS_ANSWER)} busy={answering} disabled={locked || redoing || editing}>{answering ? 'Sending…' : 'Use placeholders'}</ActionButton>
+            </div>
+          )}
+        </RookMessage>
+      )}
+
+      {/* The planner's reply to the message is Rook's message; Rook's own trouble says it couldn't plan (failedDraft). */}
       {task.status === 'failed' && !plan && (
         <RookMessage>
-          <p>Rook couldn&apos;t draft a plan for this task.</p>
-          {task.error && <p className="mt-1 text-sm text-ink/65">{plannerReason(task.error)}</p>}
-          {resendable && !editing && (
+          {failure.lead && <p>{failure.lead}</p>}
+          {failure.text && <p className={failure.lead ? 'mt-1 text-sm text-ink/65' : 'whitespace-pre-wrap'}>{failure.text}</p>}
+          {!editing && ((!failure.again && editMessage) || (failure.again && resendable)) && (
             <div className="mt-3 flex flex-wrap gap-3">
-              {aboutMessage && editMessage}
-              <ActionButton primary={!aboutMessage} onClick={() => void sendAgain()} busy={redoing} disabled={locked}>{redoing ? 'Sending…' : 'Send again'}</ActionButton>
+              {!failure.again && editMessage}
+              {failure.again && resendable && <ActionButton primary onClick={() => void sendAgain()} busy={redoing} disabled={locked}>{redoing ? 'Sending…' : 'Send again'}</ActionButton>}
             </div>
           )}
           {againError && <p role="alert" className="mt-2 text-sm text-alert">{againError}</p>}
@@ -1419,7 +1360,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
       )}
 
       {/* Every part was dropped: the task ended there, with the orchestrator's reason (no agent fits, or over budget). */}
-      {plan && !revealing && plan.subtasks.length === 0 && (
+      {plan && !asking && !revealing && plan.subtasks.length === 0 && (
         <RookMessage>
           <p>Rook couldn&apos;t draft a plan for this task.</p>
           {task.error && <p className="mt-1 text-sm text-ink/65">{task.error}</p>}
@@ -1437,13 +1378,17 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
             </p>
           ) : (
             <p>
-              Here&apos;s the plan. The caps add up to <span className="font-medium">{usdc(plan.budget.allocated_atomic)} USDC</span>
-              {BigInt(plan.budget.reserve_atomic || 0) > 0n && <>, and up to {usdc(plan.budget.reserve_atomic)} USDC more can come from the reserve when a subtask needs more than its cap</>}.{' '}
+              {/* The most it can cost once fallback agents are counted (planCost), not the reserve's size. */}
+              Here&apos;s the plan. The caps add up to <span className="font-medium">{usdc(cost!.caps)} USDC</span>
+              {cost!.most > cost!.caps
+                ? <>. If an agent fails and Rook hires the next one, it can cost up to <span className="font-medium">{usdc(cost!.most)} USDC</span>, paid from the reserve</>
+                : ', the most it can cost'}.{' '}
               {started ? 'You approved it.' : task.status === 'cancelled' ? (task.replaced_by ? REPLACED : 'You cancelled it, so nothing was spent.') : task.status === 'approved' ? 'You approved it. Nothing has been spent yet.' : task.status !== 'killed' ? 'Nothing has been spent.'
                 : 'You stopped it before Rook started the run, so no agent was paid.'}
             </p>
           )}
-          <PlanCard plan={plan} usage={usage} />
+          <PlanCard plan={plan} usage={usage} started={started} />
+          <PlanFacts plan={plan} />
           {plan.dropped.length > 0 && <p className="mt-2 text-sm text-ink/65">Left out: {plan.dropped.map((d) => `${d.title} (${d.reason})`).join(', ')}</p>}
           {/* Stopped before Rook bound the wallet's transfer: whatever the feed shows, its USDC is the funder's to take back. */}
           {task.status === 'killed' && !ledger && snap.funding_sent && (
@@ -1484,8 +1429,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
         <RookMessage>
           <div className="flex items-start justify-between gap-x-3 gap-y-2 sm:flex-wrap sm:items-center sm:gap-x-6">
             <p className="min-w-0 tabular-nums max-sm:pt-2.5">
-              {/* Failed with a report: the work finished and only the refund hit a problem, which the money card says. */}
-              <span className="font-medium">{live ? 'Running.' : task.status === 'killed' ? 'Stopped.' : task.status === 'failed' && !final_result ? 'This run hit a problem.' : 'Finished.'}</span>
+              <span className="font-medium">{runHeadline({ live, status: task.status, report: !!final_result, missing, parts: planned.length })}</span>
               {free ? ' Rook does every part itself, so nothing is spent.' : <>
                 {' '}Spent {usdc(spent)} of {usdc(task.budget_atomic)} USDC{simNote}
                 {reserveUsed > 0 && <span className="text-ink/65">, {usdc(reserveUsed)} from the reserve</span>}
@@ -1494,17 +1438,32 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
             {!TERMINAL.has(task.status) && !refundPending && <ActionButton onClick={() => act('stop')} busy={busy === 'stop'} disabled={fundingBusy}>{busy === 'stop' ? 'Stopping…' : 'Stop'}</ActionButton>}
           </div>
           <Activity lines={visible} live={live} caughtUp={caughtUp} closing={task.status === 'aggregating' || task.status === 'closing' || task.status === 'closed'}
-            refunding={refundPending && !free} outcome={task.status === 'failed' && final_result ? 'closed' : task.status} timed={!!timed.current} free={free} />
+            refunding={refundPending && !free} outcome={task.status === 'failed' && final_result ? 'closed' : task.status} timed={!!timed.current} free={free}
+            current={nowLine(parts)} />
+          {parts.length > 0 && <RunParts parts={parts} now={now} live={live} />}
         </RookMessage>
       )}
 
       {final_result && settled && (
         <RookMessage>
           <p className="font-medium">Here&apos;s your report.</p>
-          {final_result.abandoned.length > 0 && <p className="mt-1 text-alert">{final_result.abandoned.length} subtask{final_result.abandoned.length > 1 ? 's' : ''} couldn&apos;t be completed.</p>}
-          <Report markdown={final_result.final_markdown} />
+          {missing.length > 0 && (
+            <div className="mt-1">
+              <p className="text-alert">{missing.length === 1 ? `“${missing[0]}” wasn't delivered.` : `These parts weren't delivered: ${missing.map((t) => `“${t}”`).join(', ')}.`}</p>
+              {onAnswer && (
+                <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <ActionButton onClick={() => void answer(retryMessage(missing))} busy={answering} disabled={locked || redoing}>
+                    {answering ? 'Sending…' : missing.length === 1 ? 'Try this part again' : 'Try these parts again'}
+                  </ActionButton>
+                  <span className="text-sm text-ink/60">Rook plans it again first, so nothing is spent until you approve.</span>
+                </div>
+              )}
+            </div>
+          )}
+          <Markdown markdown={final_result.final_markdown} />
+          {!!final_result.files?.length && <ReportFiles files={final_result.files} titles={titles} name={titles.get(final_result.files[0].subtask_id) ?? task.prompt} />}
 
-          {!free && <MoneyCard ledger={ledger} receipts={receipts} network={network} simNote={simNote} />}
+          {!free && <MoneyCard ledger={ledger} receipts={receipts} network={network} simNote={simNote} titles={titles} />}
         </RookMessage>
       )}
 
@@ -1516,7 +1475,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
             <section key={d.id} className="mt-5">
               <h3 className="text-xl font-medium tracking-[-0.01em]">{d.title}</h3>
               <p className="text-sm text-ink/65">{d.agent ? <>Delivered by <span className="font-mono">{d.agent}</span>.</> : 'Rook did this part itself.'}</p>
-              <Report markdown={d.text} />
+              <Markdown markdown={d.text} />
             </section>
           ))}
         </RookMessage>
@@ -1524,7 +1483,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
 
       {/* Stopped or failed without a report: still say where the money went, and what came back. */}
       {!final_result && settled && started && !free && (ledger || receipts.length > 0) && (
-        <RookMessage><MoneyCard ledger={ledger} receipts={receipts} network={network} simNote={simNote} /></RookMessage>
+        <RookMessage><MoneyCard ledger={ledger} receipts={receipts} network={network} simNote={simNote} titles={titles} /></RookMessage>
       )}
 
       {actError && <p role="alert" className="rounded-2xl border border-alert/40 bg-alert/10 p-4 text-alert">{actError}</p>}
@@ -1551,10 +1510,15 @@ function TaskThread({ account, hidden, onReady, onSummary, ...props }: ThreadPro
   const t = snap?.task;
   const [status, prompt, created, parent, budget, supersedes] = [t?.status, t?.prompt, t?.created_at, t?.parent_id ?? null, t?.budget_atomic, t?.supersedes ?? null];
   const hasPlan = !!snap?.plan?.subtasks.length;
+  // The parts a finished run didn't deliver, so the composer can offer to try them again.
+  const titles = new Map((snap?.plan?.subtasks ?? []).map((s) => [s.id, s.title]));
+  const missing = missingParts(snap?.final_result?.abandoned, titles).join('\n');
   // superseded_by is left to the list: a snapshot loaded before an edit in another tab would override it.
   useEffect(() => {
-    if (status && prompt !== undefined && created) onSummary(id, { id, status, prompt, created_at: created, parent_id: parent, budget_atomic: budget, has_plan: hasPlan, supersedes });
-  }, [id, status, prompt, created, parent, budget, hasPlan, supersedes, onSummary]);
+    if (status && prompt !== undefined && created) {
+      onSummary(id, { id, status, prompt, created_at: created, parent_id: parent, budget_atomic: budget, has_plan: hasPlan, supersedes, ...(missing ? { missing: missing.split('\n') } : {}) });
+    }
+  }, [id, status, prompt, created, parent, budget, hasPlan, supersedes, missing, onSummary]);
   useEffect(() => () => onSummary(id, null), [id, onSummary]);
   return hidden ? null : <Thread {...props} loaded={loaded} />;
 }
@@ -1727,7 +1691,8 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
               {ids.map((task) => (
                 <TaskThread key={`${task}:${wallet.account}`} id={task} account={wallet.account} hidden={sending?.id === task} onReady={onReady} onSummary={onSummary}
                   tasks={tasks} onGrow={follow} fresh={justDrafted.current.has(task)} onRevealed={onRevealed} revised={revised === task}
-                  onRedo={task === newest && !redoBlocked ? redo : undefined} redoing={redoing === task} locked={!!sending || (redoing !== null && redoing !== task)} />
+                  onRedo={task === newest && !redoBlocked ? redo : undefined} redoing={redoing === task} locked={!!sending || (redoing !== null && redoing !== task)}
+                  onAnswer={task === newest ? send : undefined} />
               ))}
               {sending && (
                 <>

@@ -16,6 +16,7 @@ test("a planner failure reads in plain words; one with no plainer words says wha
     ['planner: planner LLM failed: NEAR AI 503 for plan.draft: <html><body>Service Unavailable</body></html>', /^The planning model is busy/],
     ['planner: planner LLM failed: NEAR AI 429 for plan.select: {"error":"rate limited"}', /^The planning model is busy/],
     ['planner: planner LLM failed: fetch failed', /^The planning model is busy or out of reach/],
+    ['planner: planner LLM failed: Rook is busy, try again in a minute: the LLM calls in flight hold 0.9000 USD, and 0.2000 USD is spent in the last 24 h of the 10 USD a day ROOK_LLM_MAX_USD allows', /^Rook is busy\. Try again in a minute\.$/],
     ['planner: planner LLM failed: LLM plan.draft returned invalid JSON twice: [ { "origin": "array", "code": "too_big", "maximum": 3, "path": [ "subtasks", 2, "search_terms" ] } ]', /^The planning model gave an answer Rook couldn't use/],
     ['planner: planner LLM failed: no JSON object in model output', /^The planning model gave an answer Rook couldn't use/],
     ['planner: planner LLM failed: NEAR AI 402 for plan.draft: {"error":{"type":"no_limit_configured"}}', /^NEAR AI has no credits/],

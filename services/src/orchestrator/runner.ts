@@ -5,20 +5,21 @@
 // closing one whose close failed, still holds, and keeps trying until the books close.
 // Error events carry `message` (for logs and the CLI) and `kind`, which a client words for people: eval_retry,
 // close_retry, unreachable_retry (retried); payment_lookup, receipt, paid_anyway, unpaid, aggregate, restore_note, rook_writes (notes); abandoned,
-// unchecked, return, close, unwind, run, restore (problems). Agent-related ones name `agent_handle`.
+// unchecked, return, close, unwind, run, restore, inputs_too_large (problems; the last one's message is a plain sentence).
+// Agent-related ones name `agent_handle`.
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { cannedAggregate, agentOf, isMerged } from '../planner/canned.ts';
+import { attach, cannedAggregate, agentOf, isMerged } from '../planner/canned.ts';
 import { config } from '../shared/config.ts';
 import { call } from '../shared/http.ts';
 import { formatUsdc } from '../shared/money.ts';
 import {
   TERMINAL, type A2AState, type A2ATask, type AcceptsRow, type AggregateResult, type Candidate, type Evaluation,
-  type GatewayResult, type LlmCall, type Part, type TaskStatus, type X402Config,
+  type GatewayResult, type LlmCall, type Part, type TaskStatus, type WorkFile, type X402Config,
 } from '../shared/types.ts';
 import { OtherContract, Unrebuildable, type ChainLedger } from './chain-ledger.ts';
 import { LedgerError, type Ledger, type Recipient } from './ledger.ts';
-import { emit, isFree, isTerminal, now, saveTask, setStatus, setSub, type Hire, type ReceiptView, type Sub, type Task } from './store.ts';
+import { emit, isFree, isTerminal, now, saveTask, setStatus, setSub, withWorkspace, type Hire, type ReceiptView, type Sub, type Task } from './store.ts';
 
 const gw = (path: string) => config.urls.marketGateway + path;
 const msg = (e: any) => e?.message ?? String(e);
@@ -152,13 +153,17 @@ export async function runTask(ledger: Ledger, t: Task) {
         signal.throwIfAborted();
         t.llm_calls.push(...paidCalls(e));
         emit(t, 'error', { kind: 'aggregate', message: `aggregate failed, using the deterministic merge: ${msg(e)}` });
-        agg = { final_markdown: cannedAggregate(req), attribution: subtasks.filter(isMerged).map((s) => ({ subtask_id: s.id, agent_handle: agentOf(s) })), llm_calls: [] };
+        const attached = attach(subtasks); // the delivered files too: a web page an agent built stays a file
+        agg = { final_markdown: cannedAggregate(req, attached), attribution: subtasks.filter(isMerged).map((s) => ({ subtask_id: s.id, agent_handle: agentOf(s) })), files: attached.files, llm_calls: [] };
       }
       signal.throwIfAborted();
       t.llm_calls.push(...(agg.llm_calls ?? []));
+      // The chat's files with this run's replacing the same paths: Files always shows the whole latest version, never
+      // only the one file an edit changed.
+      const { files, changed } = withWorkspace(t.workspace ?? [], agg.files ?? []);
       // Stored before the close: the report is paid for, so a close that fails (or a restart) never loses it.
       t.final_result = {
-        final_markdown: agg.final_markdown, attribution: agg.attribution ?? [],
+        final_markdown: agg.final_markdown, attribution: agg.attribution ?? [], files, changed,
         abandoned: t.subtasks.filter((s) => s.final_outcome === 'abandoned').map((s) => s.id),
       };
       saveTask(t);
@@ -190,7 +195,10 @@ export async function runTask(ledger: Ledger, t: Task) {
 /** The books are closed: the run ends with its report and what it spent and refunded. */
 function closed(ledger: Ledger, t: Task) {
   const v = ledger.view(t.id)!;
-  emit(t, 'final', { ...t.final_result, spent_atomic: v.spent_atomic, refunded_atomic: v.refunded_atomic, reserve_used_atomic: v.reserve_used_atomic });
+  // The files (up to 3 MB) stay out of the event, which every reconnect replays and the task doc keeps: a client
+  // reads them from the snapshot, as it does the report.
+  const { files: _, ...result } = t.final_result!;
+  emit(t, 'final', { ...result, spent_atomic: v.spent_atomic, refunded_atomic: v.refunded_atomic, reserve_used_atomic: v.reserve_used_atomic });
   setStatus(t, 'closed');
 }
 
@@ -258,8 +266,8 @@ export async function unwind(ledger: Ledger, t: Task, why: string, afterRun = fa
     t.salvaging = true;
     const stop = t.shutdown.signal;
     const said = new Map<string, string>(); // each step's last reported problem
-    const step = async (op: string, s: Sub | null, fn: () => bigint | object | Promise<bigint | object>) => {
-      try { return await ledgerOp(t, op, s, fn); } catch (e) { // a sim ledger refuses synchronously, so not .catch
+    const step = async (op: string, s: Sub | null, fn: () => bigint | object | Promise<bigint | object>, extra: object = {}) => {
+      try { return await ledgerOp(t, op, s, fn, extra); } catch (e) { // a sim ledger refuses synchronously, so not .catch
         if (stop.aborted) return null; // cut short by a shutdown: the next start resumes it
         const key = `${op} ${s?.id ?? ''}`, message = `${why}, ${op}${s ? ` ${s.id}` : ''}: ${msg(e)}`;
         if (said.get(key) !== message) emit(t, 'error', { kind: 'unwind', op, message }, s?.id);
@@ -283,7 +291,8 @@ export async function unwind(ledger: Ledger, t: Task, why: string, afterRun = fa
             clearing.add(s.n);
             emit(t, 'ledger', { op: 'clearing', n: s.n, how, agent_handle: hire?.agent_handle ?? null, expires_at: hire?.expires_at ?? null }, s.id);
           }
-          const r = await step('release', s, () => ledger.release(t.id, s.n, how, stop));
+          // Named, so a client says which agent's payment ended (and whether it was charged).
+          const r = await step('release', s, () => ledger.release(t.id, s.n, how, stop), hire ? { agent_handle: hire.agent_handle } : {});
           if (r && typeof r === 'object' && 'settled' in r && hire) { // it landed anyway: paid, so it gets a receipt
             hire.paid = true; hire.state = 'OUTCOME_UNKNOWN'; hire.ended_at ??= now();
             if (!t.receipts.some((x) => x.hire_id === hire.id)) await writeReceipt(ledger, t, s, hire, null);
@@ -325,7 +334,8 @@ export function kill(ledger: Ledger, t: Task) {
     for (const v of ledger.view(t.id)?.subtasks ?? []) {
       if (v.authorized_atomic === null || sending.has(v.n)) continue;
       const s = t.subtasks.find((x) => x.n === v.n) ?? null;
-      ledgerOp(t, 'release', s, () => ledger.release(t.id, v.n, 'now')).catch((e) => console.error('[orchestrator] kill release', e));
+      const h = s && authHire(ledger, t, s); // looked up while the authorization is still outstanding
+      ledgerOp(t, 'release', s, () => ledger.release(t.id, v.n, 'now'), h ? { agent_handle: h.agent_handle } : {}).catch((e) => console.error('[orchestrator] kill release', e));
     }
   }
   setStatus(t, 'killed');
@@ -416,13 +426,119 @@ async function rebuild(ledger: ChainLedger, t: Task, said: { last: string }): Pr
 // ---- subtask ----
 
 async function runSubtask(ledger: Ledger, t: Task, s: Sub, done: Map<string, Deferred>) {
+  const tooLarge = s.final_outcome ? null : inputsTooLarge(t, s);
   if (s.final_outcome) done.get(s.id)!.resolve(); // finished before a restart
-  else if (s.self_do) await selfDo(t, s, done);
+  else if (tooLarge) { // never sent cut short: an agent would rebuild what it can't see
+    emit(t, 'error', { kind: 'inputs_too_large', message: tooLarge }, s.id);
+    finish(t, s, 'abandoned', done);
+  } else if (s.self_do) await selfDo(t, s, done);
   else await hireLoop(ledger, t, s, done);
   if (!s.self_do && ledger.view(t.id)?.subtasks.find((x) => x.n === s.n)?.returned_atomic === null) {
     await ledgerOp(t, 'returnLeftover', s, () => ledger.returnLeftover(t.id, s.n));
   }
   setSub(t, s, 'returned');
+}
+
+/** The most a part's input files may come to: past it the part is not sent (a brief that size buries the request). */
+export const INPUTS_MAX_BYTES = 300 * 1024;
+
+/** The chat's files a part edits, whole, by path (the planner names only paths the chat has; any other is skipped). */
+export function inputsOf(t: Task, s: { inputs?: string[] }): WorkFile[] {
+  const ws = new Map((t.workspace ?? []).map((f) => [f.name, f.text]));
+  return [...new Set(s.inputs ?? [])].filter((p) => ws.has(p)).map((path) => ({ path, text: ws.get(path)! }));
+}
+
+/** Why a part's input files can't be sent, in plain words; null when they can (or it has none). */
+export function inputsTooLarge(t: Task, s: Sub): string | null {
+  const bytes = inputsOf(t, s).reduce((n, f) => n + Buffer.byteLength(f.text), 0);
+  if (bytes <= INPUTS_MAX_BYTES) return null;
+  return `The files "${s.title}" changes come to ${Math.ceil(bytes / 1024)} KB, more than the ${INPUTS_MAX_BYTES / 1024} KB Rook can send with one part, so that part isn't sent.`;
+}
+
+/** A Markdown fence longer than any run of backticks in `text`, so the file inside can't close it early. */
+const fenceFor = (text: string) => '`'.repeat([...text.matchAll(/`+/g)].reduce((n, m) => Math.max(n, m[0].length + 1), 3));
+
+/**
+ * What an agent is sent: the brief, then the files it changes, each whole under its path, so an edit starts from the
+ * delivered work as it is, never from a model's retelling of it. The language tag lets a reply in the same shape be
+ * read back as files (planner/files.ts).
+ */
+export function messageFor(brief: string, files: WorkFile[]): string {
+  if (!files.length) return brief;
+  const blocks = files.map((f) => {
+    const fence = fenceFor(f.text), lang = f.path.split('/').at(-1)!.match(/.\.([A-Za-z0-9]{1,10})$/)?.[1] ?? '';
+    return `${f.path}\n${fence}${lang}\n${f.text}\n${fence}`;
+  });
+  return `${brief.trimEnd()}\n\n## Current files\n\nThe files to change, exactly as they are now, each under its path. Change only what is asked above, and send back every file you change whole, under the same path.\n\n${blocks.join('\n\n')}`;
+}
+
+/** Bytes an agent sent inside its reply: text when they read as UTF-8 text, else just their size. */
+function fromBytes(buf: Buffer, mime?: string, name?: string): { text: string; name?: string } | { bytes: number; mime?: string; name?: string } {
+  let text: string | null = null;
+  try { text = new TextDecoder('utf-8', { fatal: true }).decode(buf); } catch { /* not UTF-8 */ }
+  return text !== null && !/[\u0000-\u0008\u000e-\u001f]/.test(text) ? { text, name } : { bytes: buf.length, mime, name };
+}
+
+/**
+ * A raw part's content. The market gateway passes an A2A raw part on as its base64 bytes, and a data part (or a file
+ * part with its bytes inline) as JSON. ponytail: a short string that reads as base64 but decodes to no text is taken
+ * as text; an agent sending a few raw bytes is rare.
+ */
+function rawContent(raw: string): { text: string; json?: true; name?: string } | { bytes: number; mime?: string; name?: string } {
+  let data: unknown;
+  try { data = JSON.parse(raw); } catch { /* not JSON */ }
+  if (data && typeof data === 'object') {
+    const file = (data as { file?: { bytes?: unknown; mimeType?: string; name?: string } }).file;
+    if (typeof file?.bytes === 'string') return fromBytes(Buffer.from(file.bytes, 'base64'), file.mimeType, file.name);
+    return { text: JSON.stringify(data, null, 2), json: true };
+  }
+  if (!/^[A-Za-z0-9+/\r\n]+={0,2}$/.test(raw.trim())) return { text: raw };
+  const out = fromBytes(Buffer.from(raw, 'base64'));
+  return 'bytes' in out && raw.trim().length < 16 ? { text: raw } : out;
+}
+
+/** A data: url's bytes and media type; null when the url is not one. Never throws: a delivery is read before it is paid. */
+function dataUrl(url: string): { buf: Buffer; mime?: string } | null {
+  const m = url.match(/^data:([^,;]*)((?:;[^,;]*)*),/i);
+  if (!m) return null;
+  const body = url.slice(m[0].length), mime = m[1] || undefined;
+  if (/;base64/i.test(m[2])) return { buf: Buffer.from(body, 'base64'), mime };
+  try { return { buf: Buffer.from(decodeURIComponent(body)), mime }; } catch { return { buf: Buffer.from(body), mime }; }
+}
+
+const fileLike = (name?: string) => (name && /^[^\s/]+\.[A-Za-z0-9]{1,10}$/.test(name) ? name : undefined);
+const sizeOf = (bytes: number) => (bytes < 1024 ? `${bytes} bytes` : bytes < 1024 * 1024 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 1024 / 1024).toFixed(1)} MB`);
+
+/**
+ * What a delivery holds, as the evaluator and the report read it. The evaluator gets every part; the text keeps
+ * everything an agent sent and Rook pays for: a url part (an image, a video, a zip, a link) is a "File:" line, a raw
+ * part (or a data: url) that is text becomes a named file block, which planner/files.ts attaches like any delivered
+ * file, and bytes that aren't text are named with their size (a report file is text only). Before, only text parts
+ * counted: an agent that delivered a picture was paid, then failed as empty.
+ */
+export function deliveryOf(artifacts: A2ATask['artifacts']): { parts: Part[]; deliverable_text: string } {
+  const parts: Part[] = [], out: string[] = [];
+  let n = 0;
+  for (const a of artifacts ?? []) {
+    for (const p of a.parts ?? []) {
+      parts.push(p);
+      if (typeof p.text === 'string') { out.push(p.text); continue; }
+      const inline = typeof p.url === 'string' ? dataUrl(p.url) : null;
+      if (typeof p.url === 'string' && !inline) {
+        const name = fileLike(a.name);
+        out.push(`File: ${name && !p.url.includes(name) ? `${name} ` : ''}${p.url}`);
+        continue;
+      }
+      if (typeof p.raw !== 'string' && !inline) continue;
+      const c = inline ? fromBytes(inline.buf, inline.mime) : rawContent(p.raw!);
+      const name = fileLike(c.name) ?? fileLike(a.name);
+      if ('bytes' in c) { out.push(`File: ${name ?? 'a file'} (${c.mime || 'binary data'}, ${sizeOf(c.bytes)}), sent inside the reply. Rook can't attach a file of this kind, so it isn't under Files.`); continue; }
+      const file = name ?? `${(a.name ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'delivery'}-${++n}.${'json' in c ? 'json' : 'txt'}`;
+      const fence = fenceFor(c.text);
+      out.push(`${file}\n${fence}${file.split('.').at(-1)}\n${c.text}\n${fence}`);
+    }
+  }
+  return { parts, deliverable_text: out.join('\n\n') };
 }
 
 function finish(t: Task, s: Sub, outcome: 'passed' | 'abandoned', done: Map<string, Deferred>) {
@@ -680,7 +796,7 @@ async function hire1(ledger: Ledger, t: Task, s: Sub, c: Candidate, row: Accepts
     saveTask(t);
     let sent: GatewayResult<{ task: A2ATask }>;
     try {
-      sent = await call(gw('/send'), { handle: c.handle, text: s.brief, payment: auth.header });
+      sent = await call(gw('/send'), { handle: c.handle, text: messageFor(s.brief, inputsOf(t, s)), payment: auth.header });
     } catch (e) {
       sent = { ok: false, error: { code: 'network', message: msg(e) } };
     }
@@ -736,8 +852,10 @@ async function resumeHire(ledger: Ledger, t: Task, s: Sub, hire: Hire): Promise<
       return null;
     }
     setSub(t, s, 'working');
+    // TIMEOUT: Rook had given up on it before the restart (its payment not yet cleared): straight to the void, no new poll.
+    const timedOut = hire.state === 'TIMEOUT';
     const state = (['SUBMITTED', 'WORKING', ...TERMINAL] as string[]).includes(hire.state) ? hire.state as A2AState : 'WORKING';
-    return await follow(ledger, t, s, c, hire, { id: hire.a2a_task_id, context_id: hire.context_id, state, artifacts: [] }, slaEnd(c, hire));
+    return await follow(ledger, t, s, c, hire, { id: hire.a2a_task_id, context_id: hire.context_id, state, artifacts: [] }, timedOut ? 0 : slaEnd(c, hire), timedOut);
   } finally {
     release();
   }
@@ -748,34 +866,42 @@ const slaEnd = (c: Candidate, hire: Hire) =>
   Date.parse(hire.started_at) + Math.min(c.sla_seconds + config.paymentGraceS, config.hirePatienceS) * 1000;
 
 /** Polls a sent hire to its end, then settles its payment or ends it unpaid (a fresh hire, or one resumed after a restart). */
-async function follow(ledger: Ledger, t: Task, s: Sub, c: Candidate, hire: Hire, sentTask: A2ATask, slaEnd: number): Promise<Hire | null> {
+async function follow(ledger: Ledger, t: Task, s: Sub, c: Candidate, hire: Hire, sentTask: A2ATask, slaEnd: number, timedOut = false): Promise<Hire | null> {
   const signal = t.abort.signal;
   t.inflight.set(hire.id, { subtask: s, hire, handle: c.handle, a2a_task_id: sentTask.id });
-  let final = await poll(t, s, c, hire, sentTask, slaEnd);
+  let final = timedOut ? null : await poll(t, s, c, hire, sentTask, slaEnd);
   if (!final) {
-    // Past sla + grace. The header stays redeemable until the authorization expires, so the next candidate is
-    // authorized only once CancelTask is accepted or that expiry has passed (the agent may still complete and charge).
-    const cancelled = await cancelTask(c.handle, sentTask.id);
+    // Past sla + grace (at most ROOK_HIRE_PATIENCE_S): Rook stops waiting, whether or not the agent accepts CancelTask.
+    // One last look catches a delivery that landed meanwhile; otherwise the payment is voided (the signer spends its
+    // nonce), so the next candidate is hired now, not once the authorization's window ends. On mainnet a 2 h 10 min
+    // window held a part for 1 h 40 min after its agent had accepted CancelTask, with the page saying nothing.
+    await cancelTask(c.handle, sentTask.id);
     signal.throwIfAborted();
-    const expiresAt = Date.parse(hire.expires_at ?? '');
-    if (!cancelled && expiresAt - Date.now() > 1000) {
-      final = await poll(t, s, c, hire, { ...sentTask, state: hire.state as A2AState }, expiresAt);
-    }
+    const last = await getTask(c.handle, sentTask.id, signal);
+    if (last?.state === 'COMPLETED' && hasContent(last)) { final = last; hire.state = last.state; }
   }
   t.inflight.delete(hire.id);
   hire.ended_at = now();
 
   if (!final) {
     hire.state = 'TIMEOUT';
-    emit(t, 'a2a_state', { hire_id: hire.id, agent_handle: c.handle, a2a_task_id: sentTask.id, state: 'TIMEOUT' }, s.id);
-    return (await endUnpaid(ledger, t, s, hire, 'wait')) ? hire : null;
+    if (!timedOut) emit(t, 'a2a_state', { hire_id: hire.id, agent_handle: c.handle, a2a_task_id: sentTask.id, state: 'TIMEOUT' }, s.id);
+    if (!(await endUnpaid(ledger, t, s, hire, 'void'))) return null;
+    // It landed: x402 settles only on delivery, so the agent delivered in the gap. Its work is read and judged like any
+    // delivery (the release already booked the payment), not thrown away while the next candidate is paid.
+    const late = await lateDelivery(c.handle, sentTask.id, signal);
+    if (late) {
+      hire.state = 'COMPLETED';
+      Object.assign(hire, deliveryOf(late.artifacts));
+      emit(t, 'a2a_state', { hire_id: hire.id, agent_handle: c.handle, a2a_task_id: sentTask.id, state: 'COMPLETED' }, s.id);
+    }
+    return hire;
   }
   if (final.state !== 'COMPLETED') { // REJECTED, FAILED, CANCELED: terminal and unpaid
     return (await endUnpaid(ledger, t, s, hire, 'terminal')) ? hire : null;
   }
   // Delivered: keep the deliverable before settling, so the settle event stores it with the payment.
-  hire.parts = final.artifacts.flatMap((a) => a.parts ?? []);
-  hire.deliverable_text = hire.parts.filter((p) => typeof p.text === 'string').map((p) => p.text).join('\n\n');
+  Object.assign(hire, deliveryOf(final.artifacts));
   // A kill stops the wait for the facilitator: unwind then waits out this authorization on its own.
   const paid = await ledgerOp(t, 'settle', s, async () => {
     const a = await ledger.settle(t.id, s.n, signal);
@@ -786,7 +912,29 @@ async function follow(ledger: Ledger, t: Task, s: Sub, c: Candidate, hire: Hire,
   return hire;
 }
 
+/**
+ * A paid hire's delivery, read after Rook had given up on it: three looks a second apart (COMPLETED may land before its
+ * artifacts). Null when none shows, or on a kill: the hire then stays counted as spent with an unknown outcome.
+ */
+async function lateDelivery(handle: string, id: string, signal: AbortSignal): Promise<A2ATask | null> {
+  try {
+    for (let i = 0; i < 3; i++) {
+      if (i) await sleep(1000, undefined, { signal });
+      const task = await getTask(handle, id, signal);
+      if (task?.state === 'COMPLETED' && hasContent(task)) return task;
+    }
+  } catch (e) { if (!signal.aborted) throw e; }
+  return null;
+}
+
 const hasContent = (task: A2ATask) => task.artifacts?.some((a) => a.parts?.some((p) => (p.text ?? '').trim() || p.url || p.raw));
+
+/** One GetTask; null when the gateway or the agent does not answer. */
+async function getTask(handle: string, id: string, signal: AbortSignal): Promise<A2ATask | null> {
+  const r = await call<GatewayResult<{ task: A2ATask }>>(gw(`/task?handle=${encodeURIComponent(handle)}&id=${encodeURIComponent(id)}`), undefined, { signal })
+    .catch(() => { signal.throwIfAborted(); return null; });
+  return r?.ok ? r.task : null;
+}
 
 /** Poll GetTask until terminal; null when the deadline passes first. */
 async function poll(t: Task, s: Sub, c: Candidate, hire: Hire, initial: A2ATask, deadline: number): Promise<A2ATask | null> {
@@ -831,11 +979,15 @@ async function evaluate(t: Task, s: Sub, text: string, parts: Part[], hire_id: s
     .map((id) => t.subtasks.find((x) => x.id === id))
     .filter((p): p is Sub => p?.final_outcome === 'passed' && !!p.accepted)
     .map((p) => ({ subtask_id: p.id, text: p.accepted!.text }));
+  // An edit gives back only the files it changes: the checker hears which ones the project already has, so a page that
+  // still loads an unchanged styles.css passes linked_files (evaluator/index.ts reads paths named in the brief as there).
+  const known = (t.workspace ?? []).map((f) => f.name);
+  const brief = known.length ? `${s.brief}\n\nFiles the project already has (unchanged unless this delivery gives them again): ${known.join(', ')}` : s.brief;
   let ev: Evaluation;
   for (let attempt = 1; ; attempt++) {
     try {
       ev = await call<Evaluation>(config.urls.evaluator + '/evaluate', {
-        task_id: t.id, subtask_id: s.id, brief: s.brief, criteria: s.criteria, deliverable: { text, parts }, peers,
+        task_id: t.id, subtask_id: s.id, brief, criteria: s.criteria, deliverable: { text, parts }, peers,
       }, { signal });
       break;
     } catch (e) {
@@ -853,13 +1005,17 @@ async function evaluate(t: Task, s: Sub, text: string, parts: Part[], hire_id: s
   return ev;
 }
 
-/** self_do subtasks: the planner writes the deliverable; no ledger involvement. An error abandons this subtask only. */
+/**
+ * self_do subtasks: the planner writes the deliverable; no ledger involvement. An error abandons this subtask only. A
+ * part that edits the chat's files (a rook_edit, or a hired part Rook writes after all) gets them whole, as an agent does.
+ */
 async function selfDo(t: Task, s: Sub, done: Map<string, Deferred>) {
   const signal = t.abort.signal;
+  const files = inputsOf(t, s);
   for (;;) {
     setSub(t, s, 'working'); // Rook writes it now, as a hired agent works on its part
     const r = await call<{ text: string; llm_calls: LlmCall[] }>(config.urls.planner + '/self-do', {
-      task_id: t.id, subtask_id: s.id, brief: s.brief, criteria: s.criteria,
+      task_id: t.id, subtask_id: s.id, brief: s.brief, criteria: s.criteria, ...(files.length ? { files } : {}),
     }, { signal });
     signal.throwIfAborted();
     t.llm_calls.push(...(r.llm_calls ?? []));

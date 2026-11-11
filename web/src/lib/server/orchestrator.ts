@@ -11,14 +11,21 @@ export const serviceHeaders = (): Record<string, string> =>
   process.env.ROOK_SERVICE_TOKEN ? { 'x-rook-token': process.env.ROOK_SERVICE_TOKEN } : {};
 
 /**
+ * A task's status (services/src/shared/types.ts TaskStatus). asking: the planner needs facts only the user can give
+ * (PlanView.questions); nothing is planned or funded, and the next message in the chat answers it.
+ */
+export type TaskStatus = 'draft' | 'asking' | 'planned' | 'approved' | 'funded' | 'running' | 'aggregating' | 'closing' | 'closed' | 'cancelled' | 'killed' | 'failed';
+
+/**
  * parent_id: the task this one follows in its conversation; null starts a conversation. has_plan: it got a plan with
- * something to run (false for a reply that wasn't a task, or a failed draft). Older orchestrators send no parent_id
- * (every task starts its own), no budget_atomic and no has_plan. supersedes / superseded_by: a message sent again or
- * edited names the one it took the place of, which names it back (chat-actions.ts shownTasks).
+ * something to run (false for a reply that wasn't a task, a question, or a failed draft). Older orchestrators send no
+ * parent_id (every task starts its own), no budget_atomic and no has_plan. supersedes / superseded_by: a message sent
+ * again or edited names the one it took the place of, which names it back (chat-actions.ts shownTasks). missing: added
+ * by this page, the titles of a finished run's parts that delivered nothing (the composer offers to try them again).
  */
 export type TaskSummary = {
-  id: string; status: string; prompt: string; created_at: string; parent_id?: string | null; budget_atomic?: string; has_plan?: boolean;
-  supersedes?: string | null; superseded_by?: string | null;
+  id: string; status: TaskStatus; prompt: string; created_at: string; parent_id?: string | null; budget_atomic?: string; has_plan?: boolean;
+  supersedes?: string | null; superseded_by?: string | null; missing?: string[];
 };
 
 /**
@@ -45,18 +52,34 @@ export type Mode = {
   max_budget_atomic?: string | null;
 };
 
+/**
+ * Why a self_do subtask is Rook's own: no agent fits it, the ones found cost more than the budget allows, or it is a
+ * small edit of delivered files Rook makes itself at once (a rename, a colour), with no agent fee and no wait.
+ */
+export type SelfDoReason = 'no_agent' | 'over_budget' | 'rook_edit';
+
 export type PlanView = {
   subtasks: {
     id: string; title: string; brief?: string; cap_atomic: string; deadline_s?: number; self_do: boolean;
-    /** Why a self_do subtask is Rook's own: no agent fits it, or the ones found cost more than the budget allows. Older plans leave it out. */
-    self_do_reason?: 'no_agent' | 'over_budget';
+    /** Older plans leave it out. */
+    self_do_reason?: SelfDoReason;
     /** over_budget: the cheapest quote found (atomic USDC), what one hire would have cost. Older plans leave it out. */
     self_do_need_atomic?: string;
+    /** Rook may write it itself when no hired agent delivers. Absent in older plans: it may not. */
+    self_do_ok?: boolean;
+    /** An edit of delivered work: the conversation's files (by path) this part changes, attached to its brief whole. */
+    inputs?: string[];
     criteria: { id: string; description: string }[];
     candidates: Candidate[];
   }[];
   dropped: { title: string; reason: string }[];
-  budget: { reserve_atomic: string; allocated_atomic: string };
+  budget: { reserve_atomic: string; allocated_atomic: string; budget_atomic?: string };
+  /** The planner's notes: some are sentences for people (they start with "Rook "), the rest are its own (plan-view.ts planNotes). */
+  notes?: string[];
+  /** Facts only the user can give, asked instead of planning (the task is 'asking' and there are no subtasks). */
+  questions?: string[];
+  /** What the plan takes as given or leaves out, in plain words, shown before any money moves. */
+  assumptions?: string[];
 };
 
 /**
@@ -81,14 +104,34 @@ export type LedgerSub = {
 };
 
 /**
+ * One hire of a subtask. state: the agent's A2A state (SUBMITTED, WORKING, COMPLETED, FAILED, REJECTED, CANCELED), or
+ * Rook's own: SENDING, TIMEOUT, SEND_FAILED, OUTCOME_UNKNOWN, KILLED. ended_at is null while it runs. Older
+ * orchestrators send only id, agent_handle and deliverable_text.
+ */
+export type HireView = {
+  id: string; agent_handle: string; deliverable_text: string | null;
+  state?: string; started_at?: string; ended_at?: string | null; amount_atomic?: string; paid?: boolean; verdict?: 'pass' | 'fail' | null;
+};
+
+/**
  * A subtask as the run left it. A passed one's deliverable is its accepted hire's deliverable_text, or, for a part Rook
- * did itself (no hire), accepted.text. Older orchestrators send only id, n and status.
+ * did itself (no hire), accepted.text. tried: the agents Rook got to, in order. Older orchestrators send only id, n
+ * and status.
  */
 export type SubtaskView = {
   id: string; n: number; status: string; title?: string; self_do?: boolean; final_outcome?: 'passed' | 'abandoned' | null;
+  cap_atomic?: string; deadline_s?: number; tried?: string[];
   accepted?: { hire_id: string | null; agent_handle: string; text?: string } | null;
-  hires?: { id: string; agent_handle: string; deliverable_text: string | null }[];
+  hires?: HireView[];
+  evaluations?: { hire_id: string | null; verdict: 'pass' | 'fail'; failed_criteria: string[] }[];
 };
+
+/**
+ * A file a hired agent (or Rook) delivered, kept apart from the report text. `name` is its path inside the project
+ * ("app/pricing/page.tsx", "postcss.config.mjs"), folders separated by "/", never absolute or "..": older results have
+ * a bare name. Older results have no files at all.
+ */
+export type ReportFile = { subtask_id: string; agent_handle: string; name: string; mime: string; text: string };
 
 export type TaskSnapshot = {
   task: Omit<TaskView, 'plan'>;
@@ -102,7 +145,7 @@ export type TaskSnapshot = {
     closed?: boolean;
     contract_id?: string | null; contract_task_id?: string; subtasks?: LedgerSub[];
   } | null;
-  final_result: { final_markdown: string; abandoned: string[] } | null;
+  final_result: { final_markdown: string; abandoned: string[]; files?: ReportFile[] } | null;
   /**
    * Added by this web server (api/tasks/[id]): a funding transfer the browser reported for a task not yet running.
    * contract_task_id is null while only its hash is known; refunded once the funder's close_task took the USDC back.
@@ -110,7 +153,8 @@ export type TaskSnapshot = {
   funding_sent?: { contract_task_id: string | null; tx_hash: string | null; refunded: boolean; refund_tx: string | null } | null;
 };
 
-export type RookEvent = { seq: number; type: string; subtask_id?: string; data: any };
+/** ts: when Rook emitted it (ISO, Rook's clock). */
+export type RookEvent = { seq: number; ts?: string; type: string; subtask_id?: string; data: any };
 
 export class OrchestratorDown extends Error {}
 

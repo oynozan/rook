@@ -28,8 +28,13 @@ const plan = {
 };
 
 let planner: Awaited<ReturnType<typeof serve>>;
+const QUESTIONS = ['What is your name?'];
+const planRequests: any[] = [];
 before(async () => {
-  planner = await serve('planner', { 'POST /plan': () => plan }, 0);
+  // 'ask me': the planner asks for facts only the user knows instead of planning.
+  planner = await serve('planner', {
+    'POST /plan': ({ body }) => (planRequests.push(body), body.prompt === 'ask me' ? { ...plan, subtasks: [], notes: [], questions: QUESTIONS } : plan),
+  }, 0);
   process.env.PLANNER_URL = planner.url;
 });
 after(async () => {
@@ -106,6 +111,60 @@ test('a sim-ledger task restarted while closing with its report ends closed: the
   check.close();
   assert.deepEqual(doc.events.slice(1).map((e) => [e.type, e.data.to]), [['task_status', 'closed']]); // no error, no refund claimed
   assert.equal(doc.ledger_saved, null);
+});
+
+test("a report's files survive a restart in the task doc; a report stored before files shows an empty list", async () => {
+  const path = freshDb();
+  const ts = new Date().toISOString();
+  const file = { subtask_id: 's1', agent_handle: 'codex-engineer-01', name: 'index.html', mime: 'text/html', text: '<!doctype html>\n<html></html>' };
+  const doc = (id: string, final_result: any) => ({
+    id, prompt: 'p', budget_atomic: '1000000', reserve_share: 0.2, funder: 'funder.sim', owner: null, status: 'closed' as const, error: null,
+    created_at: ts, updated_at: ts, plan: null, subtasks: [], receipts: [], llm_calls: [], final_result,
+    events: [{ seq: 1, ts, task_id: id, type: 'task_status' as const, data: { from: 'closing', to: 'closed' } }],
+  });
+  const store = openStore(path);
+  store.save(doc('t_files', { final_markdown: '# Report', attribution: [], files: [file], abandoned: [] }));
+  store.save(doc('t_old', { final_markdown: '# Old', attribution: [], abandoned: [] }));
+  store.close();
+
+  const orch = await start(0);
+  const [withFiles, old] = await Promise.all(['t_files', 't_old'].map((id) => call(`${orch.url}/tasks/${id}`)));
+  await orch.close();
+  assert.deepEqual(withFiles.final_result.files, [file]);
+  assert.deepEqual(old.final_result, { final_markdown: '# Old', attribution: [], abandoned: [], files: [] });
+});
+
+test("a question Rook asked, and the chat's files a follow-up was planned on, survive a restart", async () => {
+  const path = freshDb();
+  const ts = new Date().toISOString();
+  const file = { subtask_id: 's1', agent_handle: 'web-dev', name: 'index.html', mime: 'text/html', text: '<!doctype html>\n<html></html>' };
+  const store = openStore(path);
+  store.save({
+    id: 't_site', prompt: 'make me a site', budget_atomic: '1000000', reserve_share: 0.2, funder: 'funder.sim', owner: 'oz.near', status: 'closed', error: null,
+    created_at: ts, updated_at: ts, plan: null, subtasks: [], receipts: [], llm_calls: [], events: [],
+    final_result: { final_markdown: '# Site', attribution: [], files: [file], abandoned: [] },
+  });
+  store.close();
+
+  let orch = await start(0);
+  const asked = await call(`${orch.url}/tasks`, { prompt: 'ask me', budget_usdc: '1', owner: 'oz.near', parent_id: 't_site' });
+  assert.equal(asked.status, 'asking');
+  await orch.close();
+  // The follow-up keeps the files it was planned on, for its parts' inputs and its report.
+  const check = openStore(path);
+  assert.deepEqual(check.load().find((d) => d.id === asked.id)!.workspace, [file]);
+  check.close();
+
+  orch = await start(0);
+  const after = await call(`${orch.url}/tasks/${asked.id}`);
+  assert.deepEqual([after.task.status, after.task.error, after.plan.questions], ['asking', null, QUESTIONS]);
+  // It still takes the answer, with the questions it answers and the chat's files.
+  const answer = await call(`${orch.url}/tasks`, { prompt: 'Ozan Andaç', budget_usdc: '1', owner: 'oz.near', parent_id: asked.id });
+  assert.equal(answer.status, 'planned');
+  assert.deepEqual(planRequests.at(-1).conversation, {
+    earlier: ['make me a site', 'ask me'], revising: false, report: '# Site', files: [{ path: 'index.html', text: file.text }], questions: QUESTIONS,
+  });
+  await orch.close();
 });
 
 test('a stopped or failed sim-ledger task saved while its books were still open shows no books after a restart, never a refund under way', async () => {

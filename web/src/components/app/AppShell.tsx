@@ -8,7 +8,7 @@ import { Mark } from '@/components/Navbar';
 import { useSmoothScroll } from '@/components/SmoothScroll';
 import { ThemeToggle } from '@/components/ui/theme-toggle';
 import { conversationIds, shownTasks } from '@/lib/chat-actions';
-import { conversations } from '@/lib/conversations';
+import { chatDates, conversations } from '@/lib/conversations';
 import { DeleteChatDialog, TrashIcon, type ChatRef } from '@/components/app/DeleteChat';
 import { useMode } from '@/hooks/mode';
 import type { TaskSummary } from '@/lib/server/orchestrator';
@@ -19,6 +19,7 @@ import { AccountMenu, WalletButton } from '@/components/app/WalletButton';
 
 const STATUS: Record<string, string> = {
   draft: 'Drafting',
+  asking: 'Needs your answer', // Rook asked for details before planning: the next message answers
   planned: 'Plan ready',
   approved: 'Starting',
   funded: 'Starting',
@@ -30,7 +31,7 @@ const STATUS: Record<string, string> = {
   killed: 'Stopped',
   failed: 'Failed',
 };
-const ACTIVE = new Set(['planned', 'approved', 'funded', 'running', 'aggregating', 'closing']);
+const ACTIVE = new Set(['asking', 'planned', 'approved', 'funded', 'running', 'aggregating', 'closing']);
 
 /** Changes the URL without leaving the page: the conversation in the layout reads it and stays mounted. */
 export function go(path: string, e?: MouseEvent) {
@@ -77,9 +78,11 @@ function TaskList({ tasks, onNavigate, onDelete }: { tasks: TaskSummary[] | null
   const label = (s: string) => (chain && s === 'approved' ? 'Needs funding' : STATUS[s] ?? s);
   if (tasks === null) return <p className="px-3 text-sm text-ink/65">Your tasks can&apos;t load: {down ?? "Rook's services aren't answering"}. They&apos;ll be back here on their own once Rook answers.</p>;
   if (!tasks.length) return <p className="px-3 text-sm text-ink/65">Tasks you draft will appear here.</p>;
+  const list = conversations(shownTasks(tasks));
+  const dates = chatDates(list); // chats that start with the same request, told apart
   return (
     <ul>
-      {conversations(shownTasks(tasks)).map((c) => {
+      {list.map((c) => {
         const href = `/app/${c.latest.id}`;
         const current = c.tasks.some((t) => pathname === `/app/${t.id}`); // any of its tasks' pages shows it
         const status = c.current.status;
@@ -95,6 +98,7 @@ function TaskList({ tasks, onNavigate, onDelete }: { tasks: TaskSummary[] | null
               <span className={`mt-0.5 flex items-center gap-1.5 text-sm ${ACTIVE.has(status) ? 'text-accent-ink' : 'text-ink/65'}`}>
                 {ACTIVE.has(status) && <span className="size-2 shrink-0 bg-accent" aria-hidden="true" />}
                 {label(status)}
+                {dates.has(c.id) && <span className="text-ink/55">· {dates.get(c.id)}</span>}
               </span>
             </a>
             <button

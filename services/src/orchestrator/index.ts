@@ -8,12 +8,12 @@ import { CONVERSATION_MESSAGES, CONVERSATION_REPORT_CHARS, type AgentHistory, ty
 import { attack } from './attack.ts';
 import { createChainLedger } from './chain-ledger.ts';
 import { createLedger, type Ledger } from './ledger.ts';
-import { contractTaskOf, kill, restoreTask, runTask, SHUTDOWN } from './runner.ts';
+import { contractTaskOf, inputsTooLarge, kill, restoreTask, runTask, SHUTDOWN } from './runner.ts';
 import { openStore } from './db.ts';
 import {
   ancestors, attempts, emit, fromDoc, headOf, isFree, isTerminal, newTask, openPlan, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task,
 } from './store.ts';
-import { conversationTasks, supersedeRefusal } from './store.ts';
+import { conversationTasks, questionsFor, supersedeRefusal, workspaceOf } from './store.ts';
 
 const CreateBody = z.object({
   prompt: z.string().trim().min(1),
@@ -30,25 +30,39 @@ export const BUDGET_NOT_NAMED = "Rook's planner set a budget your message doesn'
 /** A message about a deleted conversation, for a caller naming no owner (an owner gets 404). */
 const DELETED = 'This conversation was deleted.';
 
+/** Up to 5 names, then how many more. */
+const named = (names: string[]) => names.length > 5 ? `${names.slice(0, 5).join(', ')} and ${names.length - 5} more` : names.join(', ');
+
 /**
- * What the planner gets with a follow-up: the earlier messages (the first and the newest when there are too many) and
- * the newest report in the conversation, cut to size. `revises`: the plan this message changes, if any.
+ * What the planner gets with a follow-up: the earlier messages (the first and the newest when there are too many), the
+ * newest report in the conversation cut to size, the chat's current files whole (workspaceOf: they travel apart from
+ * the report, so a follow-up works on the complete work), what Rook asked when the message answers it, and, for a
+ * revision, the parts of the plan it changes as the user saw them. `revises`: the plan this message changes, if any.
  */
-export function conversationFor(chain: Task[], revises: Task | null): Conversation {
+export function conversationFor(chain: Task[], revises: Task | null, ws = workspaceOf(chain)): Conversation {
   const prompts = chain.map((x) => x.prompt).reverse();
   const earlier = prompts.length > CONVERSATION_MESSAGES ? [prompts[0], ...prompts.slice(-(CONVERSATION_MESSAGES - 1))] : prompts;
-  const report = chain.find((x) => x.final_result?.final_markdown.trim())?.final_result!.final_markdown.trim();
-  const CUT = '\n\n[The rest of the report is left out here.]';
-  return {
-    earlier, revising: revises !== null,
-    ...(report ? { report: report.length > CONVERSATION_REPORT_CHARS ? report.slice(0, CONVERSATION_REPORT_CHARS - CUT.length) + CUT : report } : {}),
-  };
+  const c: Conversation = { earlier, revising: revises !== null };
+  const md = chain.find((x) => x.final_result?.final_markdown.trim())?.final_result!.final_markdown.trim();
+  if (md) {
+    // Files left out for size are named at the end: the planner knows the files it got are not all the chat has.
+    const note = ws.left.length ? `\n\n[Left out of the files sent with this message, for size: ${named(ws.left)}.]` : '';
+    const CUT = '\n\n[The rest of the report is left out here.]';
+    const room = CONVERSATION_REPORT_CHARS - note.length;
+    c.report = (md.length > room ? md.slice(0, room - CUT.length) + CUT : md) + note;
+  }
+  if (ws.files.length) c.files = ws.files.map((f) => ({ path: f.name, text: f.text }));
+  const questions = questionsFor(chain);
+  if (questions?.length) c.questions = questions;
+  if (revises?.subtasks.length) c.plan = revises.subtasks.slice(0, 10).map((s) => ({ title: s.title, brief: s.brief }));
+  return c;
 }
 
 /**
  * Asks the planner for a plan, relaying its progress lines as `planning` events. A planner that answers with plain
  * JSON (an older one, or a test double) still works: there is just no progress to relay. `history`: Rook's own
- * verdicts per agent, which the planner ranks candidates with. `min`: the contract's smallest budget, which a total
+ * verdicts per agent and its recent hires that never reached work (store.ts verdictHistory), which the planner ranks
+ * candidates with. `min`: the contract's smallest budget, which a total
  * the message names must meet too.
  */
 async function planWithProgress(t: Task, history: Record<string, AgentHistory>, min: bigint, conversation?: Conversation): Promise<Plan> {
@@ -203,6 +217,15 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     if (['approved', 'funded', 'running', 'aggregating'].includes(t.status)) return 'A run in this chat is still under way. Stop it or let it finish, then delete the chat.';
     return 'Rook is still returning the unspent USDC of a task in this chat. Delete the chat once it is back in your wallet.';
   };
+  /**
+   * Runs a plan that hires no agent (every subtask self_do): it pays no one, so it has books of 0 and, in chain mode, no
+   * funding transfer or contract task. `funder`: the name the sim ledger books it to.
+   */
+  const startFree = (t: Task, funder: string) => {
+    t.funder = chain ? t.owner : funder;
+    setStatus(t, 'approved');
+    void runTask(ledger, t).catch((e) => console.error('[orchestrator] runTask', e));
+  };
   /** The contract's settings, read once from the chain-gateway (null until it answers). */
   let chainCfg: ChainCfg | null = null;
   const contractCfg = async (): Promise<ChainCfg | null> => {
@@ -258,9 +281,13 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       // message sent in such a revision's place) revises that plan too: cancelled as replaced, it never ran.
       const replaced = old && head?.status === 'cancelled' && head.replaced_by && attempts(old, tasks).some((x) => x.id === head.replaced_by) ? head : null;
       const revises = openPlan(above) ?? replaced;
-      const conversation = parent ? conversationFor(above, revises) : undefined;
+      const ws = workspaceOf(above);
+      const conversation = parent ? conversationFor(above, revises, ws) : undefined;
       const t = newTask(b.prompt, budget, b.reserve_share ?? 0.2, b.owner ?? null, parent?.id ?? null);
       if (conversation) t.earlier_prompts = conversation.earlier;
+      // What its parts' inputs are attached from, and its report's files start from. ponytail: the task doc carries it,
+      // so each save writes it again (up to CONVERSATION_FILES_CHARS); a table of files keyed by content would end that.
+      if (ws.files.length) t.workspace = ws.files;
       if (old) Object.assign(t, { supersedes: old.id, edited: t.prompt !== old.prompt || t.budget_atomic !== old.budget_atomic });
       tasks.set(t.id, t);
       saveTask(t);
@@ -288,8 +315,22 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
             }
             t.budget_atomic = plan.budget.budget_atomic;
           }
+          // A plan that asks has nothing to run: never funded on facts it says it lacks.
+          const asking = !!plan.questions?.length;
+          if (asking && plan.subtasks.length) plan.subtasks = [];
+          // What the user should know before funding, in plain words: files this chat couldn't send whole, and a part
+          // whose files are too large to send.
+          plan.notes ??= [];
+          if (ws.left.length) plan.notes.push(`This chat's files are too many or too large to send whole, so Rook left out the ones delivered longest ago: ${named(ws.left)}.`);
           setPlan(t, plan);
+          for (const s of t.subtasks) { const why = inputsTooLarge(t, s); if (why) plan.notes.push(why); }
           emit(t, 'plan', plan);
+          if (asking) {
+            // Facts only the user can give are missing: Rook asks them instead of planning. Not a failure (no error),
+            // and the next message in the chat answers them (Conversation.questions). A plan it revises stays as it was.
+            setStatus(t, 'asking');
+            return;
+          }
           if (!plan.subtasks.length) {
             // Every part was dropped: nothing can be approved, so the task ends here, keeping the plan for its drop list.
             t.error = emptyPlanReason(plan.dropped);
@@ -308,6 +349,9 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
             replaced.replaced_by = t.id;
             saveTask(replaced);
           }
+          // Small edits of the chat's files that Rook makes itself (a rename, a colour) pay no one and wait on no agent:
+          // they start at once, as an approved plan that hires no agent does, with no button to press.
+          if (isFree(t) && t.subtasks.every((s) => s.self_do_reason === 'rook_edit')) startFree(t, 'funder.sim');
         } catch (e: any) {
           if (isTerminal(t.status)) return; // killed while planning: stays killed
           // A 422 is the planner's sentence for a message that isn't a task: kept as is, for the user. The rest is internal.
@@ -382,9 +426,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         return { ...taskView(t), funding };
       }
       // A plan that hires no agent (every subtask self_do) costs its funder nothing, so it starts at once in chain mode too.
-      t.funder = chain ? t.owner : typeof body?.funder_account === 'string' && body.funder_account ? body.funder_account : 'funder.sim';
-      setStatus(t, 'approved');
-      void runTask(ledger, t).catch((e) => console.error('[orchestrator] runTask', e));
+      startFree(t, typeof body?.funder_account === 'string' && body.funder_account ? body.funder_account : 'funder.sim');
       return taskView(t);
     },
 

@@ -2,8 +2,10 @@
 // Run: npx tsx --test test/*.test.ts
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { amountsNamed, budgetField, conversationOf, conversations, currentTask, outgoing, placeholderFor, revisedPlan, sameTaskAt, waitReason } from '@/lib/conversations';
-import type { TaskSummary } from '@/lib/server/orchestrator';
+import {
+  amountsNamed, budgetField, chatDates, conversationOf, conversations, currentTask, missingParts, outgoing, placeholderFor, questionsOf, retryMessage, revisedPlan, sameTaskAt, waitReason,
+} from '@/lib/conversations';
+import type { TaskStatus, TaskSummary } from '@/lib/server/orchestrator';
 
 const task = (id: string, minute: number, o: Partial<TaskSummary> = {}): TaskSummary =>
   ({ id, status: 'closed', prompt: `prompt ${id}`, created_at: `2026-11-09T10:${String(minute).padStart(2, '0')}:00.000Z`, parent_id: null, budget_atomic: '3000000', ...o });
@@ -51,7 +53,7 @@ test('the task a message acts on: the newest that got a plan, whatever its statu
   // Once it closed, a message follows up on it.
   const closed = [task('a', 1, { status: 'closed', has_plan: true }), reply('b', 2, 'a')];
   assert.equal(conversations(closed)[0].current.id, 'a');
-  assert.equal(placeholderFor(currentTask(closed), '3.00'), 'Ask a follow-up, like going deeper on one part');
+  assert.equal(placeholderFor(currentTask(closed), '3.00'), 'Ask for a change or a follow-up');
   // A run that failed or was stopped had a plan: it is the newest, not a reply.
   assert.equal(currentTask([task('a', 1, { status: 'closed', has_plan: true }), task('b', 2, { status: 'failed', has_plan: true })]).id, 'b');
   assert.equal(currentTask([task('a', 1, { status: 'planned', has_plan: true }), task('b', 2, { status: 'killed', has_plan: true })]).id, 'b');
@@ -127,15 +129,54 @@ test('amounts a message names as its budget, which the wallet check before draft
 });
 
 test('the placeholder says what a message does there', () => {
-  const at = (status: string) => task('a', 1, { status, budget_atomic: '3000000' });
+  const at = (status: TaskStatus) => task('a', 1, { status, budget_atomic: '3000000' });
   assert.equal(placeholderFor(at('planned'), '3.00'), 'Change the plan, or ask a follow-up');
   assert.equal(placeholderFor(at('planned'), '1.5'), 'Send to revise the plan at 1.50 USDC, or say what to change');
-  assert.equal(placeholderFor(at('closed'), '3.00'), 'Ask a follow-up, like going deeper on one part');
+  assert.equal(placeholderFor(at('closed'), '3.00'), 'Ask for a change or a follow-up');
   assert.equal(placeholderFor(at('closed'), '5'), 'Send to plan this task again at 5.00 USDC');
-  assert.equal(placeholderFor(at('closing'), '3.00'), 'Ask a follow-up, like going deeper on one part'); // finished, refund on its way
-  for (const s of ['failed', 'cancelled', 'killed']) assert.equal(placeholderFor(at(s), '3.00'), 'Change the task, or try it again', s);
+  assert.equal(placeholderFor(at('closing'), '3.00'), 'Ask for a change or a follow-up'); // finished, refund on its way
+  // A run that finished without one of its parts: the next step is trying it again (t_c08f6e29 had no website).
+  assert.equal(placeholderFor({ ...at('closed'), missing: ['Build one-page portfolio website'] }, '3.00'), 'Ask to try the missing part again, or for a change');
+  // Rook asked for details: the next message answers, whatever the budget says.
+  assert.equal(placeholderFor(at('asking'), '3.00'), 'Answer here, or say “use placeholders”');
+  assert.equal(placeholderFor(at('asking'), '5'), 'Answer here, or say “use placeholders”');
+  for (const s of ['failed', 'cancelled', 'killed'] as const) assert.equal(placeholderFor(at(s), '3.00'), 'Change the task, or try it again', s);
   assert.equal(placeholderFor(at('failed'), '10'), 'Send to plan this task again at 10.00 USDC');
   assert.equal(placeholderFor(at('running'), '1'), 'Wait for this run to finish, or stop it, before sending more.');
   assert.equal(placeholderFor(at('draft'), '3.00'), 'Wait for the plan to be ready before sending more.');
   assert.equal(placeholderFor(null, '3.00'), 'Ask a follow-up');
+});
+
+test("Rook's questions: the message after them answers them, and what they say", () => {
+  // The questions are what a new message acts on: it follows them, and nothing waits.
+  const chain = [task('a1', 0, { status: 'closed', has_plan: true }), task('a2', 1, { parent_id: 'a1', status: 'asking', has_plan: false })];
+  assert.equal(currentTask(chain).id, 'a2');
+  assert.equal(waitReason('asking'), null);
+  const cs = conversations(chain);
+  assert.equal(cs[0].current.status, 'asking');
+  assert.equal(cs[0].latest.id, 'a2'); // the answer's parent
+  // The plan's questions, trimmed; with none, the task's own sentence; else nothing.
+  assert.deepEqual(questionsOf({ questions: [' Your name? ', '', 'Three projects, with links?'] }), ['Your name?', 'Three projects, with links?']);
+  assert.deepEqual(questionsOf({ questions: [] }, 'What is your name?'), ['What is your name?']);
+  assert.deepEqual(questionsOf(null, null), []);
+});
+
+test('a run that finished without some of its parts names them, and the next message tries them again', () => {
+  const titles = new Map([['s1', 'Design brief'], ['s2', 'Build one-page portfolio website']]);
+  assert.deepEqual(missingParts(['s2'], titles), ['Build one-page portfolio website']);
+  assert.deepEqual(missingParts(['s9'], titles), ['s9']);
+  assert.deepEqual(missingParts(undefined, titles), []);
+  assert.equal(retryMessage(['Build one-page portfolio website']), 'Try “Build one-page portfolio website” again.');
+  assert.equal(retryMessage(['A', 'B']), "Try the parts that weren't delivered again: “A”, “B”.");
+});
+
+test('chats that start with the same request are told apart by their day, then their place', () => {
+  const list = [
+    task('a', 0, { prompt: 'make me a portfolio website', created_at: '2026-11-08T23:30:00.000Z' }),
+    task('b', 1, { prompt: 'Make me a portfolio website ', created_at: '2026-11-09T10:00:00.000Z' }),
+    task('c', 2, { prompt: 'make me a portfolio website', created_at: '2026-11-09T12:00:00.000Z' }),
+    task('d', 3, { prompt: 'write my CV' }),
+  ];
+  const dates = chatDates(conversations(list));
+  assert.deepEqual(Object.fromEntries(dates), { a: '8 Nov', b: '9 Nov · 1', c: '9 Nov · 2' });
 });

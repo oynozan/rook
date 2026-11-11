@@ -3,10 +3,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  attemptNote, canEdit, canSendAgain, conversationIds, deleteRefusal, fundingHeld, fundingHeldRefusal, messageProblem, redoRefusal, redoWait, shownInstead, shownTasks,
+  attemptNote, canEdit, canSendAgain, conversationIds, deleteRefusal, failedDraft, fundingHeld, fundingHeldRefusal, messageProblem, redoRefusal, redoWait, shownInstead, shownTasks,
 } from '@/lib/chat-actions';
 import { conversationOf, conversations } from '@/lib/conversations';
-import type { TaskSummary } from '@/lib/server/orchestrator';
+import type { TaskStatus, TaskSummary } from '@/lib/server/orchestrator';
 
 const task = (id: string, minute: number, o: Partial<TaskSummary> = {}): TaskSummary =>
   ({ id, status: 'closed', prompt: `prompt ${id}`, created_at: `2026-11-10T10:${String(minute).padStart(2, '0')}:00.000Z`, parent_id: null, budget_atomic: '3000000', ...o });
@@ -39,7 +39,7 @@ test('a message sent again or edited shows in the place of the one it supersedes
 test('the newest message can be edited until its plan is approved; it can be sent again when planning failed before any plan', () => {
   const facts = (status: string, subtasks: number | null = null, ledger = false) => ({ status, subtasks, ledger });
   // Still planning, waiting for approval, cancelled before it ran, or ended before it got a plan to run.
-  for (const f of [facts('draft'), facts('planned', 2), facts('cancelled', 2), facts('failed'), facts('failed', 0), facts('killed')]) assert.ok(canEdit(f), JSON.stringify(f));
+  for (const f of [facts('draft'), facts('asking', 0), facts('planned', 2), facts('cancelled', 2), facts('failed'), facts('failed', 0), facts('killed')]) assert.ok(canEdit(f), JSON.stringify(f));
   // Approved or later, a run that failed or was stopped, or a plan cancelled after its funding came back.
   for (const f of [facts('approved', 2), facts('running', 2), facts('closed', 2), facts('failed', 2), facts('killed', 2), facts('cancelled', 2, true)]) assert.ok(!canEdit(f), JSON.stringify(f));
   assert.ok(canSendAgain(facts('failed')));
@@ -65,7 +65,7 @@ test('the newest message can be edited until its plan is approved; it can be sen
 });
 
 test('the newest message waits like any message for the task above it, and refusals read plainly', () => {
-  const chain = (above: string) => [task('a1', 0, { status: above, has_plan: true }), task('a2', 1, { parent_id: 'a1', status: 'failed', has_plan: false })];
+  const chain = (above: TaskStatus) => [task('a1', 0, { status: above, has_plan: true }), task('a2', 1, { parent_id: 'a1', status: 'failed', has_plan: false })];
   assert.equal(redoWait(chain('planned')), null); // it revises that plan
   assert.equal(redoWait(chain('closed')), null);
   assert.equal(redoWait(chain('running')), 'Wait for this run to finish, or stop it, before sending more.');
@@ -119,4 +119,19 @@ test('deleting a chat takes every task of it, the replaced ones too; refused whi
   assert.deepEqual(deleteRefusal(404, 'no task t_1'), { gone: true }); // deleted from another tab already
   assert.deepEqual(deleteRefusal(500, 'boom'), { gone: false, message: "Rook couldn't delete this chat: Rook's orchestrator hit an error (boom). Try again in a moment.", known: false });
   assert.equal(deleteRefusal(null, '').gone, false);
+});
+
+test("Rook's questions are editable and never offer Send again; its reply to a message reads as its message, not a failure", () => {
+  const facts = (status: string, subtasks: number | null = null) => ({ status, subtasks, ledger: false });
+  assert.ok(canEdit(facts('asking', 0)) && canEdit(facts('asking')));
+  assert.ok(!canSendAgain(facts('asking', 0)) && !canSendAgain(facts('asking')));
+  // t_393eebc8: the planner's sentence about the message was headed "Rook couldn't draft a plan", with Send again.
+  const reply = 'I can hire an agent to write your CV, but I need your details first: send your work history, education and skills.';
+  assert.deepEqual(failedDraft(reply), { lead: null, text: reply, again: false });
+  assert.deepEqual(failedDraft('Your message asks for a budget of 60.00 USDC, but the most Rook takes is 50.00 USDC.'),
+    { lead: null, text: 'Your message asks for a budget of 60.00 USDC, but the most Rook takes is 50.00 USDC.', again: false });
+  // Rook's own trouble: it says it couldn't plan, in plain words, and sending again can help.
+  assert.deepEqual(failedDraft('planner: planner LLM failed: NEAR AI 503 for plan.draft: busy'),
+    { lead: "Rook couldn't draft a plan for this task.", text: 'The planning model is busy or out of reach right now. Try again in a minute.', again: true });
+  assert.deepEqual(failedDraft(null), { lead: "Rook couldn't draft a plan for this task.", text: null, again: true });
 });
