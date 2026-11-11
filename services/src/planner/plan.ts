@@ -3,7 +3,7 @@
 import { Ajv } from 'ajv';
 import { z } from 'zod';
 import { config } from '../shared/config.ts';
-import { AcceptsRow, CONVERSATION_FILES, Criterion, type AgentHistory, type AgentSummary, type Candidate, type Plan, type PlanSubtask, type SelfDoReason, type X402Config } from '../shared/types.ts';
+import { AcceptsRow, CONVERSATION_FILES, Criterion, type AgentHistory, type AgentSummary, type Candidate, type Plan, type PlanSubtask, type SelfDoReason, type WorkFile, type X402Config } from '../shared/types.ts';
 import { formatUsdc, parseUsdc, share } from '../shared/money.ts';
 import type { AgentListing } from '../market-gateway/index.ts';
 
@@ -27,6 +27,8 @@ export const DraftSubtask = z.object({
   inputs: z.array(z.string().min(1)).max(CONVERSATION_FILES).nullish(),
   // A small mechanical edit of those files (a rename, a colour, a link) that Rook makes itself at once.
   rook_edit: z.boolean().nullish(),
+  // An action in the world on the user's behalf (book, call, post, buy, deploy): it never runs on [placeholders].
+  action: z.boolean().nullish(),
 });
 const isUsdc = (v: number | string) => { try { parseUsdc(v); return true; } catch { return false; } };
 export const MAX_QUESTIONS = 5;
@@ -34,7 +36,7 @@ export const MAX_ASSUMPTIONS = 5;
 const lines = (n: number, what: string) => z.array(z.string().trim().min(1).max(400)).max(n, `at most ${n} ${what}`).nullish();
 // No subtasks only with `not_a_task` (the message is not a task to plan: "go ahead", "hi"; that sentence says why) or
 // with `questions` (facts only the user can give are missing). `budget_usdc`: the total budget the message itself
-// names ("make it 1 USDC"), in USDC; absent when it names none.
+// names ("make it 1 USDC"), in USDC; absent when it names none. `action`: the task is an action in the world (Plan.action).
 export const Draft = z.object({
   subtasks: z.array(DraftSubtask).max(5),
   not_a_task: z.string().optional(),
@@ -42,8 +44,13 @@ export const Draft = z.object({
   assumptions: lines(MAX_ASSUMPTIONS, 'assumptions'),
   budget_usdc: z.union([z.number(), z.string()]).nullish()
     .refine((v) => v == null || isUsdc(v), 'budget_usdc must be an amount of USDC such as 1.5, with at most 6 decimals'),
+  action: z.boolean().nullish(),
 }).refine((d) => d.subtasks.length > 0 || !!d.not_a_task?.trim() || !!d.questions?.length, 'return at least one subtask, or questions, or set not_a_task')
-  .refine((d) => !(d.questions?.length && d.subtasks.length), 'return either questions with no subtasks, or subtasks with no questions');
+  .refine((d) => !(d.questions?.length && d.subtasks.length), 'return either questions with no subtasks, or subtasks with no questions')
+  // A task marked an action whose parts don't say which of them act: every part Rook can't write is one (a booking
+  // planned beside a thank-you note Rook can write marks only the booking).
+  .transform((d) => (d.action && !d.subtasks.some((s) => s.action != null)
+    ? { ...d, subtasks: d.subtasks.map((s) => (s.self_do_ok ? s : { ...s, action: true })) } : d));
 export type DraftSubtask = z.infer<typeof DraftSubtask>;
 export type Draft = z.infer<typeof Draft>;
 
@@ -72,9 +79,50 @@ export function briefProblems(brief: string): string[] {
     return m ? [`${why} ("${m[0].trim().slice(0, 60)}")`] : [];
   });
 }
-/** Every rule the draft's briefs break, by subtask, worded for the model and for a plan note alike. */
-export const draftProblems = (subtasks: DraftSubtask[]) =>
-  subtasks.flatMap((s) => briefProblems(s.brief).map((p) => `the brief of "${s.title}" ${p}`));
+/**
+ * Every rule the draft's briefs break, by subtask, worded for the model and for a plan note alike. An action brief that
+ * holds a [placeholder] is one (QA: "Use placeholders" gave a fundable plan to book a real table under [Your name]):
+ * the draft is asked again, and what it still holds becomes questions (index.ts).
+ */
+export const draftProblems = (subtasks: DraftSubtask[]) => [
+  ...subtasks.flatMap((s) => briefProblems(s.brief).map((p) => `the brief of "${s.title}" ${p}`)),
+  ...subtasks.flatMap((s) => {
+    const held = actionPlaceholders(s);
+    return held.length ? [`the brief of "${s.title}" is an action in the world but holds ${held.length === 1 ? 'a placeholder' : 'placeholders'} (${held.join(', ')}): an action never runs on placeholders, so return questions asking the user for ${held.length === 1 ? 'that fact' : 'those facts'} instead of this subtask`] : [];
+  }),
+];
+
+/**
+ * The [bracketed] placeholders a text holds: "[Your name]", "[Telefon numaranız]". Not a Markdown link's text, an index
+ * such as a[0], a checkbox, or Rook's own "[file index.html, 12 lines ...]" marker.
+ */
+export function placeholdersIn(text: string): string[] {
+  const out: string[] = [];
+  for (const m of text.matchAll(/(?<![\w\]])\[([^[\]\n]{2,60})\](?!\()/g)) {
+    const inner = m[1].trim();
+    if (!/\p{L}/u.test(inner) || /^file\s/i.test(inner) || /^[xX ]$/.test(inner)) continue;
+    if (!out.includes(m[0])) out.push(m[0]);
+  }
+  return out;
+}
+/** A part that acts in the world: the draft says so, or it must be put online (a live link is checked). */
+export const isAction = (d: DraftSubtask) => !!d.action || isDeploy(d);
+const isDeploy = (d: DraftSubtask) => d.criteria.some((c) => c.kind === 'live_url' || (c.kind === 'contains' && linkOnly(c.spec.pattern)));
+/** The placeholders an action part's brief still holds: none may be left when it runs. */
+export const actionPlaceholders = (d: DraftSubtask) => (isAction(d) ? placeholdersIn(d.brief) : []);
+
+/**
+ * The questions that take the place of a plan whose action parts still hold placeholders after the draft was asked
+ * again: one per part, naming them. ponytail: English sentences; the placeholders keep the brief's own language.
+ */
+export function placeholderQuestions(draft: DraftSubtask[]): string[] {
+  return draft.flatMap((d) => {
+    const held = actionPlaceholders(d);
+    if (!held.length) return [];
+    const names = held.length === 1 ? held[0] : `${held.slice(0, -1).join(', ')} and ${held[held.length - 1]}`;
+    return [`"${d.title}" is done in the world for you, so Rook can't run it on placeholders: what should go in place of ${names}?`];
+  }).slice(0, MAX_QUESTIONS);
+}
 
 // A line that only says how the work is checked can go without asking the model again.
 const CHECK_LINE = /^\W*acceptance\b[^:\n]{0,20}:/i;
@@ -114,7 +162,7 @@ export function inputsOf(d: DraftSubtask, files: string[]): { kept: string[]; un
 const LINK_ONLY = /^(live)?url(https?s?)?$/;
 const linkOnly = (pattern: unknown) => typeof pattern === 'string' && LINK_ONLY.test(pattern.toLowerCase().replace(/[^a-z]/g, ''));
 /** Rook can write a part itself unless it must be deployed: no model output can pass a live link check. */
-const writable = (d: DraftSubtask) => d.self_do_ok && !d.criteria.some((c) => c.kind === 'live_url' || (c.kind === 'contains' && linkOnly(c.spec.pattern)));
+const writable = (d: DraftSubtask) => d.self_do_ok && !isDeploy(d);
 /** A small edit Rook makes itself at once, with no agent fee and no wait: it needs files of this conversation to edit. */
 export const isRookEdit = (d: DraftSubtask, files: string[]) => !!d.rook_edit && writable(d) && inputsOf(d, files).kept.length > 0;
 
@@ -164,9 +212,211 @@ export function filterSearch(resultLists: AgentSummary[][]): AgentSummary[] {
  * buildPlan drops whatever the budget cannot pay.
  */
 export const MAX_PICKS = 5;
-export function applySelection(results: AgentSummary[], handles: string[]): AgentSummary[] {
-  const picked = [...new Set(handles)].map((h) => results.find((a) => a.handle === h)).filter((a): a is AgentSummary => !!a);
-  return picked.slice(0, MAX_PICKS);
+export function applySelection<A extends AgentSummary>(results: A[], handles: string[], max = MAX_PICKS): A[] {
+  const picked = [...new Set(handles)].map((h) => results.find((a) => a.handle === h)).filter((a): a is A => !!a);
+  return picked.slice(0, max);
+}
+
+/** The market signs a payment window of at least an agent's SLA plus this (config.maxPaymentTimeoutS). */
+export const MARKET_WINDOW_PAD_S = 600;
+const ownRecord = (history: Record<string, AgentHistory>, handle: string) => (Object.hasOwn(history, handle) ? history[handle] : undefined);
+
+/**
+ * Before the select step (QA: two of its five picks went, on every website plan, to agents Rook always drops, so cheaper
+ * or proven ones were never quoted): agents Rook can never pay are left out, and those Rook hired that never delivered
+ * anywhere while another agent is left. Unpayable: the payment window an earlier quote gave (`windows`), else at least the
+ * SLA plus the market's 600 s, is over ROOK_MAX_PAYMENT_TIMEOUT_S. Never delivered: no market job, no verdict of Rook's,
+ * and a hire of Rook's that failed to send or timed out. `what` names the list in notes.
+ */
+export function prefilter(what: string, agents: AgentListing[], history: Record<string, AgentHistory>, windows: Record<string, number>, notes: string[]): AgentListing[] {
+  const max = config.maxPaymentTimeoutS;
+  const window = (a: AgentListing) => (Object.hasOwn(windows, a.handle) ? windows[a.handle] : Number.isFinite(a.sla_seconds) ? a.sla_seconds + MARKET_WINDOW_PAD_S : 0);
+  const unpayable = agents.filter((a) => window(a) > max);
+  if (unpayable.length) notes.push(`${what}: ${unpayable.map((a) => `${a.handle} (${window(a)} s)`).join(', ')} left out before selection: a payment window over ${max} s (ROOK_MAX_PAYMENT_TIMEOUT_S), from an earlier quote or the SLA plus the market's ${MARKET_WINDOW_PAD_S} s`);
+  const payable = agents.filter((a) => window(a) <= max);
+  const never = (a: AgentListing) => {
+    const h = ownRecord(history, a.handle);
+    return !!h && (h.stalled ?? 0) > 0 && h.pass === 0 && h.fail === 0 && !(a.delivered_jobs > 0);
+  };
+  if (payable.every(never)) return payable; // nothing better: the select step and the ranking decide
+  const out = payable.filter(never);
+  if (out.length) notes.push(`${what}: ${out.map((a) => a.handle).join(', ')} left out before selection: no job delivered anywhere, and Rook's hires failed to send or timed out`);
+  return payable.filter((a) => !never(a));
+}
+
+/**
+ * Agents Rook's own verdicts show deliver: a pass, more passes than fails, and no hire since that failed to send or timed
+ * out; most passes first. The planner adds them to every part's pool for the select step (QA: quill-writer, 3 passes,
+ * was missing from a captions plan led by an agent whose last Rook job failed to send).
+ */
+export function goodRecord(history: Record<string, AgentHistory>, n = 5): string[] {
+  return Object.entries(history).filter(([, h]) => h.pass > 0 && h.pass > h.fail && !h.stalled)
+    .sort(([a, x], [b, y]) => y.pass - x.pass || (a < b ? -1 : 1)).slice(0, n).map(([h]) => h);
+}
+
+// What a part delivers, read from its title (a website brief names images too) and its media checks. A title that
+// names written work ("Promo video script", "Logo ideas") is text, whatever else it names.
+const TEXT_TITLE = /\b(?:scripts?|storyboards?|copy|captions?|descriptions?|outlines?|briefs?|plans?|ideas?|concepts?|articles?|posts?|transcripts?|subtitles?|names?|prompts?|texts?|research|reports?|analysis|guides?|translations?|letters?|emails?|bios?|cv|resumes?|essays?|tweets?|threads?|newsletters?|blog)\b/i;
+const IMAGE_TITLE = /(?<![\p{L}\d])(?:logos?|logotype|icons?|illustrations?|artwork|posters?|banners?|mascots?|stickers?|thumbnails?|avatars?|images?|graphics?|logosu|görsel\p{L}*|afiş\p{L}*)(?![\p{L}\d])/iu;
+const VIDEO_TITLE = /\b(?:videos?|animations?|animated|motion[- ]graphics|reels?|teasers?|trailers?|clips?|films?|movies?)\b/i;
+const IMAGE_MAKER = /\b(?:images?|logos?|designs?|designers?|graphics?|illustrat\w*|art|artwork|svg|vectors?|icons?|visuals?|figma|branding|photos?|pictures?|drawings?|stills?|text[- ]to[- ]image|canva)\b/i;
+const RASTER = /\b(?:png|jpe?g|webp|\d{3,4}\s*[x×]\s*\d{3,4}|stills?|photos?)\b/i;
+const VIDEO_MAKER = /\b(?:videos?|mp4|animations?|animated|animat\w*|motion|films?|clips?|reels?|footage|render\w*)\b/i;
+const SLIDESHOW = /ken[- ]?burns|slide ?shows?|from (?:the )?(?:frames|stills|still images)/i;
+const MOTION = /\b(?:motion[- ]graphics|motion[- ]design|animat\w*|filmed|live[- ]action|footage)\b/i;
+const SOURCE_VIDEO = /\blong(?:-form)? videos?\b|\b(?:send|attach|upload)\s+(?:a|an|your|one|up to)\b[^.]{0,30}\bvideos?\b|\bdubs?\s+(?:a|your)\b[^.]{0,15}\bvideos?\b|\byour (?:episode|video)\b|\bvideo in\b/i;
+const WRITER = /\b(?:writ\w*|copy\w*|articles?|blog\w*|content|posts?|social media|marketing|texts?|translat\w*|seo|newsletters?|emails?|captions? (?:for|writing))\b/i;
+const CONTRACT_TAKER = /\b(?:give me|send me|paste|provide|enter)\b[^.]{0,30}\b(?:token|contract)\b|\bcontract(?:[_ ](?:id|address))?\s*\(required\)/i;
+
+/**
+ * Why an agent the select step picked can't make what the part needs, from its listing; null when nothing says so.
+ * Conservative keyword rules (QA: a blog writer for a logo, a stills slideshow for motion graphics, a still-image maker
+ * for an SVG logo, contract-taking agents for native NEAR, which has no contract, video clippers for captions); the
+ * select prompt asks the same, and its low-effort pick ignored it.
+ */
+export function unfit(d: DraftSubtask, a: AgentListing): string | null {
+  const said = [a.name, a.description, a.tags.join(', '), a.bio, a.outputs].filter(Boolean).join(' \n ');
+  const media = d.criteria.flatMap((c) => (c.kind === 'media' && Array.isArray(c.spec.kinds) ? c.spec.kinds as unknown[] : []));
+  const text = TEXT_TITLE.test(d.title);
+  const image = media.includes('image') || (!text && IMAGE_TITLE.test(d.title));
+  const video = media.includes('video') || (!text && VIDEO_TITLE.test(d.title));
+  const brief = `${d.title}\n${d.brief}`;
+  if (image && !IMAGE_MAKER.test(said)) return 'its listing shows no image or design work';
+  if (image && /\bsvg\b|\bvector\b/i.test(brief) && !/\bsvg\b|\bvectors?\b/i.test(said) && RASTER.test(said)) return 'it makes raster images, and the brief asks for SVG';
+  if (video && !VIDEO_MAKER.test(said)) return 'its listing shows no video work';
+  if (video && MOTION.test(brief) && SLIDESHOW.test(said)) return 'it makes a slideshow of still images, and the brief asks for motion';
+  if (video && /\bvideo\s*\(boolean\)/i.test(a.inputs ?? '')) return 'it renders video only when a separate input is set, and Rook sends only the brief';
+  if (video && SOURCE_VIDEO.test(`${said} ${a.inputs ?? ''}`) && !/https?:\/\//i.test(d.brief)) return 'it works from a video you send, and the brief gives none';
+  if (!image && !video && text && VIDEO_MAKER.test(said) && !WRITER.test(said)) return 'its listing shows video work, and this part is writing';
+  if (/\bnative near\b/i.test(brief) && CONTRACT_TAKER.test(`${said} ${a.inputs ?? ''}`)) return 'it works from a token contract, and native NEAR has none';
+  return null;
+}
+/** The picked agents that can make what the part needs (unfit()), each one left out with a note. */
+export function fitting(d: DraftSubtask, agents: AgentListing[], notes: string[]): AgentListing[] {
+  return agents.filter((a) => {
+    const why = unfit(d, a);
+    if (why) notes.push(`"${d.title}": candidate ${a.handle} dropped: ${why}`);
+    return !why;
+  });
+}
+
+// ---- NEAR account ids in briefs and assumptions (index.ts checks them on chain) ----
+
+/** What the chain says of an account id: it holds a contract, it exists with no code, or it doesn't exist. */
+export type AccountState = 'contract' | 'empty' | 'missing';
+/** Account ids a draft writes from memory, and the real one, said only once the chain shows it holds a contract. */
+export const ACCOUNT_FIXES: Record<string, { to: string; what: string }> = {
+  'wnear.near': { to: 'wrap.near', what: 'the wrapped NEAR (wNEAR) contract' },
+  'wnear.testnet': { to: 'wrap.testnet', what: 'the wrapped NEAR (wNEAR) contract on testnet' },
+};
+const idPattern = (suffix: string) => String.raw`(?<![\w.@-])(?:[a-z\d]+[-_])*[a-z\d]+(?:\.(?:[a-z\d]+[-_])*[a-z\d]+)*\.${suffix}(?![\w-]|\.[a-z\d])`;
+/** The account ids of one network the texts name ("wrap.near"; "usdc.fakes.testnet"): a domain such as app.near.ai is none. */
+export function nearAccountIds(texts: string[], network: 'mainnet' | 'testnet'): string[] {
+  const re = new RegExp(idPattern(network === 'mainnet' ? 'near' : 'testnet'), 'gi');
+  return [...new Set(texts.flatMap((t) => [...t.matchAll(re)].map((m) => m[0].toLowerCase())))];
+}
+const idRe = (id: string, flags = 'gi') => new RegExp(String.raw`(?<![\w.@-])${escapeRegExp(id)}(?![\w-]|\.[a-z\d])`, flags);
+/** The text with an account id replaced, or taken out with the brackets or the space around it. */
+export function replaceAccount(text: string, id: string, to: string | null): string {
+  if (to) return text.replace(idRe(id), to);
+  const e = String.raw`\`?${escapeRegExp(id)}\`?(?![\w-]|\.[a-z\d])`;
+  return text.replace(new RegExp(String.raw`[ \t]*\(\s*${e}\s*\)`, 'gi'), '')
+    .replace(new RegExp(String.raw`[ \t]+${e}|(?<![\w.@-])${e}[ \t]?`, 'gi'), '');
+}
+/** Whether a text calls the account a contract or a token, within a few words of it: then it must hold code. */
+const namedAsContract = (texts: string[], id: string) =>
+  texts.some((t) => [...t.matchAll(idRe(id))].some((m) => /contract|token|wrapped|\bft\b|nep-?141|kontrat|sözleşme/i.test(t.slice(Math.max(0, m.index! - 40), m.index! + id.length + 40))));
+
+/**
+ * Account ids the chain shows are wrong (QA: three briefs and an assumption sent agents to "wnear.near", an account with
+ * no contract; wNEAR is wrap.near): one that doesn't exist, or one named as a contract that holds none. The draft's own
+ * is corrected when ACCOUNT_FIXES knows the real one and the chain shows it holds a contract, else taken out, with a note
+ * either way. One the user's message names is the user's: only a note asks them to check it.
+ */
+export function fixAccounts(briefs: string[], assumptions: string[], states: Record<string, AccountState>, userText: string): { briefs: string[]; assumptions: string[]; notes: string[] } {
+  const notes: string[] = [];
+  const all = [...briefs, ...assumptions];
+  let b = briefs, a = assumptions;
+  for (const [id, state] of Object.entries(states)) {
+    if (!all.some((t) => idRe(id, 'i').test(t))) continue; // a correction checked alongside
+    const bad = state === 'missing' || (state === 'empty' && namedAsContract(all, id));
+    if (!bad) continue;
+    const what = state === 'missing' ? `no NEAR account named ${id}` : `no contract at ${id}`;
+    if (idRe(id, 'i').test(userText)) { notes.push(`Rook found ${what}, which your message names: check the name before paying.`); continue; }
+    const fix = Object.hasOwn(ACCOUNT_FIXES, id) && states[ACCOUNT_FIXES[id].to] === 'contract' ? ACCOUNT_FIXES[id] : undefined;
+    b = b.map((t) => replaceAccount(t, id, fix?.to ?? null));
+    a = a.map((t) => replaceAccount(t, id, fix?.to ?? null));
+    notes.push(fix ? `Rook found ${what}, so the plan names ${fix.to}, ${fix.what}, instead.` : `Rook found ${what}, so the plan no longer names it.`);
+  }
+  return { briefs: b, assumptions: a, notes };
+}
+
+// ---- What a part sends, and the plan a message revises ----
+
+/** The most a part's input files may come to (orchestrator/runner.ts sends no more with one part). */
+export const INPUTS_MAX_BYTES = 300 * 1024;
+/**
+ * Why the plan can't be funded as it is (Plan.blocked): a part's input files are over what Rook sends with one part.
+ * QA: the note was hidden, the plan stayed fundable, and the part failed after funding.
+ */
+export function inputsBlocked(subtasks: Pick<PlanSubtask, 'title' | 'inputs'>[], files: WorkFile[]): string | undefined {
+  const text = new Map(files.map((f) => [f.path, f.text]));
+  for (const s of subtasks) {
+    const bytes = [...new Set(s.inputs ?? [])].reduce((n, p) => n + Buffer.byteLength(text.get(p) ?? ''), 0);
+    if (bytes > INPUTS_MAX_BYTES) return `The files "${s.title}" works on come to ${Math.ceil(bytes / 1024)} KB, more than the ${INPUTS_MAX_BYTES / 1024} KB Rook can send with one part, so this plan can't run as it is. Ask for a change to fewer or smaller files.`;
+  }
+  return undefined;
+}
+
+/**
+ * A part of the plan a message revises, as the orchestrator sends it (Conversation.plan): the title and brief the user
+ * saw, and its criteria and the rest of the part when sent. Read leniently: a field that doesn't parse is left out.
+ */
+export const PlanPart = z.object({
+  title: z.string(), brief: z.string(),
+  criteria: z.array(Criterion).optional().catch(undefined),
+  search_terms: z.array(z.string().min(1)).min(1).max(3).optional().catch(undefined),
+  category: z.string().nullish().catch(undefined),
+  self_do_ok: z.boolean().optional().catch(undefined),
+  inputs: z.array(z.string().min(1)).max(CONVERSATION_FILES).optional().catch(undefined),
+  self_do_reason: z.string().optional().catch(undefined),
+});
+export type PlanPart = z.infer<typeof PlanPart>;
+export const planParts = (raw: unknown): PlanPart[] => {
+  const r = z.array(PlanPart).max(10).safeParse(raw);
+  return r.success ? r.data : [];
+};
+const sameTitle = (a: string, b: string) => fold(a) === fold(b);
+const sameBrief = (p: PlanPart, d: DraftSubtask) => fold(repairBrief(p.title, p.brief)) === fold(repairBrief(d.title, d.brief));
+
+/**
+ * A revision keeps the criteria of every part it leaves as it was (same title, same brief), when the plan's parts come
+ * with them: re-drafted, they drifted (QA: a site part had 9 checks, then 6 with none for its links, its brief the same).
+ */
+export function keepCriteria(draft: DraftSubtask[], parts: PlanPart[], notes: string[]): DraftSubtask[] {
+  return draft.map((d) => {
+    const p = parts.find((x) => x.criteria?.length && sameTitle(x.title, d.title) && sameBrief(x, d));
+    if (!p) return d;
+    notes.push(`"${d.title}": the message leaves it as it was, so it keeps its criteria`);
+    return { ...d, criteria: p.criteria!.map((c) => ({ ...c, spec: { ...c.spec } })) };
+  });
+}
+
+/**
+ * An answer to Rook's questions about new work, in a chat whose plan is still open, plans that work beside the plan:
+ * each part of it the draft left out comes back first, as the user saw it (QA: answered, the questions about a CV would
+ * have replaced the reviewed site plan with the CV alone). A part sent with only its title and brief is searched by its
+ * title, and is one only an agent may do.
+ */
+export function carryParts(draft: DraftSubtask[], parts: PlanPart[], notes: string[]): DraftSubtask[] {
+  const missing = parts.filter((p) => !draft.some((d) => sameTitle(d.title, p.title)));
+  if (!missing.length) return draft;
+  notes.push(`kept the open plan's ${missing.map((p) => `"${p.title}"`).join(', ')} beside the new work: the message answers questions, it changes no part`);
+  return [...missing.map((p): DraftSubtask => ({
+    title: p.title, brief: p.brief, search_terms: p.search_terms ?? [p.title.slice(0, 60)], category: p.category,
+    self_do_ok: p.self_do_ok ?? false, criteria: p.criteria?.map((c) => ({ ...c, spec: { ...c.spec } })) ?? [],
+    ...(p.inputs?.length ? { inputs: p.inputs } : {}), ...(p.self_do_reason === 'rook_edit' ? { rook_edit: true } : {}),
+  })), ...draft];
 }
 
 export type PlanInput = {
@@ -236,10 +486,16 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
       return;
     }
     const self_do_reason: SelfDoReason = quoted.length ? 'over_budget' : 'no_agent';
-    if (!d.self_do_ok) { dropped.push({ title: d.title, reason: quoted.length ? 'over budget' : 'no fitting agent' }); return; }
+    // Over budget: the cheapest quote is what one hire would have cost, so a client can name the budget that hires one,
+    // and the plan says what the agents that fit ask (QA: a deploy over budget said only "Rook couldn't draft a plan").
+    const prices = quoted.map(price).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    const need = prices.length ? prices[0] : undefined;
+    if (need !== undefined) {
+      const most = prices[prices.length - 1];
+      notes.push(`Rook found no agent for "${d.title}" at this budget: ${prices.length === 1 ? `the one that fits asks ${formatUsdc(need)} USDC` : `the ${prices.length} that fit ask ${need === most ? formatUsdc(need) : `${formatUsdc(need)} to ${formatUsdc(most)}`} USDC`}.`);
+    }
+    if (!d.self_do_ok) { dropped.push({ title: d.title, reason: quoted.length ? 'over budget' : 'no fitting agent', ...(need !== undefined ? { need_atomic: need.toString() } : {}) }); return; }
     if (quoted.length) notes.push(`"${d.title}" is self_do: no candidate's price fits the ${left} left to allocate`);
-    // Over budget: the cheapest quote is what one hire would have cost, so a client can name the budget that hires one.
-    const need = quoted.length ? quoted.map(price).reduce((a, b) => (b < a ? b : a)) : undefined;
     kept.push({ draftIdx, d, candidates: [], ranked, cap: 0n, self_do: true, self_do_reason, need });
   });
   kept.sort((x, y) => x.draftIdx - y.draftIdx); // back in priority order
@@ -255,9 +511,21 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
   // Whatever the caps leave of the budget becomes the reserve for re-hires and top-ups, up to the contract's 90%: the
   // user's budget is what Rook may spend, so it must not sit idle while a subtask is abandoned for want of a top-up
   // (seen on mainnet: 0.90 USDC unallocated, a 0.50 re-hire refused). Whole percents, so the numbers read cleanly.
-  // A fallback priced above cap + the whole reserve can never be paid. A cap raised to cover one shrinks back, which
-  // grows the reserve, until no cap changes (caps only shrink, so this ends).
-  const payable = (k: Kept, reserve: bigint) => k.candidates.filter((c) => price(c) <= k.cap + reserve);
+  // A fallback the part can't pay once the agents before it are paid is never hired: x402 pays up front, so in the worst
+  // case each one tried was paid and failed, the lead from the cap, then each fallback from what is left of the cap
+  // topped up from what is left of the reserve (QA: cap 12, reserve 8, agents at 6, 15 and 19: once 6 is paid, 15
+  // needs a 9 top-up, and the card still said "up to 3 agents are tried"). One that can't be paid is skipped unpaid.
+  // A cap raised to cover one shrinks back, which grows the reserve, until no cap changes (caps only shrink, so this ends).
+  const payable = (k: Kept, reserve: bigint) => {
+    let balance = k.cap, left = reserve;
+    return k.candidates.filter((c) => {
+      const p = price(c), short = p > balance ? p - balance : 0n;
+      if (short > left) return false;
+      left -= short;
+      balance += short - p;
+      return true;
+    });
+  };
   let { reserve_bps, reserve } = reserveOf(input.budget_atomic, allocated);
   for (let shrunk = true; shrunk;) {
     shrunk = false;
@@ -273,7 +541,13 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
   for (const k of kept) {
     if (k.self_do) continue;
     const ok = payable(k, reserve);
-    for (const c of k.candidates) if (!ok.includes(c)) notes.push(`"${k.d.title}": candidate ${c.handle} dropped, price ${c.price_atomic} exceeds cap + reserve`);
+    // The first wording is the one the web app reads to name the budget that would hire such an agent.
+    for (const c of k.candidates) {
+      if (ok.includes(c)) continue;
+      notes.push(price(c) > k.cap + reserve
+        ? `"${k.d.title}": candidate ${c.handle} dropped, price ${c.price_atomic} exceeds cap + reserve`
+        : `"${k.d.title}": candidate ${c.handle} dropped: once the agents before it are paid, the cap and reserve left can't pay its ${formatUsdc(c.price_atomic)} USDC`);
+    }
     k.candidates = ok;
     const lead = ok[0];
     for (const c of ok) if (far(c, lead)) notes.push(`"${k.d.title}": if the agents before it fail, ${c.handle} may be hired at ${formatUsdc(c.price_atomic)} USDC, more than ${FAR_PRICE} times the ${formatUsdc(lead.price_atomic)} USDC of the agent hired first, paid from the reserve: only an agent can do this part`);
@@ -291,7 +565,7 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
       title: k.d.title,
       brief: repairBrief(k.d.title, k.d.brief),
       search_terms: k.d.search_terms,
-      criteria: validateCriteria(id, i, k.d.criteria, finalId, notes, ins),
+      criteria: validateCriteria(id, i, k.d, finalId, notes, ins),
       cap_atomic: k.cap.toString(),
       // Rook waits for a hire at most ROOK_HIRE_PATIENCE_S, whatever SLA the agent advertises.
       deadline_s: k.self_do ? 0 : Math.min(Math.max(...k.candidates.map((c) => c.sla_seconds)), config.hirePatienceS),
@@ -304,19 +578,26 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
     };
   });
 
+  // A plan of Rook's own edits only hires no one and holds nothing: no budget figures at all (QA: a rename carried a
+  // 0.90 USDC reserve that any client rendering the budget would show).
+  const edits0 = kept.length > 0 && kept.every((k) => k.self_do_reason === 'rook_edit');
   return {
     subtasks,
     dropped,
-    budget: {
-      budget_atomic: input.budget_atomic.toString(),
-      reserve_atomic: reserve.toString(),
-      reserve_bps,
-      allocatable_atomic: (input.budget_atomic - reserve).toString(),
-      allocated_atomic: allocated.toString(),
-    },
+    budget: edits0
+      ? { budget_atomic: '0', reserve_atomic: '0', reserve_bps: 0, allocatable_atomic: '0', allocated_atomic: '0' }
+      : {
+        budget_atomic: input.budget_atomic.toString(),
+        reserve_atomic: reserve.toString(),
+        reserve_bps,
+        allocatable_atomic: (input.budget_atomic - reserve).toString(),
+        allocated_atomic: allocated.toString(),
+      },
     notes,
   };
 }
+/** A plan of Rook's own edits only: it takes no money (its budget figures are 0). */
+export const editsOnly = (p: Pick<Plan, 'subtasks'>) => p.subtasks.length > 0 && p.subtasks.every((s) => s.self_do_reason === 'rook_edit');
 
 const price = (c: Candidate) => BigInt(c.price_atomic);
 
@@ -488,35 +769,111 @@ const escapeRegExp = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 // "Word count", "Total words", "Number of characters", "Characters"; not "Words per minute" or "Keywords found".
 const COUNT_LABEL = /\b(?:word|character|char)s?\s*(?:count|total|length)\b|\b(?:number|count|total) of (?:words|characters|chars)\b|^\W*(?:total\s+)?(?:words|characters|chars)\W*$/i;
 
+
+/** Text as compared for "the brief asks for it": lower case, accents and marks off ("İ" is "i"), quotes and spaces folded. */
+const fold = (s: string) => s.normalize('NFKD').replace(/\p{M}/gu, '').toLowerCase().replace(/[“”«»„‘’`']/g, '"').replace(/\s+/g, ' ').trim();
+
+/**
+ * A contains pattern written as a regex on purpose: /like this/, or with syntax only a regex has (\s, \d, \b, an escaped
+ * character, .* or .+, (?, a|b, a range such as [a-z], {2,4}, a leading ^). Its body; undefined for a literal: "[Startup
+ * name]", "Price (USD)" and "$29/mo" are text to find as written (QA: "[Startup name]" read as a character class passed a
+ * page with invented names).
+ */
+const REGEX_ONLY = /\\[dDwWsSbB.()[\]{}|*+?^$/\\-]|\.[*+?]|\(\?|\[\^?[^\]\s\\]-[^\]\s\\]|\{\d+(?:,\d*)?\}|[\w)]\|[\w(]|^\^/;
+function deliberateRegex(p: string): string | undefined {
+  const slashed = /^\/(.+)\/$/s.exec(p);
+  if (slashed) return slashed[1];
+  return REGEX_ONLY.test(p) ? p : undefined;
+}
+
+// A numeric label's kind, for its sanity range (section 7): a change or growth rate can't fall below -100 % and has no
+// top; a net figure or a difference has no bound known without the data; a share of a whole is 0 to 100; any other
+// quantity is at least 0 (a count at least 1).
+const RATE_LABEL = /\b(?:cagr|growth|change|returns?|roi|apy|apr|yields?|inflation|interest|büyüme|artış|değişim|getiri|enflasyon)\b/i;
+const SIGNED_LABEL = /\b(?:net|flows?|inflows?|outflows?|profit|loss|p&l|pnl|delta|difference|kâr|zarar|fark)\b/i;
+const SHARE_LABEL = /%|\b(?:share|percent|percentage|pct|ratio|proportion|portion|dominance|concentration|pay[ıi]|oran[ıi]?|yüzde\w*)\b/i;
+const COUNTED = /\b(?:count|number|holders?|wallets?|accounts?|users?|transactions?|txs?|supply|addresses|validators?|sayı\w*)\b/i;
+/**
+ * The bounds a numeric check may keep: only what is known without the data, never a guess of the answer (QA: a CAGR
+ * capped at 50 failed honest nominal lira growth; a total supply of 1e9 to 2e9 guessed it). null: no bound is known.
+ */
+function saneBounds(label: string, min?: number, max?: number): { min?: number; max?: number } | null {
+  if (RATE_LABEL.test(label)) return { min: min !== undefined && min <= -100 ? min : -100 };
+  if (SIGNED_LABEL.test(label)) return null;
+  if (SHARE_LABEL.test(label)) return { min: min !== undefined && min <= 0 ? min : 0, max: max !== undefined && max >= 100 ? max : 100 };
+  return { min: min !== undefined && min <= (COUNTED.test(label) ? 1 : 0) ? min : 0 };
+}
+const span = (b: { min?: number; max?: number }) => (b.max === undefined ? `at least ${b.min}` : `${b.min} to ${b.max}`);
+
+// A part that translates a text the brief gives: its phrases are in the brief whatever the agent writes. Its title says
+// so, or its brief asks to translate into a language ("translate the mockup into HTML" is no translation).
+const TRANSLATION = /\b(?:translat\w*|çevir\w*|tercüme\w*|tradu\w*|übersetz\w*|перев\w*)/i;
+// Turkish "İ" folds to no "i" in a JavaScript regex, and \b sees no edge before it: both are written out.
+const LANGUAGE = String.raw`(?:english|turkish|spanish|french|german|italian|portuguese|dutch|russian|arabic|chinese|japanese|korean|türkçe\p{L}*|[iİ]ngilizce\p{L}*|almanca\p{L}*|fransızca\p{L}*|[iİ]spanyolca\p{L}*|[iİ]talyanca\p{L}*|español|inglés|français|anglais|deutsch|englisch)`;
+const TRANSLATE_INTO = new RegExp(String.raw`(?<!\p{L})(?:translat\p{L}*|tradu\p{L}*|übersetz\p{L}*)[^.\n]{0,80}(?<!\p{L})(?:into|to|al|en|ins|in)\s+${LANGUAGE}|(?<!\p{L})${LANGUAGE}\s+(?:çevir\p{L}*|tercüme\p{L}*)|(?<!\p{L})(?:çevir\p{L}*|tercüme\p{L}*)[^.\n]{0,40}(?<!\p{L})${LANGUAGE}`, 'iu');
+const isTranslation = (d: DraftSubtask) => TRANSLATION.test(d.title) || TRANSLATE_INTO.test(d.brief.slice(0, 400));
+const WORDS_ONLY = /^[\p{L}\p{N}\s'’-]+$/u;
+const TRANSLATION_JUDGE = 'Is the deliverable a complete and faithful translation of the text the brief gives, into the language the brief asks for?';
+// Files Rook can't take back as text: a files check on one could never pass.
+const BINARY = /\.(?:png|jpe?g|gif|webp|ico|bmp|tiff?|avif|heic|mp4|mov|webm|avi|mkv|mp3|wav|ogg|m4a|flac|pdf|zip|gz|tar|woff2?|ttf|otf|eot|psd|ai|fig|sketch|docx?|xlsx?|pptx?)$/i;
+
 /**
  * Step 8 + section 7 rules. `pos` is the subtask's final index; cross-checks must point strictly earlier. `inputs`: the
- * files an edit changes; it must return them whole, so an edit with no files check gets one.
+ * files an edit changes; it must return them whole, so an edit with no files check gets one, unless it acts in the world
+ * (a deploy is checked by its live link: QA, a files check failed every honest deploy after it was paid). Every contains
+ * pattern and files path must be something the brief asks for, since the agent sees only the brief (QA: honest work
+ * failed on "YETENEKLERİM", "NEAR Foundation" and rgb(30, 58, 138), none of them in the brief).
  */
-function validateCriteria(id: string, pos: number, raw: DraftSubtask['criteria'], finalId: Map<string, string>, notes: string[], inputs: string[] = []): Criterion[] {
+function validateCriteria(id: string, pos: number, d: DraftSubtask, finalId: Map<string, string>, notes: string[], inputs: string[] = []): Criterion[] {
   const out: Criterion[] = [];
+  const where = fold(`${d.title}\n${d.brief}`);
+  const deploy = isAction(d);
+  const translation = isTranslation(d);
   let judges = 0, length: Criterion | undefined;
-  raw.forEach((rc, j) => {
-    const remove = (why: string) => notes.push(`criterion ${id}.c${j + 1} removed: ${why}`);
+  d.criteria.forEach((rc, j) => {
+    const at = `criterion ${id}.c${j + 1}`;
+    const remove = (why: string) => notes.push(`${at} removed: ${why}`);
     const parsed = Criterion.safeParse({ ...rc, id: 'tmp' });
     if (!parsed.success) return remove(`invalid ${rc.kind} criterion (${parsed.error.issues[0]?.message ?? 'bad shape'})`);
     let c = parsed.data;
     switch (c.kind) {
       case 'contains': {
-        // The evaluator also passes a pattern found verbatim: a broken regex is that literal, never a lost check
-        // (an Express plan lost both its route checks this way).
-        try { new RegExp(c.spec.pattern, 'i'); } catch {
-          c.spec.pattern = escapeRegExp(c.spec.pattern);
-          notes.push(`criterion ${id}.c${j + 1}: invalid regex, matched as written instead`);
-        }
         if (linkOnly(c.spec.pattern)) {
           c = { id: c.id, kind: 'live_url', description: c.description, spec: { label: /live/i.test(c.spec.pattern) ? 'Live URL' : 'URL' } };
-          notes.push(`criterion ${id}.c${j + 1}: a link check by pattern became a live_url check, which loads the link`);
+          notes.push(`${at}: a link check by pattern became a live_url check, which loads the link`);
+          break;
         }
+        // Text is found as written by default; a regex only on purpose, marked /like this/ for the evaluator.
+        const p = c.spec.pattern, body = deliberateRegex(p);
+        let re: RegExp | undefined;
+        if (body !== undefined) {
+          try { re = new RegExp(body, 'i'); } catch { notes.push(`${at}: invalid regex, matched as written instead`); }
+        }
+        if (re) {
+          // ponytail: a model-written regex runs unguarded against the brief, as in the evaluator.
+          if (re.test('')) return remove(`the regex ${p} matches empty text, so it passes anything (a lookahead such as (?!...) checks nothing)`);
+          if (!new RegExp(body!, 'im').test(`${d.title}\n${d.brief}`)) return remove(`the regex ${p} matches nothing the brief asks for`);
+          c.spec.pattern = `/${body}/`;
+          break;
+        }
+        const lit = /^\/.+\/$/s.test(p) ? p.slice(1, -1) : p;
+        if (!lit.trim()) return remove('an empty pattern checks nothing');
+        if (translation && WORDS_ONLY.test(lit)) return remove(`"${lit}" is a phrase of the text to translate or a guess of its translation: a judge reads the translation instead`);
+        if (!where.includes(fold(lit))) return remove(`"${lit}" is not in the brief, so an agent that follows the brief need not write it`);
+        c.spec.pattern = lit;
         break;
       }
       case 'files': {
-        const paths = [...new Set(c.spec.paths.map(cleanPath).filter((p): p is string => !!p))];
-        if (!paths.length) return remove('no file path inside the project');
+        if (deploy) return remove('a part that acts in the world, such as a deploy, is checked by its live link, not by files sent back');
+        const clean = [...new Set(c.spec.paths.map(cleanPath).filter((p): p is string => !!p))];
+        if (!clean.length) return remove('no file path inside the project');
+        const binary = clean.filter((p) => BINARY.test(p));
+        if (binary.length) notes.push(`${at}: ${binary.join(', ')} left out: Rook can't take ${binary.length === 1 ? 'it' : 'them'} back as a text file`);
+        const named = (p: string) => inputs.includes(p) || where.includes(fold(p)) || where.includes(fold(p.split('/').pop()!));
+        const unnamed = clean.filter((p) => !BINARY.test(p) && !named(p));
+        if (unnamed.length) notes.push(`${at}: ${unnamed.join(', ')} left out: the brief doesn't ask for ${unnamed.length === 1 ? 'it' : 'them'}`);
+        const paths = clean.filter((p) => !BINARY.test(p) && named(p));
+        if (!paths.length) return remove('no file it checks is one the brief asks for as text');
         c.spec.paths = paths;
         break;
       }
@@ -535,9 +892,15 @@ function validateCriteria(id: string, pos: number, raw: DraftSubtask['criteria']
         if (count) {
           const unit = /word/i.test(count[0]) ? 'words' : 'characters';
           remove(`"${c.spec.label}" is a ${unit.slice(0, -1)} count, which would have to be printed in the work`);
-          const span = min !== undefined && max !== undefined ? `roughly ${min} to ${max} ${unit}` : min !== undefined ? `at least roughly ${min} ${unit}` : `at most roughly ${max} ${unit}`;
-          length ??= { id: 'tmp', kind: 'llm_judge', description: `About the length asked for (${span})`, spec: { question: `Is the deliverable ${span} long?` } };
+          const range = min !== undefined && max !== undefined ? `roughly ${min} to ${max} ${unit}` : min !== undefined ? `at least roughly ${min} ${unit}` : `at most roughly ${max} ${unit}`;
+          length ??= { id: 'tmp', kind: 'llm_judge', description: `About the length asked for (${range})`, spec: { question: `Is the deliverable ${range} long?` } };
           return;
+        }
+        const sane = saneBounds(c.spec.label, min, max);
+        if (!sane) return remove(`"${c.spec.label}" can be below or above 0, so no bound on it is known without the data`);
+        if (sane.min !== min || sane.max !== max) {
+          notes.push(`${at}: the bounds on "${c.spec.label}" (${min ?? '-inf'} to ${max ?? 'inf'}) guessed the answer: it checks ${span(sane)} instead`);
+          c.spec = { label: c.spec.label, ...sane };
         }
         break;
       }
@@ -554,8 +917,11 @@ function validateCriteria(id: string, pos: number, raw: DraftSubtask['criteria']
     }
     out.push(c);
   });
-  if (length && judges < MAX_JUDGES) out.push(length);
-  if (inputs.length && !out.some((c) => c.kind === 'files')) {
+  if (length && judges < MAX_JUDGES) { out.push(length); judges++; }
+  if (translation && judges < MAX_JUDGES && !out.some((c) => c.kind === 'llm_judge' && /translat/i.test(c.spec.question))) {
+    out.push({ id: 'tmp', kind: 'llm_judge', description: 'A complete, faithful translation', spec: { question: TRANSLATION_JUDGE } });
+  }
+  if (inputs.length && !deploy && !out.some((c) => c.kind === 'files')) {
     out.push({ id: 'tmp', kind: 'files', description: `Returns ${inputs.length === 1 ? inputs[0] : 'each changed file'} whole`, spec: { paths: inputs } });
   }
   if (out.length === 0) {

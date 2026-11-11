@@ -242,12 +242,58 @@ export async function verifySignature(call: SignedLlmCall, s: any, att: Pick<Ret
   call.signature_verified = textOk && call.signer_recovered && call.attested !== false;
 }
 
-/** Extract one JSON object from model text: strip code fences, take first "{" to last "}". */
-export function parseJsonObject(text: string): unknown {
+/** Extract one JSON object from model text: strip code fences, take first "{" to last "}"; `repair`: mend it first (repairJson). */
+export function parseJsonObject(text: string, repair = false): unknown {
   const t = text.replace(/```(?:json)?/gi, '');
   const a = t.indexOf('{'), b = t.lastIndexOf('}');
   if (a < 0 || b <= a) throw new Error('no JSON object in model output');
-  return JSON.parse(t.slice(a, b + 1));
+  const slice = t.slice(a, b + 1);
+  return JSON.parse(repair ? repairJson(slice) : slice);
+}
+
+/**
+ * One JSON object from a model with its common faults mended, so it parses: a double quote inside a string that closes
+ * nothing (QA: an assumption that said `say "deploy it"` failed whole plans with "Expected ',' or ']' after array
+ * element"), a raw line break or tab inside a string, an escape JSON lacks (\'), and a comma before a closing bracket. A
+ * quote closes its string only when what follows can come next in the JSON around it: a ":" after a key; after a value,
+ * "," then the next key (in an object) or value (in an array), or the closing bracket. ponytail: a string holding
+ * `", "` followed by a quoted word still reads as two values; the reply is then asked for again, as before.
+ */
+export function repairJson(text: string): string {
+  const VALUE = String.raw`\s*(?:"|\{|\[|-?\d|true\b|false\b|null\b)`;
+  const KEY = String.raw`\s*"(?:[^"\\\n]|\\.)*"\s*:`;
+  const stack: ('{' | '[')[] = [];
+  let out = '', inString = false, isKey = false, expectKey = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === '\\') {
+        const next = text[i + 1] ?? '';
+        out += /["\\/bfnrtu]/.test(next) ? ch + next : next === '\n' ? '\\n' : next;
+        i++;
+        continue;
+      }
+      if (ch === '\n') { out += '\\n'; continue; }
+      if (ch === '\r') { out += '\\r'; continue; }
+      if (ch === '\t') { out += '\\t'; continue; }
+      if (ch !== '"') { out += ch; continue; }
+      const rest = text.slice(i + 1), top = stack[stack.length - 1];
+      const closes = isKey ? /^\s*:/.test(rest)
+        : top === '{' ? new RegExp(String.raw`^\s*(?:\}|,${KEY})`).test(rest)
+          : top === '[' ? new RegExp(String.raw`^\s*(?:\]|,${VALUE})`).test(rest)
+            : true;
+      if (closes) { inString = false; out += ch; } else out += '\\"';
+      continue;
+    }
+    if (ch === '"') { inString = true; isKey = expectKey; expectKey = false; out += ch; continue; }
+    if (ch === '{') { stack.push('{'); expectKey = true; } else if (ch === '[') { stack.push('['); expectKey = false; } else if (ch === '}' || ch === ']') stack.pop();
+    else if (ch === ',') {
+      if (/^\s*[}\]]/.test(text.slice(i + 1))) continue; // a trailing comma
+      expectKey = stack[stack.length - 1] === '{';
+    }
+    out += ch;
+  }
+  return out;
 }
 
 /** Ask for one JSON object, validate with zod, retry once with the error. */
@@ -264,8 +310,20 @@ export async function json<T>(purpose: string, model: string, schema: z.ZodType<
     } catch (e: any) {
       throw Object.assign(e instanceof Error ? e : new Error(String(e)), { calls }); // keep the calls already paid for
     }
+    let parsed: unknown, syntax: string | undefined;
+    try { parsed = parseJsonObject(text); } catch (e: any) { syntax = e?.message ?? String(e); }
+    if (syntax !== undefined) {
+      // The raw reply, so a failure can be read afterwards (QA: "invalid JSON twice", and no draft to see why).
+      const at = Number(/position (\d+)/.exec(syntax)?.[1] ?? NaN);
+      console.warn(`[llm] ${purpose}: reply is not JSON (${syntax.slice(0, 200)}); ${text.length} characters${Number.isFinite(at) ? `, around the error: ${JSON.stringify(text.slice(Math.max(0, at - 300), at + 300))}` : ''}; reply starts: ${JSON.stringify(text.slice(0, 2000))}`);
+      try {
+        parsed = parseJsonObject(text, true);
+        console.warn(`[llm] ${purpose}: parsed after mending stray quotes, line breaks or trailing commas`);
+      } catch { /* asked again below */ }
+    }
     try {
-      return { data: schema.parse(parseJsonObject(text)), calls };
+      if (parsed === undefined) throw new Error(syntax);
+      return { data: schema.parse(parsed), calls };
     } catch (e: any) {
       lastErr = e?.message ?? String(e);
       messages.push({ role: 'assistant', content: text }, { role: 'user', content: `That reply was invalid: ${lastErr.slice(0, 1500)}\nReply again with one corrected JSON object only.` });

@@ -195,8 +195,8 @@ test('a small edit is Rook\'s at once: self_do rook_edit, no candidates, cap 0, 
     budget_atomic: 1_000_000n,
     files: ['index.html', 'css/site.css', 'public/about.html'],
     draft: [
-      sub('Rename the owner', { self_do_ok: true, rook_edit: true, inputs: ['./index.html', 'about.html', 'secret.txt', '../etc/passwd'], criteria: [{ id: 'c1', kind: 'contains', description: 'New name', spec: { pattern: 'Ozan Andaç' } }] }),
-      sub('Add a blog page', { self_do_ok: true, inputs: ['css/site.css'], criteria: [{ id: 'c1', kind: 'files', description: 'Returns the pages', spec: { paths: ['blog.html', 'index.html'] } }] }),
+      sub('Rename the owner', { brief: "Rename the owner\n\nChange the owner's name to Ozan Andaç everywhere it appears.", self_do_ok: true, rook_edit: true, inputs: ['./index.html', 'about.html', 'secret.txt', '../etc/passwd'], criteria: [{ id: 'c1', kind: 'contains', description: 'New name', spec: { pattern: 'Ozan Andaç' } }] }),
+      sub('Add a blog page', { brief: 'Add a blog page\n\nAdd blog.html and link it from index.html.', self_do_ok: true, inputs: ['css/site.css'], criteria: [{ id: 'c1', kind: 'files', description: 'Returns the pages', spec: { paths: ['blog.html', 'index.html'] } }] }),
     ],
     selected: [[agent('builder')], [agent('builder')]], // agents were found for the edit too: it is still Rook's
     quotes: { builder: row('500000') },
@@ -385,7 +385,7 @@ test('a link checked by pattern becomes a live_url check; a part that must go on
   const has = (pattern: string) => ({ id: 'c', kind: 'contains', description: 'Gives the live link', spec: { pattern } });
   const p = buildPlan(input({
     draft: [
-      sub('Deploy', { criteria: [has('URL: https?://'), has('Live URL:'), has('Source URL'), has('http')] }),
+      sub('Deploy', { brief: 'Deploy\n\nPublish the files. Reply with the line "URL: <url>", the Source URL and each http link.', criteria: [has('URL: https?://'), has('Live URL:'), has('Source URL'), has('http')] }),
       sub('Deploy alone', { self_do_ok: true, criteria: [{ id: 'c1', kind: 'live_url', description: 'Live', spec: { must_contain: 'Ozan Andaç' } }] }),
       sub('Deploy edit', { self_do_ok: true, rook_edit: true, inputs: ['index.html'], criteria: [has('Live URL')] }),
     ],
@@ -406,7 +406,7 @@ test('a link checked by pattern becomes a live_url check; a part that must go on
 test('a files check keeps paths inside the project; one with none is removed', () => {
   const files = (paths: string[]) => ({ id: 'f', kind: 'files', description: 'Returns the project', spec: { paths } });
   const p = buildPlan(input({
-    draft: [sub('Project', { criteria: [files(['app/page.tsx', '/package.json', './postcss.config.mjs', '../etc/passwd', 'C:/x.txt', 'a\\b.ts', 'app//x.ts', 'app/page.tsx']), files(['../x'])] })],
+    draft: [sub('Project', { brief: 'Project\n\nDeliver app/page.tsx, package.json and postcss.config.mjs.', criteria: [files(['app/page.tsx', '/package.json', './postcss.config.mjs', '../etc/passwd', 'C:/x.txt', 'a\\b.ts', 'app//x.ts', 'app/page.tsx']), files(['../x'])] })],
     selected: [[agent('a')]],
     quotes: { a: row('100000') },
   }));
