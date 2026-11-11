@@ -6,7 +6,9 @@ const atomic = z.string().regex(/^\d+$/, 'atomic USDC integer string');
 // ---- Criteria (section 7) ----
 const base = { id: z.string(), description: z.string() };
 export const Criterion = z.discriminatedUnion('kind', [
-  z.object({ ...base, kind: z.literal('contains'), spec: z.object({ pattern: z.string().min(1) }) }),
+  // `absent`: the text must NOT hold the pattern (a rename's old name). Without it a planner wrote "Old name is gone" as
+  // a check for the old name, which every correct rename failed (t_095f2819).
+  z.object({ ...base, kind: z.literal('contains'), spec: z.object({ pattern: z.string().min(1), absent: z.boolean().optional() }) }),
   z.object({ ...base, kind: z.literal('schema'), spec: z.object({ json_schema: z.record(z.string(), z.any()) }) }),
   z.object({
     ...base, kind: z.literal('numeric_match'),

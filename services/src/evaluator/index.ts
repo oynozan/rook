@@ -259,7 +259,7 @@ export async function evaluate(req: EvaluateRequest): Promise<Evaluation> {
   // imperatives about payment and hiring only in prose ("Hire me" on a page is site copy). Never the text the edit's
   // input files already held, nor the words the brief and its contains checks ask for.
   const known = new Set((inputs ?? []).flatMap((i) => unmask(i.text).split('\n').map((l) => l.trim())).filter(Boolean));
-  const scan = { known, asked: [req.brief, ...of('contains').map((c) => c.spec.pattern)].join('\n') };
+  const scan = { known, asked: [req.brief, ...of('contains').filter((c) => !c.spec.absent).map((c) => c.spec.pattern)].join('\n') };
   const injection = [...new Set([
     ...scanInjection(text, { ...scan, code: true }),
     ...[...delivered.texts.values()].flatMap((t) => scanInjection(t, scan)),
@@ -305,6 +305,13 @@ export async function evaluate(req: EvaluateRequest): Promise<Evaluation> {
     const p = c.spec.pattern, where = fileText !== null ? ' in the delivered files' : '';
     const m = containsMatch(p, fileText ?? text);
     if (m.vacuous) { res(c.id, c.kind, false, `checks nothing: /${p}/ matches any text`, true); continue; }
+    if (c.spec.absent) { // text that must be gone: a rename's old name
+      // As written or as a regex only: ignoring punctuation, "Alex Doe" is still in alexdoe@example.com.
+      const still = m.matched && m.how !== 'ignoring punctuation and spacing';
+      const said = m.how === 'as a regex' || /^\/.+\/$/s.test(p) ? `/${p.replace(/^\/|\/$/g, '')}/i` : `"${p}"`;
+      res(c.id, c.kind, !still, still ? `still has ${said}${where}` : `no ${said} left${where}`);
+      continue;
+    }
     // A pattern the files already met before the edit says nothing about it ('href="#contact"' for a new button).
     if (m.matched && before !== null && containsMatch(p, before).matched) { res(c.id, c.kind, false, `checks nothing: "${p}" was already in the files before the edit`, true); continue; }
     const said = m.how === 'as a regex' ? `/${p}/i` : `"${p}"`;

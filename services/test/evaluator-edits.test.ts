@@ -192,3 +192,17 @@ test('contains: matched as written in the delivered files, a regex only on purpo
   // Prose work keeps reading the whole reply.
   assert.equal(result(await run([c('c1', 'contains', { pattern: 'Verdict' })], 'Findings first.\n\nVerdict: safe.'), 'c1')!.detail, 'contains "Verdict"');
 });
+
+test('contains with absent: passes when the text is gone from the delivered files, fails naming it while it is still there', async () => {
+  // t_095f2819: a correct rename failed three times on "Old name is gone", written as a check for the old name.
+  const gone = c('c2', 'contains', { pattern: 'Alex Doe', absent: true });
+  const done = await edit(RENAME, block(renamed), [...FILES, gone]);
+  assert.equal(done.verdict, 'pass', JSON.stringify(done.results));
+  assert.equal(result(done, 'c2')!.detail, 'no "Alex Doe" left in the delivered files');
+  const half = await edit(RENAME, block(PAGE.replace('Alex Doe', 'Jordan Çelik')), [...FILES, gone]);
+  assert.equal(result(half, 'c2')!.passed, false);
+  assert.equal(result(half, 'c2')!.detail, 'still has "Alex Doe" in the delivered files');
+  // A regex works the same way, and the old name is never one of the words the brief "asks for" in the injection scan.
+  const re = await edit(RENAME, block(renamed), [...FILES, c('c2', 'contains', { pattern: '/alex\s+doe/', absent: true })]);
+  assert.equal(result(re, 'c2')!.detail, 'no /alex\s+doe/i left in the delivered files');
+});

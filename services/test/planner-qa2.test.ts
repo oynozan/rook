@@ -600,3 +600,23 @@ test('POST /plan: a budget named in Turkish is planned at; one the message does 
   assert.equal(not.budget.budget_atomic, '3000000');
   assert.ok(not.notes.some((n: string) => n.startsWith('Rook kept the budget at 3.00 USDC: your message doesn\'t name a total of 1.50 USDC.')), not.notes.join('\n'));
 });
+
+// ---- A check that text is gone (t_095f2819: "Old name is gone" written as a check for the old name) ----
+
+test('a contains check for text the brief replaces or removes becomes a check that it is gone; the new text stays a check that it is there', () => {
+  const brief = "Rename to Jordan Çelik\n\nIn index.html, change the owner's name from Ozan Andaç to Jordan Çelik everywhere it appears. Keep everything else exactly as it is.";
+  const contains = (id: string, pattern: string, absent?: boolean) => ({ id, kind: 'contains', description: id, spec: { pattern, ...(absent ? { absent } : {}) } });
+  const p = buildPlan(input({
+    files: ['index.html'],
+    draft: [sub('Rename to Jordan Çelik', { brief, inputs: ['index.html'], self_do_ok: true, criteria: [contains('c1', 'Jordan Çelik'), contains('c2', 'Ozan Andaç')] })],
+  }));
+  assert.deepEqual(p.subtasks[0].criteria.filter((c) => c.kind === 'contains').map((c) => c.spec), [{ pattern: 'Jordan Çelik' }, { pattern: 'Ozan Andaç', absent: true }]);
+  assert.ok(p.notes.some((n) => /"Ozan Andaç" is text the brief replaces or removes, so it is checked as gone/.test(n)), JSON.stringify(p.notes));
+  // One the draft already marks absent is kept as it is, with no note; "remove the Skills section" reads as gone too.
+  const q = buildPlan(input({
+    files: ['index.html'],
+    draft: [sub('Drop skills', { brief: 'Drop skills\n\nRemove the Skills section from index.html. Keep everything else.', inputs: ['index.html'], self_do_ok: true, criteria: [contains('c1', 'Skills section'), contains('c2', 'Ozan', true)] })],
+  }));
+  assert.deepEqual(q.subtasks[0].criteria.filter((c) => c.kind === 'contains').map((c) => c.spec), [{ pattern: 'Skills section', absent: true }]);
+  assert.ok(q.notes.some((n) => /"Ozan" is not in the brief/.test(n)), JSON.stringify(q.notes));
+});

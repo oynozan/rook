@@ -791,6 +791,9 @@ function deliberateRegex(p: string): string | undefined {
   if (slashed) return slashed[1];
   return REGEX_ONLY.test(p) ? p : undefined;
 }
+/** A brief that changes from, replaces or removes `text`: "from Ozan Andaç to Jordan Çelik", "remove the Skills section". */
+const oldText = (text: string) =>
+  new RegExp(String.raw`(?:^|[^\p{L}\p{N}])(?:from|remove|delete|drop|replace|rename|kaldır|çıkar)\s+(?:the\s+)?["“'‘]?${escapeRegExp(text)}`, 'iu');
 
 // A numeric label's kind, for its sanity range (section 7): a change or growth rate can't fall below -100 % and has no
 // top; a net figure or a difference has no bound known without the data; a share of a whole is 0 to 100; any other
@@ -866,6 +869,12 @@ function validateCriteria(id: string, pos: number, d: DraftSubtask, finalId: Map
         if (!lit.trim()) return remove('an empty pattern checks nothing');
         if (translation && WORDS_ONLY.test(lit)) return remove(`"${lit}" is a phrase of the text to translate or a guess of its translation: a judge reads the translation instead`);
         if (!where.includes(fold(lit))) return remove(`"${lit}" is not in the brief, so an agent that follows the brief need not write it`);
+        // Text the brief changes from or removes can only be checked as gone: "Old name is gone" written as a check for
+        // the old name failed every correct rename (t_095f2819).
+        if (!c.spec.absent && oldText(lit).test(d.brief)) {
+          c.spec.absent = true;
+          notes.push(`${at}: "${lit}" is text the brief replaces or removes, so it is checked as gone`);
+        }
         c.spec.pattern = lit;
         break;
       }

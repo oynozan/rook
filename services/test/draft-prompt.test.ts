@@ -112,7 +112,7 @@ test('the draft knows the media and sources checks, and a deploy gets a live_url
   assert.match(DRAFT_SYSTEM, /in research the figure's source link follows on the same line, as in 'Holder count: 412530 \(source: <link to the page>\)'/);
   // Every criterion example is valid JSON and a criterion of the contract.
   const examples = DRAFT_SYSTEM.split('\n').filter((l) => /^\s+\{"id":"c\d+"/.test(l));
-  assert.equal(examples.length, 10);
+  assert.equal(examples.length, 11);
   for (const e of examples) assert.ok(Criterion.safeParse(JSON.parse(e)).success, e);
   assert.deepEqual(examples.map((e) => JSON.parse(e).kind).slice(-3), ['live_url', 'media', 'sources']);
 });
