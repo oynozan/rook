@@ -161,7 +161,7 @@ test("a failed evaluation names the evaluator's file checks in plain words: a cu
     ev(6, 'evaluation', { agent_handle: 'codex-engineer-01', verdict: 'fail', failed_criteria: ['injection', 'cut_off'] }, 's1'),
   ], plan);
   assert.deepEqual(lines.map((l) => [l.text, l.now.label]), [
-    ['codex-engineer-01 sent a file for Rename site cut off before its end.', 'Cut off'],
+    ["codex-engineer-01's delivery for Rename site has a file cut off before its end.", 'Cut off'],
     ["codex-engineer-01's edit for Rename site didn't make just the change asked for.", 'Failed a check'],
     ["Rook's own work on Add a card has a file cut off before its end.", 'Cut off'],
     ["Rook's own work on Add a card didn't make just the change asked for.", 'Failed a check'],
@@ -171,5 +171,5 @@ test("a failed evaluation names the evaluator's file checks in plain words: a cu
   assert.deepEqual(lines.map((l) => l.tone), ['alert', 'alert', 'normal', 'normal', 'normal', 'alert']);
   // One part: no title, as on every line.
   assert.equal(feedFrom([ev(1, 'evaluation', { agent_handle: 'quill', verdict: 'fail', failed_criteria: ['cut_off'] }, 's1')], ctx([['s1', 'Site']]))[0].text,
-    'quill sent a file cut off before its end.');
+    "quill's delivery has a file cut off before its end.");
 });

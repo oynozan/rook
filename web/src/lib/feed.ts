@@ -218,7 +218,7 @@ export function feedFrom(events: RookEvent[], ctx: FeedContext): FeedLine[] {
       else if (data.failed_criteria?.includes('injection')) lines.push({ key, text: `${agent}'s delivery${fore} tried to give Rook instructions. Flagged and rejected.`, tone: 'alert', flag: true, now: { state: 'analyzing', label: 'Flagged', detail: agent } });
       else {
         const check = fileCheck(data.failed_criteria);
-        const text = check === 'cut_off' ? `${agent} sent a file${fore} cut off before its end.` : check === 'edit_scope' ? `${agent}'s edit${fore} ${EDIT_SCOPE}.` : `${agent} failed a check${on}.`;
+        const text = check === 'cut_off' ? `${agent}'s delivery${fore} has a file cut off before its end.` : check === 'edit_scope' ? `${agent}'s edit${fore} ${EDIT_SCOPE}.` : `${agent} failed a check${on}.`;
         lines.push({ key, text, tone: 'alert', flag: true, now: { state: 'analyzing', label: check === 'cut_off' ? 'Cut off' : 'Failed a check', detail: agent } });
       }
     } else if (type === 'security_alert' && data.source === 'quote') lines.push({ key, text: alertLine(data.flag, agent), detail: data.flag, tone: 'alert', flag: true, now: { state: 'analyzing', label: 'Security alert' } });
