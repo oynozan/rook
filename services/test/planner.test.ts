@@ -451,7 +451,7 @@ test('a total budget named in the message is planned at, within the limits; one 
   // A total the model read into a message with no amount in it is its mistake: planned at the budget sent, with a note.
   assert.deepEqual([plans[2].budget.budget_atomic, plans[2].budget.from_message], ['3000000', undefined]);
   // Said to the user in plain words (a note that starts with "Rook " is shown on the plan card).
-  assert.equal(plans[2].notes[0], 'Rook kept the budget at 3.00 USDC: your message doesn\x27t name a total of 1.50 USDC. To change the budget, name the total you want, like "make it 1.50 USDC", or send your next message with a different budget.');
+  assert.equal(plans[2].notes[0], 'Rook kept the budget at 3.00 USDC: your message doesn\x27t name a total of 1.50 USDC. To change the budget, name the total you want, like \'make it 1.50 USDC\', or send your next message with a different budget.');
   assert.deepEqual(errors, [
     [422, 'Your message asks for a budget of 60.00 USDC, but the most Rook takes is 50.00 USDC.'],
     [422, 'Your message asks for a budget of 0.05 USDC, but the smallest the Rook contract takes is 0.10 USDC.'],

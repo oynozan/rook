@@ -248,8 +248,12 @@ export async function evaluate(req: EvaluateRequest): Promise<Evaluation> {
   const nonEmpty = text.trim().length >= 20;
   res('non_empty', 'non_empty', nonEmpty, nonEmpty ? 'ok' : `only ${text.trim().length} characters`);
 
-  // The delivery's files, as the report will attach them.
-  const delivered = attachFiles([{ subtask_id: req.subtask_id, agent_handle: '', title: req.brief.split('\n')[0] || req.subtask_id, text }]);
+  // The delivery's files, named as the report names them (a bare ```html block that edits index.html is index.html). A
+  // cut-off file is kept here to be failed as cut off; the report leaves it out.
+  const delivered = attachFiles([{
+    subtask_id: req.subtask_id, agent_handle: '', title: req.brief.split('\n')[0] || req.subtask_id, text,
+    inputs: req.inputs?.map((f) => f.path), paths: req.criteria.flatMap((c) => (c.kind === 'files' ? c.spec.paths : [])),
+  }], { keepCut: true });
 
   // 2. injection: text addressed to Rook, its checks or an AI reader anywhere (a file's comments and hidden markup too);
   // imperatives about payment and hiring only in prose ("Hire me" on a page is site copy). Never the text the edit's

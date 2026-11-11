@@ -476,9 +476,9 @@ const CUT_OFF = 'cut off before its end';
  * edits again (the runner applies them in order) is that later part's: only its version is attached. Paths are unique
  * across the result (index-2.html for a second part's index.html). A block cut off before its end (its fence never
  * closes, or a page has no </html>) is never attached, nor is a file over FILE_MAX_BYTES or past FILES_MAX_BYTES in
- * all: each is left out and listed.
+ * all: each is left out and listed. `keepCut`: a cut-off block is attached anyway, for the evaluator to judge and fail.
  */
-export function attachFiles(deliveries: Delivery[]): Attached {
+export function attachFiles(deliveries: Delivery[], { keepCut = false } = {}): Attached {
   const texts = new Map<string, string>();
   const files: DeliveredFile[] = [];
   const unattached: Unattached[] = [];
@@ -552,8 +552,9 @@ export function attachFiles(deliveries: Delivery[]): Attached {
       const want = f.name ?? `${slug(d.title) || d.subtask_id}.${f.kind}`;
       // Cut off: listed, never attached, and its path stays free for a whole version.
       const bytes = Buffer.byteLength(f.text, 'utf8');
-      const why = f.cut ? CUT_OFF : bytes > FILE_MAX_BYTES ? 'larger than 1 MB' : total + bytes > FILES_MAX_BYTES ? 'the files together pass 3 MB' : null;
-      const name = f.cut ? want : unique(want);
+      const cut = f.cut && !keepCut;
+      const why = cut ? CUT_OFF : bytes > FILE_MAX_BYTES ? 'larger than 1 MB' : total + bytes > FILES_MAX_BYTES ? 'the files together pass 3 MB' : null;
+      const name = cut ? want : unique(want);
       if (why) unattached.push({ name, title: d.title, why });
       else {
         total += bytes;
