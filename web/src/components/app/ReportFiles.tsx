@@ -1,16 +1,18 @@
 'use client';
 
 // The files delivered with the report, as their folder tree: each to download (by its own name) or copy, the whole set
-// as one zip with its folders, a web page to preview with the delivered styles, scripts and images it uses, an SVG as
-// an image, and, for a project only a computer can run (Next.js, Express), how to run it. A file's text is the agent's,
-// so it is never put into this page: the preview is a sandboxed frame with scripts but no same-origin access, so it
-// can't read this page, its session or the wallet, navigate this tab, or open windows. Its links ask this page to show
-// another delivered page, and only that frame's messages count.
+// as one zip with its folders, the ones this message changed marked, a web page to preview with the delivered styles,
+// scripts and images it uses, an SVG as an image, and, for a project only a computer can run (Next.js, Express), how to
+// run it. A file's text is the agent's, so it is never put into this page: the preview is a sandboxed frame with scripts
+// but no same-origin access, so it can't read this page, its session or the wallet, navigate this tab, or open windows;
+// its own content policy (project.ts PREVIEW_CSP) keeps it from connecting anywhere or loading scripts from other
+// sites, and if it takes its frame to another address, the frame is put back. Its links ask this page to show another
+// delivered page, and only that frame's messages count.
 import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import { Reveal, RowButton } from '@/components/app/controls';
 import { Markdown } from '@/components/app/Markdown';
 import { detail } from '@/lib/errors';
-import { fileTree, isSvg, navRequest, navTarget, previewDoc, projectOf, zipName, zipPaths, type Project, type TreeNode } from '@/lib/project';
+import { changedFiles, fileTree, frameLoad, isSvg, navRequest, navTarget, previewDoc, previewNonce, previewReady, projectOf, withPreviewHead, zipName, zipPaths, type Project, type TreeNode } from '@/lib/project';
 import { blobType, downloadName, isHtml, lineCount, madeBy } from '@/lib/report';
 import type { ReportFile } from '@/lib/server/orchestrator';
 import { zip } from '@/lib/zip';
@@ -29,10 +31,14 @@ function save(blob: Blob, name: string) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-/** `name`: what the project is called, for the zip's own name. */
-export function ReportFiles({ files, titles, name }: { files: ReportFile[]; titles: Map<string, string>; name?: string }) {
+/**
+ * `name`: what the project is called, for the zip's own name. `changed`: the paths this message delivered new or
+ * changed (final_result.changed); `edit`: a part of it edits the chat's files.
+ */
+export function ReportFiles({ files, titles, name, changed, edit = false }: { files: ReportFile[]; titles: Map<string, string>; name?: string; changed?: string[]; edit?: boolean }) {
   const tree = useMemo(() => fileTree(files.map((f) => f.name)), [files]);
   const project = useMemo(() => projectOf(files), [files]);
+  const marks = useMemo(() => changedFiles(files.map((f) => f.name), changed, edit), [files, changed, edit]);
   const [note, setNote] = useState<string | null>(null);
 
   function downloadZip() {
@@ -54,8 +60,9 @@ export function ReportFiles({ files, titles, name }: { files: ReportFile[]; titl
       </div>
       {note && <p role="alert" className="text-sm text-alert">{note}</p>}
       {project && <RunSteps project={project} many={files.length > 1} />}
+      {marks.line && <p className="mt-2 text-sm text-ink/65">{marks.line}</p>}
       <ul className="mt-2 rounded-2xl border border-ink/15">
-        <Nodes nodes={tree} depth={0} files={files} titles={titles} project={project} />
+        <Nodes nodes={tree} depth={0} files={files} titles={titles} project={project} marked={marks.marked} />
       </ul>
     </section>
   );
@@ -67,6 +74,8 @@ function RunSteps({ project, many }: { project: Project; many: boolean }) {
   return (
     <div className="mt-2 rounded-2xl bg-ink/5 p-4 text-sm">
       <p>This is {project.words}. It runs on a computer with Node.js, so Rook can&apos;t preview it here.</p>
+      {/* Always, whoever wrote it: installing and starting a project runs its code, and its packages', on that computer. */}
+      <p className="mt-2 font-medium">Review code from agents before you run it: installing and starting it runs that code on your computer.</p>
       {steps?.from === 'readme' && (
         <>
           <p className="mt-2 text-ink/65">How to run it, from its README:</p>
@@ -89,7 +98,7 @@ function RunSteps({ project, many }: { project: Project; many: boolean }) {
 
 const indent = (depth: number) => ({ paddingLeft: `${1 + Math.min(depth, 4) * 0.875}rem` });
 
-function Nodes({ nodes, depth, ...rest }: { nodes: TreeNode[]; depth: number; files: ReportFile[]; titles: Map<string, string>; project: Project | null }) {
+function Nodes({ nodes, depth, ...rest }: { nodes: TreeNode[]; depth: number; files: ReportFile[]; titles: Map<string, string>; project: Project | null; marked: Set<string> }) {
   return nodes.map((n) => n.kind === 'folder' ? (
     <li key={`d:${n.path}`} className="min-w-0 border-b border-ink/10 last:border-b-0">
       <p className="flex min-w-0 items-center gap-2 py-2 pr-4 font-mono text-sm text-ink/70" style={indent(depth)}>
@@ -103,11 +112,12 @@ function Nodes({ nodes, depth, ...rest }: { nodes: TreeNode[]; depth: number; fi
       </ul>
     </li>
   ) : (
-    <FileRow key={`f:${n.index}`} file={rest.files[n.index]} label={n.name} depth={depth} files={rest.files} part={rest.titles.get(rest.files[n.index].subtask_id)} project={rest.project} />
+    <FileRow key={`f:${n.index}`} file={rest.files[n.index]} label={n.name} depth={depth} files={rest.files} part={rest.titles.get(rest.files[n.index].subtask_id)} project={rest.project}
+      changed={rest.marked.has(rest.files[n.index].name)} />
   ));
 }
 
-function FileRow({ file, label, depth, files, part, project }: { file: ReportFile; label: string; depth: number; files: ReportFile[]; part?: string; project: Project | null }) {
+function FileRow({ file, label, depth, files, part, project, changed }: { file: ReportFile; label: string; depth: number; files: ReportFile[]; part?: string; project: Project | null; changed: boolean }) {
   const [preview, setPreview] = useState(false);
   const [big, setBig] = useState(false);
   const [note, setNote] = useState<{ text: string; alert?: true } | null>(null);
@@ -136,7 +146,10 @@ function FileRow({ file, label, depth, files, part, project }: { file: ReportFil
 
   return (
     <li className="min-w-0 border-b border-ink/10 py-3 pr-4 last:border-b-0" style={indent(depth)}>
-      <p className="font-mono text-sm break-all" title={file.name !== label ? file.name : undefined}>{label}</p>
+      <p className="flex flex-wrap items-baseline gap-x-2">
+        <span className="font-mono text-sm break-all" title={file.name !== label ? file.name : undefined}>{label}</span>
+        {changed && <span title="Changed or added by this message" className="rounded-full bg-accent/15 px-2 text-xs text-accent-ink">Changed</span>}
+      </p>
       <p className="text-sm text-ink/60">
         {lines} line{lines === 1 ? '' : 's'}
         {' · '}from {madeBy(file.agent_handle) === 'Rook' ? 'Rook' : <span className="font-mono break-all">{file.agent_handle}</span>}{part ? ` for ${part}` : ''}
@@ -159,25 +172,53 @@ function FileRow({ file, label, depth, files, part, project }: { file: ReportFil
   );
 }
 
-/** A delivered web page in a sealed frame, with the delivered files it uses; its links to other delivered pages switch it. */
+/** How many times a page may take its frame elsewhere before the preview stops putting it back and stops showing it. */
+const MAX_LEAVES = 3;
+/** How long a load of the frame waits for its page's word that it loaded (project.ts frameLoad 'wait'). */
+const READY_WAIT_MS = 500;
+
+/**
+ * A delivered web page in a sealed frame, with the delivered files it uses; its links to other delivered pages switch
+ * it. A page that takes the frame to another address (a script setting location, to a fake wallet prompt, say) is put
+ * back, and says so; one that keeps doing it isn't shown at all. Each page shown carries a fresh nonce, which only its
+ * own word that it loaded can name (project.ts navScript): a load of the frame without that word, or a second load,
+ * is another site. ponytail: another site can show for a moment before the frame is put back; previews served from a
+ * separate origin would never show it.
+ */
 function PagePreview({ file, files, big }: { file: ReportFile; files: ReportFile[]; big: boolean }) {
   const [page, setPage] = useState(file.name);
   const [outside, setOutside] = useState(false);
+  const [leaves, setLeaves] = useState(0);
   const frame = useRef<HTMLIFrameElement>(null);
-  const doc = useMemo(() => previewDoc(files, page) ?? file.text, [files, page, file.text]);
+  const nonce = useMemo(() => previewNonce(), [page, leaves]);
+  const doc = useMemo(() => previewDoc(files, page, nonce) ?? withPreviewHead(file.text, nonce), [files, page, file.text, nonce]);
+  const ready = useRef<string | null>(null); // the nonce of the page that said it loaded
+  const seen = useRef({ nonce: '', loads: 0 }); // the frame's loads of the page it was given
+  const waiting = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  useEffect(() => () => clearTimeout(waiting.current), []);
+  // A new key mounts a fresh frame on the delivered page, with a fresh nonce.
+  const leave = () => { clearTimeout(waiting.current); setLeaves((n) => n + 1); };
+  const onLoad = () => {
+    const at = frameLoad(seen.current, nonce, ready.current === nonce);
+    seen.current = at.seen;
+    clearTimeout(waiting.current);
+    if (at.verdict === 'left') leave();
+    else if (at.verdict === 'wait') waiting.current = setTimeout(() => { if (ready.current !== nonce) leave(); }, READY_WAIT_MS);
+  };
   useEffect(() => {
     const onMessage = (e: MessageEvent) => {
       // Only this frame's own messages: any other window (another preview, a wallet's frame) is ignored.
       if (!frame.current || e.source !== frame.current.contentWindow) return;
+      if (previewReady(e.data, nonce)) { ready.current = nonce; return; }
       const href = navRequest(e.data);
       if (href === null) return;
       const to = navTarget(files, page, href);
       setOutside(!to);
-      if (to) setPage(to);
+      if (to) { clearTimeout(waiting.current); setPage(to); }
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [files, page]);
+  }, [files, page, nonce]);
   return (
     <>
       {page !== file.name && (
@@ -186,18 +227,27 @@ function PagePreview({ file, files, big }: { file: ReportFile; files: ReportFile
           <span className="-my-2"><RowButton onClick={() => { setPage(file.name); setOutside(false); }}>Back to {file.name.split('/').pop()}</RowButton></span>
         </p>
       )}
-      {/* Never allow-same-origin (with allow-scripts the page could lift its own sandbox), top navigation or popups. */}
-      <iframe
-        ref={frame}
-        title={`Preview of ${page}`}
-        srcDoc={doc}
-        sandbox="allow-scripts"
-        referrerPolicy="no-referrer"
-        className={`block w-full rounded-xl border border-ink/15 bg-white ${big ? 'h-[80vh]' : 'h-80'}`}
-      />
+      {leaves >= MAX_LEAVES ? (
+        <p role="status" className="rounded-xl border border-ink/15 p-4 text-sm">
+          This page keeps trying to open another address in its preview, so Rook stopped showing it. Download it to read its code instead.
+        </p>
+      ) : (
+        // Never allow-same-origin (with allow-scripts the page could lift its own sandbox), top navigation or popups.
+        <iframe
+          key={leaves}
+          ref={frame}
+          title={`Preview of ${page}`}
+          srcDoc={doc}
+          sandbox="allow-scripts"
+          referrerPolicy="no-referrer"
+          onLoad={onLoad}
+          className={`block w-full rounded-xl border border-ink/15 bg-white ${big ? 'h-[80vh]' : 'h-80'}`}
+        />
+      )}
+      {leaves > 0 && leaves < MAX_LEAVES && <p role="status" className="mt-1 text-sm text-alert">This page tried to open another address in its preview, so Rook put it back. Don&apos;t type anything private into a preview.</p>}
       {outside && <p role="status" className="mt-1 text-sm text-ink/65">That link leads outside the delivered files, so the preview stays on this page.</p>}
-      {/* ponytail: the frame inherits this page's content policy, so scripts the page loads from other sites don't run here. */}
-      <p className="mt-1 text-xs text-ink/55">A preview in a sealed frame, with the styles, scripts and images delivered with it. Scripts it loads from other sites don&apos;t run here.</p>
+      {/* True under PREVIEW_CSP: no script, stylesheet, frame or connection from other sites; images and fonts still load. */}
+      <p className="mt-1 text-xs text-ink/55">A preview in a sealed frame, with the styles, scripts and images delivered with it. Scripts, stylesheets and connections to other sites are blocked here, so it may look plainer than online; images from other sites still load.</p>
     </>
   );
 }

@@ -3,7 +3,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import {
-  amountsNamed, budgetField, chatDates, conversationOf, conversations, currentTask, missingParts, outgoing, placeholderFor, questionsOf, retryMessage, revisedPlan, sameTaskAt, waitReason,
+  amountsNamed, ASK_LEAD, askPrompt, budgetField, chatDates, conversationOf, conversations, currentTask, missingParts, outgoing, placeholderFor, questionsOf, retryMessage, revisedPlan, sameTaskAt, waitReason,
 } from '@/lib/conversations';
 import type { TaskStatus, TaskSummary } from '@/lib/server/orchestrator';
 
@@ -140,6 +140,8 @@ test('the placeholder says what a message does there', () => {
   // Rook asked for details: the next message answers, whatever the budget says.
   assert.equal(placeholderFor(at('asking'), '3.00'), 'Answer here, or say “use placeholders”');
   assert.equal(placeholderFor(at('asking'), '5'), 'Answer here, or say “use placeholders”');
+  // An action in the world (a booking, a post) is never done on placeholders: none are offered.
+  assert.equal(placeholderFor({ ...at('asking'), action: true }, '3.00'), 'Answer here');
   for (const s of ['failed', 'cancelled', 'killed'] as const) assert.equal(placeholderFor(at(s), '3.00'), 'Change the task, or try it again', s);
   assert.equal(placeholderFor(at('failed'), '10'), 'Send to plan this task again at 10.00 USDC');
   assert.equal(placeholderFor(at('running'), '1'), 'Wait for this run to finish, or stop it, before sending more.');
@@ -170,13 +172,35 @@ test('a run that finished without some of its parts names them, and the next mes
   assert.equal(retryMessage(['A', 'B']), "Try the parts that weren't delivered again: “A”, “B”.");
 });
 
-test('chats that start with the same request are told apart by their day, then their place', () => {
+test("chats that start with the same request are told apart by their local day, then the time they started", () => {
   const list = [
-    task('a', 0, { prompt: 'make me a portfolio website', created_at: '2026-11-08T23:30:00.000Z' }),
+    task('a', 0, { prompt: 'make me a portfolio website', created_at: '2026-11-08T20:30:00.000Z' }),
     task('b', 1, { prompt: 'Make me a portfolio website ', created_at: '2026-11-09T10:00:00.000Z' }),
     task('c', 2, { prompt: 'make me a portfolio website', created_at: '2026-11-09T12:00:00.000Z' }),
     task('d', 3, { prompt: 'write my CV' }),
   ];
-  const dates = chatDates(conversations(list));
-  assert.deepEqual(Object.fromEntries(dates), { a: '8 Nov', b: '9 Nov · 1', c: '9 Nov · 2' });
+  assert.deepEqual(Object.fromEntries(chatDates(conversations(list), 'UTC')), { a: '8 Nov', b: '9 Nov, 10:00', c: '9 Nov, 12:00' });
+  // The viewer's day, not UTC's: QA's t_ba5f8816 started at 02:57 on 11 Nov in Istanbul and showed "10 Nov".
+  const late = [
+    task('x', 0, { prompt: 'make me a portfolio website', created_at: '2026-11-10T23:57:00.000Z' }),
+    task('y', 1, { prompt: 'make me a portfolio website', created_at: '2026-11-10T08:00:00.000Z' }),
+  ];
+  assert.deepEqual(Object.fromEntries(chatDates(conversations(late), 'Europe/Istanbul')), { x: '11 Nov', y: '10 Nov' });
+  assert.deepEqual(Object.fromEntries(chatDates(conversations(late), 'UTC')), { x: '10 Nov, 23:57', y: '10 Nov, 08:00' });
+  // The same minute too: their place among them by age.
+  const twin = [task('p', 5, { prompt: 'hi' }), task('q', 5, { prompt: 'hi' })];
+  assert.deepEqual(Object.fromEntries(chatDates(conversations(twin), 'UTC')), { p: '9 Nov, 10:05 · 1', q: '9 Nov, 10:05 · 2' });
+});
+
+test("Rook's questions ask in Rook's voice, and only the newest unanswered ones ask for an answer", () => {
+  assert.equal(ASK_LEAD, 'Rook needs a few details before it plans this:');
+  // An answered message (a newer one follows it) keeps its questions and nothing else (QA: "Answer below" on answered ones).
+  assert.equal(askPrompt({ newest: false }), null);
+  assert.equal(askPrompt({ newest: false, action: true }), null);
+  assert.deepEqual(askPrompt({ newest: true }), { line: 'Answer below. Or Rook can use clearly marked placeholders for you to replace later.', placeholders: true });
+  // QA t_390c58c5: one click on "Use placeholders" planned a real booking under "[Your name]". An action offers none.
+  const action = askPrompt({ newest: true, action: true })!;
+  assert.equal(action.placeholders, false);
+  assert.doesNotMatch(action.line, /placeholders for you/);
+  assert.match(action.line, /^Answer below\./);
 });

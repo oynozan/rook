@@ -110,15 +110,18 @@ export function selfDoWhy(s: Pick<Subtask, 'self_do_reason' | 'self_do_need_atom
 }
 
 /**
- * The same for a plan that hires no agent at all, from every subtask's reason; `budget`: what would hire them
- * (budgetToHire); `max`: the largest budget Rook takes.
+ * The same for a plan that hires no agent at all, from its subtasks; `budget`: what would hire them (budgetToHire);
+ * `max`: the largest budget Rook takes. A plan of one part says it of that part, in the singular (QA found "these parts"
+ * and "them all" on every one-part plan).
  */
-export function allSelfDoWhy(reasons: SelfDoReason[], budget?: bigint | null, max?: string | null): string {
+export function allSelfDoWhy(parts: Pick<Subtask, 'self_do_reason' | 'self_do_need_atomic'>[], budget?: bigint | null, max?: string | null): string {
+  if (parts.length === 1) return selfDoWhy(parts[0], budget, false, max);
+  const reasons = parts.map((p) => p.self_do_reason);
   const every = (r: SelfDoReason) => reasons.length > 0 && reasons.every((x) => x === r);
   const largest = aboveLargest(budget, max);
   const hire = (whom: string) => largest !== null ? tooSmall(largest, whom)
     : `Draft it again with ${budget ? `a budget of about ${usdc(budget)} USDC` : 'a larger budget'} to hire ${whom}.`;
-  if (every('rook_edit')) return reasons.length === 1 ? ROOK_EDIT : 'Rook makes these changes itself now, with no agent fee.';
+  if (every('rook_edit')) return 'Rook makes these changes itself now, with no agent fee.';
   if (every('no_agent')) return 'No agent on the market fits these parts, so Rook does them all itself with its own model.';
   if (every('over_budget')) {
     return `The agents Rook found for these parts cost more than this budget allows, so Rook does them all itself with its own model. ${hire('them')}`;

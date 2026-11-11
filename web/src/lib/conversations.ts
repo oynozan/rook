@@ -36,14 +36,19 @@ export function conversations(tasks: TaskSummary[]): Conversation[] {
   }).sort((a, b) => byAge(b.latest, a.latest));
 }
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
 /**
- * What tells apart chats that start with the same request: the day each started ("9 Nov"), and when that is the same
- * too, its place among them by age ("9 Nov · 2"). Only those chats get one. The day is UTC, so the server and the
- * browser render the same text.
+ * What tells apart chats that start with the same request, in the viewer's time zone (`timeZone`; the runtime's own when
+ * left out): the day each started ("11 Nov"); when that is the same too, the time it started ("11 Nov, 02:57"); and
+ * when even the minute is the same, its place among them by age ("11 Nov, 02:57 · 2"). Only those chats get one. The
+ * page renders it only in the browser (AppShell), so a server in another time zone never shows the wrong day.
  */
-export function chatDates(convs: Conversation[]): Map<string, string> {
+export function chatDates(convs: Conversation[], timeZone?: string): Map<string, string> {
+  const day = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', timeZone });
+  const time = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone });
+  const at = (c: Conversation) => {
+    const d = new Date(c.tasks[0].created_at);
+    return Number.isNaN(d.getTime()) ? { day: '', time: '' } : { day: day.format(d), time: time.format(d) };
+  };
   const same = new Map<string, Conversation[]>();
   for (const c of convs) {
     const key = c.title.trim().toLowerCase();
@@ -52,14 +57,14 @@ export function chatDates(convs: Conversation[]): Map<string, string> {
   const out = new Map<string, string>();
   for (const group of same.values()) {
     if (group.length < 2) continue;
-    const day = (c: Conversation) => {
-      const d = new Date(c.tasks[0].created_at);
-      return Number.isNaN(d.getTime()) ? '' : `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
-    };
     const byAgeAsc = [...group].sort((a, b) => byAge(a.tasks[0], b.tasks[0]));
     for (const c of group) {
-      const sameDay = byAgeAsc.filter((x) => day(x) === day(c));
-      out.set(c.id, sameDay.length > 1 ? `${day(c)} · ${sameDay.indexOf(c) + 1}`.trim() : day(c));
+      const when = at(c);
+      const sameDay = byAgeAsc.filter((x) => at(x).day === when.day);
+      if (sameDay.length < 2) { out.set(c.id, when.day); continue; }
+      const sameMinute = sameDay.filter((x) => at(x).time === when.time);
+      const label = when.day && when.time ? `${when.day}, ${when.time}` : '';
+      out.set(c.id, sameMinute.length > 1 ? `${label} · ${sameMinute.indexOf(c) + 1}`.trim() : label);
     }
   }
   return out;
@@ -179,8 +184,9 @@ export function amountsNamed(prompt: string): bigint[] {
 /** The composer's placeholder in a conversation: what sending does there. `chain` as in waitReason. */
 export function placeholderFor(current: TaskSummary | null, budget: string, chain = false): string {
   if (!current) return 'Ask a follow-up';
-  // Rook asked for details: the next message answers it, whatever the budget field says.
-  if (current.status === 'asking') return 'Answer here, or say “use placeholders”';
+  // Rook asked for details: the next message answers it, whatever the budget field says. An action in the world (a
+  // booking, a post) is never done on placeholders, so none are offered.
+  if (current.status === 'asking') return current.action ? 'Answer here' : 'Answer here, or say “use placeholders”';
   const wait = waitReason(current.status, chain);
   if (wait) return wait;
   const usdc = changedBudget(budget, current);
@@ -192,10 +198,22 @@ export function placeholderFor(current: TaskSummary | null, budget: string, chai
   return 'Change the task, or try it again';
 }
 
-/** Rook's questions, as its message opens them. */
-export const ASK_LEAD = 'Before I plan this, I need a few details:';
+/** Rook's questions, as its message opens them: in Rook's voice, as the questions and the rest of the page are. */
+export const ASK_LEAD = 'Rook needs a few details before it plans this:';
 /** The answer the "Use placeholders" button sends: the planner takes it as an answer to its questions. */
 export const PLACEHOLDERS_ANSWER = 'Use placeholders';
+
+/**
+ * The line under Rook's questions, and whether the "Use placeholders" button shows: only on the newest message, which
+ * nothing has answered yet (an answered one keeps its questions and nothing else), and never for an action in the
+ * world (a booking, a post, a purchase), which Rook never does on placeholders. Null: no line, no button.
+ */
+export function askPrompt(o: { newest: boolean; action?: boolean }): { line: string; placeholders: boolean } | null {
+  if (!o.newest) return null;
+  return o.action
+    ? { line: 'Answer below. Rook needs the real details for this, so it never fills them in for you.', placeholders: false }
+    : { line: 'Answer below. Or Rook can use clearly marked placeholders for you to replace later.', placeholders: true };
+}
 
 /**
  * Rook's questions to show for a task that is asking (PlanView.questions), each trimmed; when its plan carries none
