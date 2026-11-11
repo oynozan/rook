@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Alex Doe — Full Stack Web Developer</title>
+<style>
+  :root {
+    --bg: #0d0f13;
+    --surface: #141821;
+    --surface-2: #1a1f2b;
+    --text: #e8eaf0;
+    --muted: #9aa3b2;
+    --accent: #5eead4;
+    --accent-2: #818cf8;
+    --border: #262c3a;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    font-family: "Segoe UI", system-ui, -apple-system, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    line-height: 1.6;
+  }
+  a { color: inherit; text-decoration: none; }
+
+  /* NAV */
+  nav {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 100;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 2rem;
+    background: rgba(13, 15, 19, 0.85);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--border);
+  }
+  .logo {
+    font-weight: 700;
+    font-size: 1.15rem;
+    letter-spacing: 0.5px;
+  }
+  .logo span { color: var(--accent); }
+  .nav-links { display: flex; gap: 2rem; list-style: none; }
+  .nav-links a {
+    font-size: 0.8rem;
+    letter-spacing: 2px;
+    color: var(--muted);
+    transition: color 0.25s ease;
+  }
+  .nav-links a:hover { color: var(--accent); }
+
+  /* SECTIONS */
+  section { max-width: 1100px; margin: 0 auto; padding: 6rem 2rem 4rem; }
+  .section-label {
+    font-size: 0.75rem;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 0.5rem;
+  }
+  h2 {
+    font-size: 2.2rem;
+    margin-bottom: 2.5rem;
+    background: linear-gradient(90deg, var(--text), var(--accent-2));
+    -webkit-background-clip: text;
+    background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+
+  /* HERO */
+  .hero {
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    padding-top: 8rem;
+  }
+  .hero h1 {
+    font-size: clamp(2.5rem, 6vw, 4.5rem);
+    line-height: 1.1;
+    margin-bottom: 1rem;
+  }
+  .hero h1 em {
+    font-style: normal;
+    color: var(--accent);
+  }
+  .hero p.bio {
+    font-size: 1.25rem;
+    color: var(--muted);
+    max-width: 620px;
+    margin-bottom: 2.5rem;
+  }
+  .hero .cta {
+    display: inline-block;
+    padding: 0.85rem 1.75rem;
+    border: 1px solid var(--accent);
+    color: var(--accent);
+    border-radius: 6px;
+    transition: background 0.25s, color 0.25s, transform 0.25s;
+  }
+  .hero .cta:hover {
+    background: var(--accent);
+    color: var(--bg);
+    transform: translateY(-2px);
+  }
+  .hero-about {
+    max-width: 640px;
+    color: var(--muted);
+    border-left: 3px solid var(--accent);
+    padding-left: 1.25rem;
+    margin-top: 3rem;
+  }
+
+  /* SKILLS */
+  .skills-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+    gap: 1.5rem;
+  }
+  .skill-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.5rem;
+    transition: transform 0.25s ease, border-color 0.25s ease;
+  }
+  .skill-card:hover {
+    transform: translateY(-5px);
+    border-color: var(--accent);
+  }
+  .skill-card h3 {
+    font-size: 1rem;
+    letter-spacing: 1px;
+    text-transform: uppercase;
+    color: var(--text);
+    margin-bottom: 1rem;
+  }
+  .skill-card ul { list-style: none; }
+  .skill-card li {
+    color: var(--muted);
+    padding: 0.3rem 0;
+    font-size: 0.95rem;
+  }
+  .skill-card li::before {
+    content: "▹ ";
+    color: var(--accent);
+  }
+
+  /* PROJECTS */
+  .project {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 2rem;
+    margin-bottom: 1.75rem;
+    display: flex;
+    gap: 2rem;
+    align-items: flex-start;
+    transition: border-color 0.25s ease, transform 0.25s ease;
+  }
+  .project:hover {
+    border-color: var(--accent-2);
+    transform: translateX(4px);
+  }
+  .project .num {
+    font-size: 2.2rem;
+    font-weight: 800;
+    color: transparent;
+    -webkit-text-stroke: 1px var(--accent);
+    line-height: 1;
+    min-width: 70px;
+  }
+  .project h3 { font-size: 1.35rem; margin-bottom: 0.6rem; }
+  .project p { color: var(--muted); margin-bottom: 1rem; font-size: 0.97rem; }
+  .tags { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1.25rem; }
+  .tag {
+    font-size: 0.72rem;
+    letter-spacing: 1px;
+    color: var(--accent);
+    background: rgba(94, 234, 212, 0.08);
+    border: 1px solid rgba(94, 234, 212, 0.3);
+    padding: 0.25rem 0.7rem;
+    border-radius: 999px;
+  }
+  .view-link {
+    font-size: 0.85rem;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--text);
+    border-bottom: 1px solid var(--accent);
+    padding-bottom: 2px;
+    transition: color 0.25s;
+  }
+  .view-link:hover { color: var(--accent); }
+
+  /* CONTACT */
+  #contact h2 { -webkit-text-fill-color: var(--text); background: none; font-size: clamp(1.6rem, 4vw, 2.4rem); }
+  form {
+    max-width: 560px;
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+  }
+  input, textarea {
+    background: var(--surface-2);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.85rem 1rem;
+    color: var(--text);
+    font-family: inherit;
+    font-size: 0.95rem;
+    transition: border-color 0.25s;
+  }
+  input:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  textarea { min-height: 140px; resize: vertical; }
+  button[type="submit"] {
+    align-self: flex-start;
+    background: var(--accent);
+    color: #0d0f13;
+    font-weight: 700;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    font-size: 0.85rem;
+    padding: 0.9rem 1.8rem;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: transform 0.2s, background 0.25s;
+  }
+  button[type="submit"]:hover { background: #7ff5e3; transform: translateY(-2px); }
+  .form-msg { color: var(--accent); font-size: 0.95rem; min-height: 1.4rem; }
+
+  /* FOOTER */
+  footer {
+    border-top: 1px solid var(--border);
+    text-align: center;
+    padding: 2rem;
+    color: var(--muted);
+    font-size: 0.85rem;
+    letter-spacing: 1px;
+  }
+  footer span { color: var(--accent); }
+
+  @media (max-width: 640px) {
+    .nav-links { gap: 1rem; }
+    .nav-links a { letter-spacing: 1px; font-size: 0.7rem; }
+    .project { flex-direction: column; gap: 0.75rem; }
+    section { padding: 4.5rem 1.25rem 3rem; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="logo">alex<span>doe</span>.dev</div>
+  <ul class="nav-links">
+    <li><a href="#about">ABOUT ME</a></li>
+    <li><a href="#skills">SKILLSET</a></li>
+    <li><a href="#projects">PROJECTS</a></li>
+    <li><a href="#contact">CONTACT</a></li>
+  </ul>
+</nav>
+
+<section class="hero" id="about">
+  <p class="section-label">Hello, I'm</p>
+  <h1>Alex <em>Doe</em></h1>
+  <p class="bio">Full stack Web developer with 6+ years of experience building fast, scalable products from pixel to database.</p>
+  <a href="#projects" class="cta">See my work →</a>
+  <div class="hero-about">
+    <p>
+      About Me: I'm a full stack developer who loves shipping clean, maintainable code and thoughtful user experiences.
+      Over the last six years I've worked with startups and established teams to design APIs, build modern web apps,
+      and deploy resilient infrastructure in the cloud.
+    </p>
+  </div>
+</section>
+
+<section id="skills">
+  <p class="section-label">What I work with</p>
+  <h2>Skillset</h2>
+  <div class="skills-grid">
+    <div class="skill-card">
+      <h3>Languages</h3>
+      <ul>
+        <li>TypeScript</li>
+        <li>JavaScript</li>
+        <li>Python</li>
+        <li>SQL</li>
+      </ul>
+    </div>
+    <div class="skill-card">
+      <h3>Libraries &amp; Frameworks</h3>
+      <ul>
+        <li>React</li>
+        <li>Next.js</li>
+        <li>Tailwind CSS</li>
+        <li>Node.js</li>
+      </ul>
+    </div>
+    <div class="skill-card">
+      <h3>Databases</h3>
+      <ul>
+        <li>PostgreSQL</li>
+        <li>MongoDB</li>
+        <li>Redis</li>
+      </ul>
+    </div>
+    <div class="skill-card">
+      <h3>Developer Tools &amp; Other</h3>
+      <ul>
+        <li>Docker</li>
+        <li>Git</li>
+        <li>AWS</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="projects">
+  <p class="section-label">Selected work</p>
+  <h2>Projects</h2>
+
+  <article class="project">
+    <div class="num">01</div>
+    <div>
+      <h3>Nimbus Analytics</h3>
+      <p>A real-time analytics dashboard that ingests millions of events per day and renders live charts with sub-second latency. I designed the event pipeline and built the frontend from scratch for a fintech client.</p>
+      <div class="tags">
+        <span class="tag">Next.js</span><span class="tag">TypeScript</span><span class="tag">PostgreSQL</span><span class="tag">Redis</span><span class="tag">AWS</span>
+      </div>
+      <a href="#" class="view-link">View Project</a>
+    </div>
+  </article>
+
+  <article class="project">
+    <div class="num">02</div>
+    <div>
+      <h3>Cartful</h3>
+      <p>A headless e-commerce platform with a customizable storefront builder and a blazing-fast checkout. It powers over 200 small businesses and handles inventory, payments, and order fulfilment in one place.</p>
+      <div class="tags">
+        <span class="tag">React</span><span class="tag">Node.js</span><span class="tag">MongoDB</span><span class="tag">Tailwind CSS</span><span class="tag">Docker</span>
+      </div>
+      <a href="#" class="view-link">View Project</a>
+    </div>
+  </article>
+
+  <article class="project">
+    <div class="num">03</div>
+    <div>
+      <h3>PulseBoard</h3>
+      <p>An async stand-up and team health tracker that replaces daily meetings with structured updates and sentiment analysis. Built as a PWA with offline support and a Python-based NLP microservice.</p>
+      <div class="tags">
+        <span class="tag">React</span><span class="tag">Python</span><span class="tag">PostgreSQL</span><span class="tag">Docker</span><span class="tag">AWS</span>
+      </div>
+      <a href="#" class="view-link">View Project</a>
+    </div>
+  </article>
+</section>
+
+<section id="contact">
+  <p class="section-label">Get in touch</p>
+  <h2>Now, let's build something amazing!</h2>
+  <form id="contact-form" novalidate>
+    <input type="text" name="name" placeholder="Your name" required />
+    <input type="email" name="email" placeholder="Your email" required />
+    <textarea name="message" placeholder="Your message" required></textarea>
+    <button type="submit">Send a message</button>
+    <p class="form-msg" id="form-msg" role="status"></p>
+  </form>
+</section>
+
+<footer>
+  <p>alexdoe.dev | 2026 © &nbsp;·&nbsp; Built with <span>♥</span> by <span>Alex Doe</span></p>
+</footer>
+
+<script>
+  document.getElementById("contact-form").addEventListener("submit", function (e) {
+    e.preventDefault();
+    document.getElementById("form-msg").textContent = "Your message has been sent!";
+    this.reset();
+  });
+
+  // Reveal-on-scroll animation for cards
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach((entry) => {
+      if (entry.isIntersecting) {
+        entry.target.style.opacity = "1";
+        entry.target.style.transform = "translateY(0)";
+        observer.unobserve(entry.target);
+      }
+    });
+  }, { threshold: 0.1 });
+
+  document.querySelectorAll(".skill-card, .project").forEach((el) => {
+    el.style.opacity = "0";
+    el.style.transform = "translateY(20px)";
+    el.style.transition = "opacity 0.6s ease, transform 0.6s ease";
+    observer.observe(el);
+  });
+</script>
+
+</body>
+</html>
