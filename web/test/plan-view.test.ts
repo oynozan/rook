@@ -44,9 +44,9 @@ test('each row says what happens if no agent delivers, which files it edits, and
   assert.equal(editLine({}), null);
   assert.equal(editLine({ inputs: [] }), null);
 
-  // An agent promising 24 h still gets 30 min from Rook (its SLA plus 10 min, at most 30), and every candidate is tried.
-  assert.equal(timeLine({ self_do: false, candidates: [agent('a', '1', 86_400)] }), 'The agent gets up to 30 min to deliver.');
-  assert.equal(timeLine({ self_do: false, candidates: [agent('a', '1', 300), agent('b', '1', 600), agent('c', '1', 60)] }), 'Each agent gets up to 20 min to deliver; up to 3 agents are tried.');
+  // An agent promising 24 h still gets 12 min from Rook (its SLA plus 10 min, at most 12), and every candidate is tried.
+  assert.equal(timeLine({ self_do: false, candidates: [agent('a', '1', 86_400)] }), 'The agent gets up to 12 min to deliver.');
+  assert.equal(timeLine({ self_do: false, candidates: [agent('a', '1', 30), agent('b', '1', 60), agent('c', '1', 0)] }), 'Each agent gets up to 11 min to deliver; up to 3 agents are tried.');
   assert.equal(timeLine({ self_do: true, candidates: [] }), null);
 });
 

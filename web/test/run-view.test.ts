@@ -25,9 +25,10 @@ const plan: PlanView = {
 const s2 = plan.subtasks[1];
 const words = (events: RookEvent[], s: number, hires: HireView[] = []) => phaseWords(phaseOf(s2, events, hires).phase, clock(s), s2.title);
 
-test('Rook waits on a hire for its SLA plus 10 minutes, at most 30 minutes', () => {
-  assert.equal(patienceS(600), 1200);
-  assert.equal(patienceS(3600), 1800);
+test('Rook waits on a hire for its SLA plus 10 minutes, at most 12 minutes', () => {
+  assert.equal(patienceS(60), 660);
+  assert.equal(patienceS(600), 720);
+  assert.equal(patienceS(3600), 720);
   assert.equal(patienceS(0), 600);
 });
 
@@ -46,18 +47,18 @@ test('the status says what Rook is doing on a part: its price, its send, the wai
   events.push(ev(60, 'hire_sent', 's2', { agent_handle: 'codex-engineer-01', hire_id: 'h2' }));
   events.push(ev(61, 'subtask_status', 's2', { from: 'quoting', to: 'working' }));
   events.push(ev(62, 'a2a_state', 's2', { agent_handle: 'codex-engineer-01', hire_id: 'h2', state: 'SUBMITTED' }));
-  // 12 minutes in, of the 30 Rook gives it (SLA 1 h, capped). The snapshot's started_at is when it began.
-  assert.deepEqual(words(events, 60 + 12 * 60 + 30).line, { state: 'analyzing', label: 'Waiting on codex-engineer-01', detail: '12 of 30 min' });
-  assert.equal(words(events, 12 * 60, [{ id: 'h2', agent_handle: 'codex-engineer-01', deliverable_text: null, started_at: at(0) }]).line?.detail, '12 of 30 min');
+  // 5 minutes in, of the 12 Rook gives it (SLA 1 h, capped). The snapshot's started_at is when it began.
+  assert.deepEqual(words(events, 60 + 5 * 60 + 30).line, { state: 'analyzing', label: 'Waiting on codex-engineer-01', detail: '5 of 12 min' });
+  assert.equal(words(events, 5 * 60, [{ id: 'h2', agent_handle: 'codex-engineer-01', deliverable_text: null, started_at: at(0) }]).line?.detail, '5 of 12 min');
   assert.equal(words(events, 70).status, 'codex-engineer-01 is working on it');
   // Past its time: Rook cancels it and takes one last look.
-  assert.deepEqual(words(events, 60 + 30 * 60).line, { state: 'analyzing', label: 'Giving up on codex-engineer-01', detail: 'nothing in 30 min' });
+  assert.deepEqual(words(events, 60 + 12 * 60).line, { state: 'analyzing', label: 'Giving up on codex-engineer-01', detail: 'nothing in 12 min' });
   // Timed out: "Moving on" until its payment is released, however long that takes on NEAR (13 minutes on mainnet).
-  events.push(ev(60 + 30 * 60 + 5, 'a2a_state', 's2', { agent_handle: 'codex-engineer-01', hire_id: 'h2', state: 'TIMEOUT' }));
-  assert.equal(words(events, 60 + 43 * 60).line?.label, 'Moving on from codex-engineer-01');
-  events.push(ev(60 + 44 * 60, 'ledger', 's2', { op: 'release', agent_handle: 'codex-engineer-01', settled: false }));
+  events.push(ev(60 + 12 * 60 + 5, 'a2a_state', 's2', { agent_handle: 'codex-engineer-01', hire_id: 'h2', state: 'TIMEOUT' }));
+  assert.equal(words(events, 60 + 25 * 60).line?.label, 'Moving on from codex-engineer-01');
+  events.push(ev(60 + 26 * 60, 'ledger', 's2', { op: 'release', agent_handle: 'codex-engineer-01', settled: false }));
   // Every candidate tried: nothing specific is known until Rook says what it does next.
-  assert.deepEqual(words(events, 60 + 44 * 60), { status: 'Finding the next agent', line: null });
+  assert.deepEqual(words(events, 60 + 26 * 60), { status: 'Finding the next agent', line: null });
   // Asked again after the market said "no reachable backend": at what time, in the reader's zone.
   events.push(ev(3600, 'error', 's2', { kind: 'unreachable_retry', agent_handle: 'dev-tools-agent', message: 'x' }));
   assert.equal(words(events, 3610).line?.label, 'Asking dev-tools-agent again at 13:03');
@@ -97,7 +98,7 @@ test('the run status line: the part that moved last, how many others are under w
   const parts = partViews(plan, undefined, events, clock(65), false);
   assert.deepEqual(nowLine(parts), { state: 'researching', label: "Getting taifoon-creative's price", detail: 'and 2 other parts' });
   // The lone working part: its time used.
-  assert.deepEqual(nowLine(partViews(plan, undefined, events.slice(0, 1), clock(65), false)), { state: 'analyzing', label: 'Waiting on taifoon-creative', detail: '1 of 20 min' });
+  assert.deepEqual(nowLine(partViews(plan, undefined, events.slice(0, 1), clock(65), false)), { state: 'analyzing', label: 'Waiting on taifoon-creative', detail: '1 of 12 min' });
   // Nothing specific anywhere: the page falls back to "Lining up the next hire".
   assert.equal(nowLine(partViews(plan, undefined, [], clock(0), false)), null);
   // A finished task says nothing is under way, whatever its last events were.
@@ -132,7 +133,7 @@ test('each part: its status, the agent on it now, every agent tried and what cam
   assert.equal(p1.tone, 'idle');
   assert.equal(p2.status, 'dev-tools-agent is working on it');
   assert.equal(p2.brief, 'Brief for Build one-page portfolio website');
-  assert.deepEqual(p2.working, { agent: 'dev-tools-agent', since: T0 + 3790_000, until: T0 + (3790 + 1800) * 1000 });
+  assert.deepEqual(p2.working, { agent: 'dev-tools-agent', since: T0 + 3790_000, until: T0 + (3790 + 720) * 1000 });
   assert.deepEqual(p2.tried, [
     { key: 'q1', agent: 'pricey-agent', outcome: 'Skipped: its price went up from 0.10 to 0.15 USDC since you approved the plan', tone: 'muted' },
     { key: 'h1', agent: 'dev-tools-agent', outcome: "Couldn't take the job", tone: 'muted', money: 'Not paid' },

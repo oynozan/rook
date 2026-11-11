@@ -637,6 +637,8 @@ export const FAR_PRICE = 10n;
 // ponytail: waiting is priced at one flat rate for every user and part, 1 USDC an hour; a per-user value of time, or a
 // "cheapest first" choice, is the ceiling.
 const WAIT_ATOMIC_PER_HOUR = 1_000_000n;
+/** Failures counted before any record: p_pass = 1 / (1 + 9) = 0.1 for an agent no one has seen deliver (rank). */
+const NO_RECORD_FAILS = 9;
 
 const far = (c: Candidate, lead: Candidate) => price(c) > FAR_PRICE * price(lead);
 
@@ -699,7 +701,10 @@ function quotedCandidates(agents: AgentListing[], quotes: Record<string, QuoteRe
 
 /**
  * p_pass = (successes + 1) / (jobs + 2) (Laplace) over the market's record plus Rook's own verdicts on this agent, and
- * expected cost = price / p_pass: what Rook pays per passing deliverable on average. With no record at all p_pass is 0.5.
+ * expected cost = price / p_pass: what Rook pays per passing deliverable on average. With no record at all p_pass is
+ * 0.1, the rate measured on mainnet (2026-11-11): agents with no market record delivered 2 of 23 paid hires, agents
+ * with one 14 of 17. Laplace's 0.5 had such an agent lead a proven one to save cents, then hold the part to the end of
+ * Rook's patience. ponytail: a fixed rate from one day's hires; learn it from Rook's own history as it grows.
  * The rank also counts time: each failed try holds the part `wait_s`, priced at WAIT_ATOMIC_PER_HOUR, and Rook expects
  * (1 - p) / p failed tries per pass. An agent that has delivered somewhere (market jobs or Rook's verdicts) fails in its
  * usual time (the market's median, else its SLA); one that never delivered anywhere may never show, so a try waits out
@@ -716,17 +721,20 @@ function rank(a: AgentListing, price: string, own: AgentHistory | undefined) {
   const mPass = known ? Math.min(mJobs, Math.round((Math.min(100, Math.max(0, a.success_rate!)) * mJobs) / 100)) : 0;
   const rPass = own?.pass ?? 0, rJobs = rPass + (own?.fail ?? 0);
   const s = mPass + rPass, n = mJobs + rJobs;
-  // price / p = price * (n + 2) / (s + 1), rounded up in integers: money never goes through a float.
-  const expected = (BigInt(price) * BigInt(n + 2) + BigInt(s)) / BigInt(s + 1);
-  const p_pass = Math.min(1, Math.round(((s + 1) * 1000) / (n + 2)) / 1000); // 201 / 400 = 0.5025 -> 0.503, same reason
+  // Never delivered anywhere: the measured base rate (NO_RECORD_FAILS), not Laplace's 0.5: p = (s + 1) / (n + 1 + b).
+  // Market jobs with no pass rate still count as a record: such an agent delivers, at an unknown rate.
+  const b = jobs === 0 && rJobs === 0 ? NO_RECORD_FAILS : 1;
+  // price / p = price * (n + 1 + b) / (s + 1), rounded up in integers: money never goes through a float.
+  const expected = (BigInt(price) * BigInt(n + 1 + b) + BigInt(s)) / BigInt(s + 1);
+  const p_pass = Math.min(1, Math.round(((s + 1) * 1000) / (n + 1 + b)) / 1000); // 201 / 400 = 0.5025 -> 0.503, same reason
   const proven = jobs > 0 || rJobs > 0;
   const sla = Number.isFinite(a.sla_seconds) ? Math.max(0, a.sla_seconds) : config.hirePatienceS;
   const patience = Math.min(sla + config.paymentGraceS, config.hirePatienceS); // the orchestrator's slaEnd
   const usual = a.response_s !== undefined && Number.isFinite(a.response_s) && a.response_s > 0 ? a.response_s : sla;
   const wait_s = Math.ceil(proven ? Math.min(usual, patience) : patience);
-  // (1 - p) / p = (n - s + 1) / (s + 1) failed tries per pass, each holding the part wait_s; rounded up, as above.
+  // (1 - p) / p = (n - s + b) / (s + 1) failed tries per pass, each holding the part wait_s; rounded up, as above.
   const den = 3600n * BigInt(s + 1);
-  const waiting = (WAIT_ATOMIC_PER_HOUR * BigInt(wait_s) * BigInt(n - s + 1) + den - 1n) / den;
+  const waiting = (WAIT_ATOMIC_PER_HOUR * BigInt(wait_s) * BigInt(n - s + b) + den - 1n) / den;
   const counted = [mJobs > 0 && `market ${mPass} of ${mJobs}`, !known && jobs > 0 && `${jobs} market ${jobs === 1 ? 'job' : 'jobs'} with no pass rate`, rJobs > 0 && `Rook ${rPass} of ${rJobs}`];
   // "No record yet" beside "5 recent hires failed" read as a contradiction: stalls are jobs that never finished.
   const record = counted.filter(Boolean).join(', ') || ((own?.stalled ?? 0) > 0 ? 'no finished job yet' : 'no record yet');

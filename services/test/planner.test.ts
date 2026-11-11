@@ -103,7 +103,7 @@ test('a 1-day payment window (87000 s, the market default) is kept; one over ROO
     assert.deepEqual(p.subtasks[0].candidates.map((c) => c.handle).sort(), ['a-day', 'four-hours']);
     assert.ok(p.notes.includes('"a": quote from two-weeks dropped: payment window 1210200 s is not from 1 to 90000 s (ROOK_MAX_PAYMENT_TIMEOUT_S)'), p.notes.join(String.fromCharCode(10)));
     assert.ok(p.notes.some((n) => n.includes('fraction') && n.includes('60.5 s')));
-    assert.equal(p.subtasks[0].deadline_s, 1800); // Rook waits at most ROOK_HIRE_PATIENCE_S, not the advertised day
+    assert.equal(p.subtasks[0].deadline_s, 720); // Rook waits at most ROOK_HIRE_PATIENCE_S, not the advertised day
     process.env.ROOK_MAX_PAYMENT_TIMEOUT_S = '15000';
     assert.deepEqual(plan().subtasks[0].candidates.map((c) => c.handle), ['four-hours']);
   } finally {
@@ -622,16 +622,19 @@ test('halves round up exactly: market successes and p_pass have no float drift',
   assert.match(c.rank_reason, /\(market 15 of 50, Rook 185 of 348\)/);
 });
 
-test('no record at all gives p_pass 0.5; ties break on p_pass, delivered jobs, then handle', () => {
+test('no pass rate gives p_pass 0.5, never having delivered gives the measured 0.1; ties break on p_pass, delivered jobs, then handle', () => {
   const p = buildPlan(input({
     draft: [sub('a')],
-    selected: [[agent('new-b', { success_rate: null, delivered_jobs: 30 }), agent('new-a', { success_rate: null, delivered_jobs: 0 })]],
-    quotes: { 'new-a': row('100000'), 'new-b': row('100000') },
+    selected: [[agent('new-c', { success_rate: null, delivered_jobs: 0 }), agent('new-b', { success_rate: null, delivered_jobs: 30 }), agent('new-a', { success_rate: null, delivered_jobs: 3 })]],
+    quotes: { 'new-a': row('100000'), 'new-b': row('100000'), 'new-c': row('100000') },
   }));
   const cs = p.subtasks[0].candidates;
-  assert.ok(cs.every((c) => c.p_pass === 0.5 && c.expected_cost_atomic === '200000'));
-  assert.deepEqual(cs.map((c) => c.handle), ['new-b', 'new-a']); // more delivered jobs first at equal expected cost
-  assert.equal(cs[1].rank_reason, '0.10 USDC / 0.5 pass chance (no record yet) = 0.20 USDC expected');
+  assert.ok(cs.slice(0, 2).every((c) => c.p_pass === 0.5 && c.expected_cost_atomic === '200000'));
+  assert.deepEqual(cs.map((c) => c.handle), ['new-b', 'new-a', 'new-c']); // more delivered jobs first at equal expected cost
+  assert.equal(cs[1].rank_reason, '0.10 USDC / 0.5 pass chance (3 market jobs with no pass rate) = 0.20 USDC expected');
+  // Agents with no market record delivered 2 of 23 paid mainnet hires (2026-11-11): 0.1, not Laplace's 0.5.
+  assert.deepEqual([cs[2].p_pass, cs[2].expected_cost_atomic], [0.1, '1000000']);
+  assert.equal(cs[2].rank_reason, '0.10 USDC / 0.1 pass chance (no record yet) = 1.00 USDC expected');
 });
 
 test('caps never fall below the first-ranked price, and the drop rule follows rank, not price', () => {

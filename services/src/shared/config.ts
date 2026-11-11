@@ -94,8 +94,10 @@ export const config = {
   /**
    * How long Rook waits for one hire to deliver before it sends CancelTask and moves on (when the agent accepts the
    * cancel): its SLA + ROOK_PAYMENT_GRACE_S, at most this. An advertised 1-day SLA must not hold a run for a day.
+   * 12 min: on mainnet (2026-11-11) all 16 of 28 paid hires that delivered did so within 527 s, most in 1 to 3 min, and
+   * none of the other 12 ever did, so waiting 30 min only held a simple task 30 min before Rook wrote it itself.
    */
-  get hirePatienceS() { return num('ROOK_HIRE_PATIENCE_S', 1_800); },
+  get hirePatienceS() { return num('ROOK_HIRE_PATIENCE_S', 720); },
   /** How long Rook waits before asking an agent again whose backend was unreachable (-32603), once. */
   get unreachableRetryS() { return num('ROOK_UNREACHABLE_RETRY_S', 180); },
 
