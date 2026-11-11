@@ -11,7 +11,7 @@ import type { AgentSummary } from '../src/shared/types.ts';
 import type { ListingDetail } from '../src/market-gateway/index.ts';
 
 const plan = await import('../src/planner/plan.ts');
-const { buildPlan, draftProblems, placeholdersIn, placeholderQuestions, Draft, unfit, prefilter, goodRecord, nearAccountIds, replaceAccount, fixAccounts, keepCriteria, carryParts, inputsBlocked, INPUTS_MAX_BYTES } = plan;
+const { buildPlan, draftProblems, placeholdersIn, placeholderQuestions, Draft, unfit, prefilter, goodRecord, nearAccountIds, replaceAccount, fixAccounts, keepCriteria, carryParts, inputsBlocked, INPUTS_MAX_BYTES, ROOK_EDIT_MAX_CHARS } = plan;
 type PlanInput = import('../src/planner/plan.ts').PlanInput;
 type DraftSubtask = import('../src/planner/plan.ts').DraftSubtask;
 type QuoteResult = import('../src/planner/plan.ts').QuoteResult;
@@ -281,6 +281,25 @@ test('a plan of Rook edits only has no budget figures at all', () => {
   // One hire beside it keeps the budget as before.
   const mixed = buildPlan(input({ budget_atomic: 1_000_000n, files: ['index.html'], draft: [sub('Rename', { self_do_ok: true, rook_edit: true, inputs: ['index.html'] }), sub('Logo')], selected: [[], [agent('a')]], quotes: { a: row('100000') } }));
   assert.equal(mixed.budget.budget_atomic, '1000000');
+});
+
+test('a Rook edit of large files is hired, or done by Rook as any other part, with a note saying why', () => {
+  // QA: a rename over 115,418 characters, made by Rook at once, came back cut off and lost 62% of games.html.
+  const rename = sub('Rename', { brief: 'Rename\n\nChange the title to Chess Through Time.', self_do_ok: true, rook_edit: true, inputs: ['index.html', 'games.html'] });
+  const files = ['index.html', 'games.html'];
+  const sized = (games: number) => new Map([['index.html', 1000], ['games.html', games]]);
+  const at = buildPlan(input({ files, sizes: sized(ROOK_EDIT_MAX_CHARS - 1000), draft: [rename] }));
+  assert.equal(at.subtasks[0].self_do_reason, 'rook_edit'); // up to the cap, the files counted together
+  const hired = buildPlan(input({ files, sizes: sized(ROOK_EDIT_MAX_CHARS), draft: [rename], selected: [[agent('editor')]], quotes: { editor: row('100000') } }));
+  assert.deepEqual([hired.subtasks[0].self_do, hired.subtasks[0].candidates.map((c) => c.handle)], [false, ['editor']]);
+  assert.ok(hired.notes.includes(`"Rename" is not a Rook edit: its files come to ${ROOK_EDIT_MAX_CHARS + 1000} characters, more than the ${ROOK_EDIT_MAX_CHARS} Rook edits itself at once`), hired.notes.join('\n'));
+  const own = buildPlan(input({ files, sizes: sized(ROOK_EDIT_MAX_CHARS), draft: [rename] }));
+  assert.equal(own.subtasks[0].self_do_reason, 'no_agent'); // no agent: Rook writes it, as any part it may write
+});
+
+test('a part keeps the market category the draft named, when Rook knows it, so a plan that carries it lists it again', () => {
+  const p = buildPlan(input({ draft: [sub('Site', { category: 'dev_tools', self_do_ok: true }), sub('Logo', { category: 'logos', self_do_ok: true })] }));
+  assert.deepEqual(p.subtasks.map((s) => s.category), ['dev_tools', undefined]);
 });
 
 // ---- #19: files over what Rook sends block funding ----
@@ -565,6 +584,9 @@ test('POST /plan: Rook edits only take no money, whatever the message names; fil
   draft = [sub('Rename games', { brief: 'Rename games\n\nChange the title to Chess Through Time.', self_do_ok: true, rook_edit: true, inputs: ['games.html'] })];
   const blocked = await h.plan({ prompt: 'Rename the games page too', conversation });
   assert.equal(blocked.blocked, 'The files "Rename games" works on come to 301 KB, more than the 300 KB Rook can send with one part, so this plan can\'t run as it is. Ask for a change to fewer or smaller files.');
+  // Files that large are no edit Rook makes at once: the part is searched for like any other (the planner sends sizes).
+  assert.deepEqual([h.searched.includes('Rename'), h.searched.includes('Rename games')], [false, true]);
+  assert.notEqual(blocked.subtasks[0].self_do_reason, 'rook_edit');
 });
 
 test('POST /plan: a budget named in Turkish is planned at; one the message does not name is refused in plain words', async (t) => {

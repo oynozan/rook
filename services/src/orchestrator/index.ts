@@ -25,6 +25,8 @@ const CreateBody = z.object({
   supersedes: z.string().min(1).max(64).optional(), // the newest message, sent again or edited: this one takes its place
 });
 
+/** The share of the budget the planner holds back for re-hires before it hires anyone, unless the caller names one. */
+const DEFAULT_RESERVE_SHARE = 0.2;
 /** A plan made at a total budget the message never names (the planner's model read one into it): never kept. */
 export const BUDGET_NOT_NAMED = "Rook's planner set a budget your message doesn't name, so this plan wasn't kept. Send your message again.";
 /** A message about a deleted conversation, for a caller naming no owner (an owner gets 404). */
@@ -37,7 +39,9 @@ const named = (names: string[]) => names.length > 5 ? `${names.slice(0, 5).join(
  * What the planner gets with a follow-up: the earlier messages (the first and the newest when there are too many), the
  * newest report in the conversation cut to size, the chat's current files whole (workspaceOf: they travel apart from
  * the report, so a follow-up works on the complete work), what Rook asked when the message answers it, and, for a
- * revision, the parts of the plan it changes as the user saw them. `revises`: the plan this message changes, if any.
+ * revision, the parts of the plan it changes as the user saw them, with what the planner keeps of each: its criteria,
+ * search terms, category, inputs, whether Rook may write it and why Rook does it. `revises`: the plan this message
+ * changes, if any.
  */
 export function conversationFor(chain: Task[], revises: Task | null, ws = workspaceOf(chain)): Conversation {
   const prompts = chain.map((x) => x.prompt).reverse();
@@ -54,7 +58,13 @@ export function conversationFor(chain: Task[], revises: Task | null, ws = worksp
   if (ws.files.length) c.files = ws.files.map((f) => ({ path: f.name, text: f.text }));
   const questions = questionsFor(chain);
   if (questions?.length) c.questions = questions;
-  if (revises?.subtasks.length) c.plan = revises.subtasks.slice(0, 10).map((s) => ({ title: s.title, brief: s.brief }));
+  if (revises?.subtasks.length) {
+    c.plan = revises.subtasks.slice(0, 10).map((s) => ({
+      title: s.title, brief: s.brief, criteria: s.criteria, search_terms: s.search_terms,
+      ...(s.category ? { category: s.category } : {}), ...(s.self_do_ok !== undefined ? { self_do_ok: s.self_do_ok } : {}),
+      ...(s.inputs?.length ? { inputs: s.inputs } : {}), ...(s.self_do_reason ? { self_do_reason: s.self_do_reason } : {}),
+    }));
+  }
   return c;
 }
 
@@ -283,7 +293,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       const revises = openPlan(above) ?? replaced;
       const ws = workspaceOf(above);
       const conversation = parent ? conversationFor(above, revises, ws) : undefined;
-      const t = newTask(b.prompt, budget, b.reserve_share ?? 0.2, b.owner ?? null, parent?.id ?? null);
+      const t = newTask(b.prompt, budget, b.reserve_share ?? DEFAULT_RESERVE_SHARE, b.owner ?? null, parent?.id ?? null);
       if (conversation) t.earlier_prompts = conversation.earlier;
       // What its parts' inputs are attached from, and its report's files start from. ponytail: the task doc carries it,
       // so each save writes it again (up to CONVERSATION_FILES_CHARS); a table of files keyed by content would end that.
@@ -335,7 +345,8 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
           }
           if (!plan.subtasks.length) {
             // Every part was dropped: nothing can be approved, so the task ends here, keeping the plan for its drop list.
-            t.error = emptyPlanReason(plan.dropped);
+            // The budget that would hire one is worked out at the reserve share the planner was sent (setPlan replaced it).
+            t.error = emptyPlanReason(plan.dropped, b.reserve_share ?? DEFAULT_RESERVE_SHARE);
             emit(t, 'error', { kind: 'no_plan', message: t.error });
             setStatus(t, 'failed');
             return;
@@ -544,13 +555,36 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
   };
 }
 
-/** Why a plan with no subtasks can't run, in plain words, from its drop reasons (plan.ts buildPlan). */
-export function emptyPlanReason(dropped: Plan['dropped']): string {
+/**
+ * Why a plan with no subtasks can't run, in plain words, from its drop reasons (plan.ts buildPlan). When every part
+ * costs more than the budget and each says what its cheapest agent asks (need_atomic), it names those prices and the
+ * budget that would hire one for each, in the web app's words (web/src/lib/planner.ts selfDoWhy), never past the
+ * largest budget Rook takes. `reserveShare`: the share of the budget the planner held back before hiring.
+ */
+export function emptyPlanReason(dropped: Plan['dropped'], reserveShare = DEFAULT_RESERVE_SHARE): string {
   const over = dropped.some((d) => d.reason === 'over budget');
   const none = dropped.some((d) => d.reason !== 'over budget');
   if (over && none) return 'No agent on the market can do some parts of this task, and the others cost more than this budget allows.';
-  if (over) return 'Every part costs more than this budget allows; try a larger budget.';
-  return 'No agent on the market can do any part of this task.';
+  if (!over) return 'No agent on the market can do any part of this task.';
+  const needs = dropped.map((d) => (/^\d+$/.test(d.need_atomic ?? '') ? BigInt(d.need_atomic!) : null));
+  if (needs.some((n) => n === null || n <= 0n)) return 'Every part costs more than this budget allows; try a larger budget.';
+  const prices = (needs as bigint[]).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const budget = budgetToHire(prices.reduce((a, b) => a + b, 0n), reserveShare), max = config.maxBudgetAtomic;
+  const whom = prices.length === 1 ? 'one' : 'one for each part';
+  const hire = budget > max ? `Even the largest budget Rook takes, ${formatUsdc(max)} USDC, is too small to hire ${whom}.` : `A budget of about ${formatUsdc(budget)} USDC would hire ${whom}.`;
+  if (prices.length === 1) return `The cheapest agent found for this part asks ${formatUsdc(prices[0])} USDC, more than this budget allows. ${hire}`;
+  const [least, most] = [prices[0], prices[prices.length - 1]];
+  return `Every part costs more than this budget allows: the cheapest agents found for them ask ${least === most ? formatUsdc(least) : `${formatUsdc(least)} to ${formatUsdc(most)}`} USDC. ${hire}`;
+}
+
+/**
+ * The least budget that leaves `need` (atomic USDC) to hire with once the planner holds back `reserveShare` of it, rounded
+ * up to a cent: the web app's budgetFor (web/src/lib/planner.ts), at any share.
+ */
+function budgetToHire(need: bigint, reserveShare: number): bigint {
+  const keep = 1_000_000n - BigInt(Math.round(reserveShare * 1_000_000)); // money.ts share(), in millionths
+  const budget = (need * 1_000_000n + keep - 1n) / keep;
+  return ((budget + 9_999n) / 10_000n) * 10_000n;
 }
 
 /** Contract caps in plan order (self_do subtasks have none), Rook n -> contract n, and the reserve the contract will compute. */

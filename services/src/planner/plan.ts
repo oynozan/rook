@@ -3,7 +3,7 @@
 import { Ajv } from 'ajv';
 import { z } from 'zod';
 import { config } from '../shared/config.ts';
-import { AcceptsRow, CONVERSATION_FILES, Criterion, type AgentHistory, type AgentSummary, type Candidate, type Plan, type PlanSubtask, type SelfDoReason, type WorkFile, type X402Config } from '../shared/types.ts';
+import { AcceptsRow, CONVERSATION_FILES, CONVERSATION_FILES_CHARS, Criterion, type AgentHistory, type AgentSummary, type Candidate, type Plan, type PlanPart, type PlanSubtask, type SelfDoReason, type WorkFile, type X402Config } from '../shared/types.ts';
 import { formatUsdc, parseUsdc, share } from '../shared/money.ts';
 import type { AgentListing } from '../market-gateway/index.ts';
 
@@ -33,15 +33,16 @@ export const DraftSubtask = z.object({
 const isUsdc = (v: number | string) => { try { parseUsdc(v); return true; } catch { return false; } };
 export const MAX_QUESTIONS = 5;
 export const MAX_ASSUMPTIONS = 5;
-const lines = (n: number, what: string) => z.array(z.string().trim().min(1).max(400)).max(n, `at most ${n} ${what}`).nullish();
+// The draft lists the most important first: past n the rest is left out, never a draft asked again for it.
+const lines = (n: number) => z.array(z.string().trim().min(1).max(400)).transform((l) => l.slice(0, n)).nullish();
 // No subtasks only with `not_a_task` (the message is not a task to plan: "go ahead", "hi"; that sentence says why) or
 // with `questions` (facts only the user can give are missing). `budget_usdc`: the total budget the message itself
 // names ("make it 1 USDC"), in USDC; absent when it names none. `action`: the task is an action in the world (Plan.action).
 export const Draft = z.object({
   subtasks: z.array(DraftSubtask).max(5),
   not_a_task: z.string().optional(),
-  questions: lines(MAX_QUESTIONS, 'questions'),
-  assumptions: lines(MAX_ASSUMPTIONS, 'assumptions'),
+  questions: lines(MAX_QUESTIONS),
+  assumptions: lines(MAX_ASSUMPTIONS),
   budget_usdc: z.union([z.number(), z.string()]).nullish()
     .refine((v) => v == null || isUsdc(v), 'budget_usdc must be an amount of USDC such as 1.5, with at most 6 decimals'),
   action: z.boolean().nullish(),
@@ -163,8 +164,24 @@ const LINK_ONLY = /^(live)?url(https?s?)?$/;
 const linkOnly = (pattern: unknown) => typeof pattern === 'string' && LINK_ONLY.test(pattern.toLowerCase().replace(/[^a-z]/g, ''));
 /** Rook can write a part itself unless it must be deployed: no model output can pass a live link check. */
 const writable = (d: DraftSubtask) => d.self_do_ok && !isDeploy(d);
-/** A small edit Rook makes itself at once, with no agent fee and no wait: it needs files of this conversation to edit. */
-export const isRookEdit = (d: DraftSubtask, files: string[]) => !!d.rook_edit && writable(d) && inputsOf(d, files).kept.length > 0;
+/**
+ * The most characters the files of a Rook edit may hold, a sixth of CONVERSATION_FILES_CHARS. Rook's writer gives back
+ * every file it changes whole, at about 3 characters a token, so an edit of more is neither small nor quick, and its reply
+ * nears the writer's output limit (a rename over 115,418 characters was cut off and lost 62% of games.html). Past it the
+ * part is hired, or self-done as any other part.
+ */
+export const ROOK_EDIT_MAX_CHARS = CONVERSATION_FILES_CHARS / 6;
+/** The characters a part's input files hold, from `sizes` (characters by path; a path it lacks counts 0). */
+const inputChars = (paths: string[], sizes: ReadonlyMap<string, number>) => paths.reduce((n, p) => n + (sizes.get(p) ?? 0), 0);
+/**
+ * A small edit Rook makes itself at once, with no agent fee and no wait: it needs files of this conversation to edit,
+ * at most ROOK_EDIT_MAX_CHARS of them in all. `sizes`: the characters of each file, by path.
+ */
+export const isRookEdit = (d: DraftSubtask, files: string[], sizes: ReadonlyMap<string, number> = new Map()) => {
+  if (!d.rook_edit || !writable(d)) return false;
+  const kept = inputsOf(d, files).kept;
+  return kept.length > 0 && inputChars(kept, sizes) <= ROOK_EDIT_MAX_CHARS;
+};
 
 export type QuoteResult = { ok: true; row: unknown } | { ok: false; error: { code: number | string; message: string } };
 
@@ -368,24 +385,6 @@ export function inputsBlocked(subtasks: Pick<PlanSubtask, 'title' | 'inputs'>[],
   return undefined;
 }
 
-/**
- * A part of the plan a message revises, as the orchestrator sends it (Conversation.plan): the title and brief the user
- * saw, and its criteria and the rest of the part when sent. Read leniently: a field that doesn't parse is left out.
- */
-export const PlanPart = z.object({
-  title: z.string(), brief: z.string(),
-  criteria: z.array(Criterion).optional().catch(undefined),
-  search_terms: z.array(z.string().min(1)).min(1).max(3).optional().catch(undefined),
-  category: z.string().nullish().catch(undefined),
-  self_do_ok: z.boolean().optional().catch(undefined),
-  inputs: z.array(z.string().min(1)).max(CONVERSATION_FILES).optional().catch(undefined),
-  self_do_reason: z.string().optional().catch(undefined),
-});
-export type PlanPart = z.infer<typeof PlanPart>;
-export const planParts = (raw: unknown): PlanPart[] => {
-  const r = z.array(PlanPart).max(10).safeParse(raw);
-  return r.success ? r.data : [];
-};
 const sameTitle = (a: string, b: string) => fold(a) === fold(b);
 const sameBrief = (p: PlanPart, d: DraftSubtask) => fold(repairBrief(p.title, p.brief)) === fold(repairBrief(d.title, d.brief));
 
@@ -428,6 +427,7 @@ export type PlanInput = {
   reserve_share: number;
   history?: Record<string, AgentHistory>; // Rook's own verdicts by handle; without it, the market's record alone
   files?: string[]; // the paths of the conversation's current files: the only inputs a subtask may name
+  sizes?: ReadonlyMap<string, number>; // the characters of each of those files, by path (a Rook edit's are capped)
 };
 
 /** The contract's ceiling on the reserve, in basis points of the budget (contract/budget/src/lib.rs MAX_RESERVE_BPS). */
@@ -447,9 +447,13 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
     for (const p of unknown) notes.push(`"${d.title}": input ${p} dropped, it is not one of this conversation's files`);
     return ok;
   });
-  const edits = draft.map((d) => isRookEdit(d, files));
+  const sizes = input.sizes ?? new Map<string, number>();
+  const edits = draft.map((d) => isRookEdit(d, files, sizes));
   draft.forEach((d, i) => {
-    if (d.rook_edit && !edits[i]) notes.push(`"${d.title}" is not a Rook edit: ${inputs[i].length ? 'Rook can\'t write it itself' : 'it changes no file of this conversation'}`);
+    if (!d.rook_edit || edits[i]) return;
+    const why = !inputs[i].length ? 'it changes no file of this conversation' : !writable(d) ? 'Rook can\'t write it itself'
+      : `its files come to ${inputChars(inputs[i], sizes)} characters, more than the ${ROOK_EDIT_MAX_CHARS} Rook edits itself at once`;
+    notes.push(`"${d.title}" is not a Rook edit: ${why}`);
   });
 
   // Steps 4 to 7, in priority order. `draftIdx` keeps the draft position for cross-check rewriting.
@@ -560,11 +564,13 @@ export function buildPlan(input: PlanInput): Omit<Plan, 'llm_calls'> {
   const subtasks: PlanSubtask[] = kept.map((k, i) => {
     const id = `s${i + 1}`;
     const ins = inputs[k.draftIdx];
+    const category = marketCategory(k.d.category);
     return {
       id,
       title: k.d.title,
       brief: repairBrief(k.d.title, k.d.brief),
       search_terms: k.d.search_terms,
+      ...(category ? { category } : {}),
       criteria: validateCriteria(id, i, k.d, finalId, notes, ins),
       cap_atomic: k.cap.toString(),
       // Rook waits for a hire at most ROOK_HIRE_PATIENCE_S, whatever SLA the agent advertises.
