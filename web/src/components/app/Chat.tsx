@@ -100,7 +100,7 @@ function useTask(id: string | null, account: string | null): Loaded {
     let ended = false; // the task reached a terminal status
     let soon: ReturnType<typeof setTimeout> | undefined;
     // 'quote': a price came in, so the run's status moves from getting it to sending the job.
-    const types = ['task_status', 'subtask_status', 'planning', 'plan', 'quote', 'quote_rejected', 'hire_sent', 'a2a_state', 'evaluation', 'security_alert', 'ledger', 'receipt', 'final', 'error'];
+    const types = ['task_status', 'subtask_status', 'planning', 'plan', 'agent_message', 'quote', 'quote_rejected', 'hire_sent', 'a2a_state', 'evaluation', 'security_alert', 'ledger', 'receipt', 'final', 'error'];
     const onEvent = (m: MessageEvent) => {
       // The browser fires its own 'error' event, with no data, when the connection drops or is refused (signed out,
       // not your task, services restarting). That shares a name with Rook's 'error' events, so skip anything empty.

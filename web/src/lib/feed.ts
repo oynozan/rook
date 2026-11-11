@@ -6,6 +6,9 @@ import { usdc } from '@/lib/funding';
 import { plannerReason } from '@/lib/planner';
 import type { RookEvent, SubtaskView } from '@/lib/server/orchestrator';
 
+/** A message on one line, cut at `n` characters. */
+const oneLine = (t: string, n: number) => { const l = t.replace(/\s+/g, ' ').trim(); return l.length > n ? `${l.slice(0, n - 1)}…` : l; };
+
 export type DeliveredPart = { id: string; title: string; agent: string | null; text: string };
 
 /**
@@ -197,6 +200,8 @@ export function feedFrom(events: RookEvent[], ctx: FeedContext): FeedLine[] {
     }
     // Whether an unpaid hire cost anything is known only once its authorization is released (it can still land).
     else if (type === 'a2a_state' && ['FAILED', 'REJECTED', 'CANCELED'].includes(data.state)) lines.push({ key, text: `${agent} didn't deliver${on}.`, tone: 'normal', now: { state: 'analyzing', label: 'No delivery', detail: agent } });
+    else if (type === 'agent_message' && typeof data.text === 'string') lines.push({ key, text: `${agent} says${on}: “${oneLine(data.text, 160)}”`, tone: 'normal', now: { state: 'analyzing', label: 'Agent message', detail: agent } });
+    else if (type === 'a2a_state' && data.state === 'DECLINED') lines.push({ key, text: `${agent} said it couldn't do this${on}, so Rook stopped waiting and moved on${typeof data.reason === 'string' && data.reason ? `: ${data.reason.replace(/\.?$/, '.')}` : '.'}`, tone: 'normal', now: { state: 'analyzing', label: 'Moving on', detail: agent } });
     else if (type === 'a2a_state' && data.state === 'TIMEOUT') lines.push({ key, text: `${agent} timed out${on}.`, tone: 'normal', now: { state: 'analyzing', label: 'Timed out', detail: agent } });
     else if (type === 'ledger' && data.op === 'release' && data.settled === false) {
       const who = agent ?? hired.get(subtask_id);

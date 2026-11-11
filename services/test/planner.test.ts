@@ -308,7 +308,10 @@ test('the aggregator gets a marker for each code file, never the code, and the f
   assert.ok(user.content.includes('source="codex-engineer-01">\nHere it is.\n\nindex.html\n[file index.html, 4 lines, attached below the report]\n</deliverable>'), user.content.slice(0, 3000));
   assert.ok(user.content.includes('Subtasks not delivered (gaps):\n- File huge-page.html from "Huge page": not attached, larger than 1 MB'), user.content.slice(0, 3000));
   assert.ok(!/<!doctype|<h1>|zzzz/.test(user.content), user.content.slice(0, 3000));
-  assert.equal(result.final_markdown, 'ok');
+  // The stub's two-letter reply lost every delivery, so the deterministic merge stands in: markers, never the code.
+  assert.match(result.final_markdown, /Hi, I am Ozan\./);
+  assert.match(result.final_markdown, /\[file index\.html, \d+ lines, attached below the report\]/);
+  assert.ok(!/<!doctype|<h1>|zzzz/.test(result.final_markdown));
   assert.deepEqual(result.files, [{ subtask_id: 's2', agent_handle: 'codex-engineer-01', name: 'index.html', mime: 'text/html', text: page }]);
 });
 

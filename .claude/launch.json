@@ -4,7 +4,20 @@
     {
       "name": "web",
       "runtimeExecutable": "pnpm",
-      "runtimeArgs": ["--filter", "@rook/web", "dev"],
+      "runtimeArgs": [
+        "--filter",
+        "@rook/web",
+        "dev"
+      ],
+      "port": 7110
+    },
+    {
+      "name": "web-live",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": [
+        "-c",
+        "ROOK_SERVICE_TOKEN=$(sed -n 's/^ROOK_SERVICE_TOKEN=//p' ~/.rook/mainnet.env) exec pnpm --filter @rook/web dev"
+      ],
       "port": 7110
     }
   ]

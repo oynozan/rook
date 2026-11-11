@@ -5,6 +5,8 @@ import { useEffect, useRef, useState } from 'react';
 import { useEase } from '@/hooks/useEase';
 import { UserAvatar } from '@/components/app/UserAvatar';
 import { NETWORK, useWallet } from '@/hooks/wallet';
+import { useUsdcBalance } from '@/hooks/useUsdcBalance';
+import { usdc } from '@/lib/funding';
 
 /** Named accounts read as they are; 64-character implicit ones keep their ends. */
 const shortAccount = (id: string) => (id.length > 20 ? `${id.slice(0, 6)}…${id.slice(-6)}` : id);
@@ -14,6 +16,7 @@ export function AccountMenu({ account, onDisconnect }: { account: string; onDisc
   const ease = useEase();
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+  const balance = useUsdcBalance(account);
 
   useEffect(() => {
     if (!open) return;
@@ -40,7 +43,10 @@ export function AccountMenu({ account, onDisconnect }: { account: string; onDisc
       >
         <UserAvatar account={account} size={26} />
         <span className="sr-only">Connected wallet: </span>
-        <span className="min-w-0 truncate">{shortAccount(account)}</span>
+        <span className="flex min-w-0 flex-col leading-tight">
+          <span className="truncate">{shortAccount(account)}</span>
+          {balance !== null && <span className="text-sm font-normal text-ink/60 tabular-nums">{usdc(balance)} USDC</span>}
+        </span>
       </button>
       <AnimatePresence>
       {open && (

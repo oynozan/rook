@@ -81,7 +81,24 @@ export function normTask(t: any): A2ATask {
     context_id: t.contextId ?? t.context_id ?? null,
     state: normState(t.status?.state ?? t.state),
     artifacts: (t.artifacts ?? []).map((a: any) => ({ ...(a.name ? { name: a.name } : {}), parts: (a.parts ?? []).map(normPart) })),
+    agent_message: agentMessage(t),
   };
+}
+
+const AGENT_MESSAGE_CHARS = 2000;
+/**
+ * The newest message the agent itself wrote: its status message when the agent wrote it, else the last agent turn in
+ * the history. A finished task's status message is often Rook's own request echoed back (role user), never counted.
+ * On mainnet an agent hired for a logo said at once that it only edits attached images, and Rook, not reading it,
+ * waited out its patience.
+ */
+export function agentMessage(t: any): string | null {
+  const isAgent = (m: any) => /agent/i.test(String(m?.role ?? ''));
+  const textOf = (m: any) => (m?.parts ?? []).map((p: any) => (typeof p?.text === 'string' ? p.text : '')).join('\n').trim();
+  const fromStatus = isAgent(t?.status?.message) ? textOf(t.status.message) : '';
+  const fromHistory = [...(Array.isArray(t?.history) ? t.history : [])].reverse().find((m: any) => isAgent(m) && textOf(m));
+  const text = fromStatus || (fromHistory ? textOf(fromHistory) : '');
+  return text ? text.slice(0, AGENT_MESSAGE_CHARS) : null;
 }
 
 /**

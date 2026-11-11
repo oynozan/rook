@@ -53,7 +53,9 @@ export type AgentSummary = {
 export type A2AState = 'SUBMITTED' | 'WORKING' | 'COMPLETED' | 'REJECTED' | 'FAILED' | 'CANCELED';
 export const TERMINAL: A2AState[] = ['COMPLETED', 'REJECTED', 'FAILED', 'CANCELED'];
 export type Part = { text?: string; url?: string; raw?: string };
-export type A2ATask = { id: string; context_id: string | null; state: A2AState; artifacts: { name?: string; parts: Part[] }[] };
+// agent_message: the newest thing the agent said while working (its status message or history), untrusted, capped; null
+// when it said nothing. Most market agents say nothing until they deliver.
+export type A2ATask = { id: string; context_id: string | null; state: A2AState; artifacts: { name?: string; parts: Part[] }[]; agent_message?: string | null };
 export type GatewayError = { code: number | string; message: string };
 export type GatewayResult<T> = ({ ok: true } & T) | { ok: false; error: GatewayError };
 
@@ -246,7 +248,8 @@ export type TaskStatus = 'draft' | 'asking' | 'planned' | 'approved' | 'funded' 
 export type SubtaskStatus = 'pending' | 'funded' | 'quoting' | 'working' | 'evaluating' | 'passed' | 'abandoned' | 'returned';
 export type EventType = 'task_status' | 'subtask_status' | 'plan' | 'quote' | 'quote_rejected' | 'hire_sent' | 'a2a_state'
   | 'evaluation' | 'security_alert' | 'ledger' | 'receipt' | 'final' | 'error'
-  | 'planning'; // progress while the plan is drafted: { stage: 'drafting' | 'searching' | 'found' | 'quoting', ... }
+  | 'planning' // progress while the plan is drafted: { stage: 'drafting' | 'searching' | 'found' | 'quoting', ... }
+  | 'agent_message'; // what a hired agent said while working: { hire_id, agent_handle, text } (untrusted, shown as said)
 export type RookEvent = { seq: number; ts: string; task_id: string; subtask_id?: string; type: EventType; data: any };
 // verdict and attestation_hash are null when a paid hire was never judged (kill or evaluator outage during evaluation,
 // or a payment whose outcome is unknown); a2a_task_id is null when the agent's task id was never learned.

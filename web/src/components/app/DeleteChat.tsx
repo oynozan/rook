@@ -95,7 +95,7 @@ export function DeleteChatDialog({ chat, onClose, onDeleted, onOpenTask }: {
       <div className="p-5">
         <h2 id={`${uid}-title`} className="text-lg font-medium tracking-[-0.01em]">Delete this chat?</h2>
         <p id={`${uid}-body`} className="mt-2 text-ink/80">
-          <span className="line-clamp-3 font-medium break-words text-ink">“{chat.title}”</span>
+          <span className="line-clamp-3 font-medium wrap-break-word text-ink">“{chat.title}”</span>
           <span className="mt-1 block">Its messages, plans and reports will be removed from your tasks. This can&apos;t be undone.</span>
         </p>
         {error && (
