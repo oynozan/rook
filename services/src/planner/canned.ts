@@ -1,9 +1,20 @@
 // Canned planner output for ROOK_LLM=canned (docs/agentic-system.md 5.2 last paragraph, 5.3, 5.4).
 // The labels here are the shared demo contract with the simulator and the evaluator: keep them identical.
-import type { AggregateRequest, Criterion, WorkFile } from '../shared/types.ts';
-import type { z } from 'zod';
+import { AggregateRequest, CONVERSATION_FILES, type Criterion, type WorkFile } from '../shared/types.ts';
+import { z } from 'zod';
 import type { DraftSubtask } from './plan.ts';
 import { attachFiles, fenceFor, fenceLang, fileGaps, kindOfPath, type Attached } from './files.ts';
+
+const filePaths = z.array(z.string().min(1).max(300)).max(CONVERSATION_FILES).optional();
+/**
+ * /aggregate's request, each part with what names its files (files.ts attachFiles): `inputs`, the chat's files it
+ * edits, and `paths`, the files it is asked for. A page in a bare ```html block was saved as "one-page-bakery-website.html".
+ * ponytail: an extension of the shared AggregateRequest kept here, where the aggregator reads it; the orchestrator
+ * sends it (runner.ts). Fold it into types.ts when the contract next changes.
+ */
+export const AggregateIn = AggregateRequest.extend({
+  subtasks: z.array(AggregateRequest.shape.subtasks.element.extend({ inputs: filePaths, paths: filePaths })),
+});
 
 const brief = (title: string, body: string) => `${title}\n\n${body}`;
 
@@ -99,18 +110,19 @@ export function cannedSelfDo(brief: string, criteria: Criterion[], files: WorkFi
   return lines.join('\n');
 }
 
-type AggIn = z.infer<typeof AggregateRequest>;
+export type AggIn = z.infer<typeof AggregateIn>;
+type AggPart = AggIn['subtasks'][number];
 
 /** A subtask is merged only when it passed and has text; everything else is a gap. */
-export const isMerged = (s: AggIn['subtasks'][number]) => s.status === 'passed' && !!s.deliverable_text;
-export const agentOf = (s: AggIn['subtasks'][number]) => s.agent_handle ?? 'rook (self-do)';
+export const isMerged = (s: AggPart) => s.status === 'passed' && !!s.deliverable_text;
+export const agentOf = (s: AggPart) => s.agent_handle ?? 'rook (self-do)';
 const SELF_DO_SOURCE = 'Rook (its own model)';
 /** Who wrote a part, in the report's words: the agent's handle, or Rook for its own work ('rook:self-do' is internal). */
-export const sourceOf = (s: AggIn['subtasks'][number]) => (!s.agent_handle || s.agent_handle === 'rook:self-do' ? SELF_DO_SOURCE : s.agent_handle);
+export const sourceOf = (s: AggPart) => (!s.agent_handle || s.agent_handle === 'rook:self-do' ? SELF_DO_SOURCE : s.agent_handle);
 
 /** The code files in the merged deliveries, and each one's text with markers in their place (files.ts). */
-export const attach = (subtasks: AggIn['subtasks']): Attached =>
-  attachFiles(subtasks.filter(isMerged).map((s) => ({ subtask_id: s.id, agent_handle: agentOf(s), title: s.title, text: s.deliverable_text! })));
+export const attach = (subtasks: AggPart[]): Attached =>
+  attachFiles(subtasks.filter(isMerged).map((s) => ({ subtask_id: s.id, agent_handle: agentOf(s), title: s.title, text: s.deliverable_text!, inputs: s.inputs, paths: s.paths })));
 
 /** The deterministic merge. Files stay out of it as markers, like the aggregator's report: they come attached. */
 export function cannedAggregate(req: AggIn, attached: Attached = attach(req.subtasks)): string {

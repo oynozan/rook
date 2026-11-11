@@ -7,7 +7,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 
-const { attachFiles, fileGaps, installScripts, leftOut, localLinks, placeholdersIn, safePath, FILE_MAX_BYTES } = await import('../src/planner/files.ts');
+const { attachFiles, cutShort, fileGaps, installScripts, leftOut, localLinks, namedPaths, onInputs, placeholdersIn, safePath, FILE_MAX_BYTES } = await import('../src/planner/files.ts');
 /** Rook's own writer's replies the QA testers saved (2026-11-10): a 14-file Next.js app, an Express API, a 3-page site. */
 const fixture = (name: string) => readFileSync(new URL(`./fixtures/${name}.selfdo.md`, import.meta.url), 'utf8');
 const d = (subtask_id: string, title: string, text: string, agent_handle = 'web-dev') => ({ subtask_id, agent_handle, title, text });
@@ -65,7 +65,7 @@ test('known languages only; a short unnamed snippet and prose stay in the text, 
   assert.deepEqual(mini.files.map((f) => f.name), ['page.html', 'page.js']);
 });
 
-test('every listed language is attached with its mime type; a fence cut short still gives its file', () => {
+test('every listed language is attached with its mime type; a fence cut short is no file, but a gap', () => {
   const langs = [['html', 'text/html'], ['htm', 'text/html'], ['css', 'text/css'], ['js', 'text/javascript'], ['javascript', 'text/javascript'], ['ts', 'text/typescript'],
     ['typescript', 'text/typescript'], ['json', 'application/json'], ['py', 'text/x-python'], ['python', 'text/x-python'], ['sh', 'text/x-shellscript'],
     ['bash', 'text/x-shellscript'], ['svg', 'image/svg+xml'], ['xml', 'application/xml'], ['yaml', 'application/yaml'], ['yml', 'application/yaml'], ['sql', 'application/sql'],
@@ -78,7 +78,90 @@ test('every listed language is attached with its mime type; a fence cut short st
   assert.deepEqual(app.files.map((f) => [f.name, f.mime]), [['App.jsx', 'text/javascript']]);
   assert.equal(app.texts.get('s1'), 'App.jsx\n[file App.jsx, 3 lines, attached below the report]');
   const cut = attachFiles([d('s1', 'Page', `\`\`\`html\n${PAGE.slice(0, 40)}`)]);
-  assert.deepEqual(cut.files.map((f) => f.text), [PAGE.slice(0, 40)]);
+  assert.deepEqual([cut.files, cut.unattached], [[], [{ name: 'page.html', title: 'Page', why: 'cut off before its end' }]]);
+});
+
+test('a reply cut off before its end is never attached: the gaps say so, and an earlier whole version is not taken instead', () => {
+  // QA (qa-bigout-3): the rename reply stopped at max_tokens mid-tag; games.html was attached at 38% and passed as whole.
+  const rows = Array.from({ length: 200 }, (_, i) => `      <tr><td>${i}</td><td>1-0</td><td>20</td></tr>`).join('\n');
+  const games = `<!doctype html>\n<html>\n<body>\n  <table>\n${rows}\n      <`;
+  const css = 'body {\n  margin: 0;\n}';
+  const r = attachFiles([d('s1', 'Rename the site', `styles.css\n\`\`\`css\n${css}\n\`\`\`\n\ngames.html\n\`\`\`html\n${games}`, 'rook:self-do')]);
+  assert.deepEqual(r.files.map((f) => f.name), ['styles.css']);
+  assert.deepEqual(r.unattached, [{ name: 'games.html', title: 'Rename the site', why: 'cut off before its end' }]);
+  assert.match(r.texts.get('s1')!, /\ngames\.html\n\[file games\.html, 205 lines, not attached: cut off before its end\]$/);
+  assert.deepEqual(fileGaps(r), ['File games.html from "Rename the site": not attached, cut off before its end']);
+  // A page with no </html> is cut off, fenced and closed or not fenced at all.
+  const open = PAGE.replace('\n</html>', '');
+  assert.deepEqual(attachFiles([d('s1', 'P', `index.html\n\`\`\`html\n${open}\n\`\`\``)]).unattached.map((u) => u.why), ['cut off before its end']);
+  assert.deepEqual(attachFiles([d('s1', 'P', `Here it is.\n\n${open}`)]).unattached.map((u) => [u.name, u.why]), [['p.html', 'cut off before its end']]);
+  // A page whose fence never closes but which ends is whole: only its closing fence is missing.
+  const ends = attachFiles([d('s1', 'P', `index.html\n\`\`\`html\n${PAGE}\n\nThat's the page.`)]);
+  assert.deepEqual([ends.files.map((f) => [f.name, f.text]), ends.unattached], [[['index.html', PAGE]], []]);
+  assert.equal(ends.texts.get('s1'), "index.html\n[file index.html, 5 lines, attached below the report]\n\nThat's the page.");
+  // Written twice, the second cut off: neither is attached (the delivery itself replaced the first).
+  const twice = attachFiles([d('s1', 'P', `index.html\n\`\`\`html\n${PAGE}\n\`\`\`\n\nWait, a typo. The corrected index.html:\n\`\`\`html\n${open}`)]);
+  assert.deepEqual([twice.files, twice.unattached.map((u) => u.name)], [[], ['index.html']]);
+  assert.match(twice.texts.get('s1')!, /^index\.html\n\[file index\.html, 5 lines, not attached: a later version of it in this part replaces it\]/);
+});
+
+test('cutShort: an HTML document with no </html>; any other file is never cut short by this rule', () => {
+  assert.equal(cutShort('index.html', PAGE), false);
+  assert.equal(cutShort('index.html', PAGE.replace('</html>', '')), true);
+  assert.equal(cutShort('partials/nav.html', '<nav><a href="/">Home</a></nav>'), false); // a fragment, not a page
+  assert.equal(cutShort('notes.txt', '<!doctype html>\n<html>'), false);
+});
+
+test('a lone unnamed file is the one file of its kind the part edits or is asked for; a named one keeps its name', () => {
+  // QA: an honest edit in a bare ```html block failed its index.html check and was saved as "rename-to-ozan-anda.html".
+  const bare = `Here is the updated page:\n\n\`\`\`html\n${PAGE}\n\`\`\``;
+  assert.deepEqual(attachFiles([d('s1', 'Rename to Ozan Andaç', bare)]).files.map((f) => f.name), ['rename-to-ozan-anda.html']);
+  const edit = attachFiles([{ ...d('s1', 'Rename to Ozan Andaç', bare), inputs: ['index.html', 'styles.css'] }]);
+  assert.deepEqual(edit.files.map((f) => [f.name, f.text]), [['index.html', PAGE]]);
+  assert.equal(edit.texts.get('s1'), 'Here is the updated page:\n\n[file index.html, 5 lines, attached below the report]');
+  // A new page whose brief asks for index.html, in a bare block or as a page with no fence at all.
+  assert.deepEqual(attachFiles([{ ...d('s1', 'One-page bakery website', bare), paths: ['index.html'] }]).files.map((f) => f.name), ['index.html']);
+  assert.deepEqual(attachFiles([{ ...d('s1', 'One-page bakery website', `\n${PAGE}\n`), paths: ['index.html'] }]).files.map((f) => f.name), ['index.html']);
+  // Two pages asked for: which one is meant is not plain, so the title names it as before.
+  assert.deepEqual(attachFiles([{ ...d('s1', 'Site', bare), paths: ['index.html', 'about.html'] }]).files.map((f) => f.name), ['site.html']);
+  // A page the delivery names is never renamed into the one the part edits: about.html stays about.html.
+  assert.deepEqual(attachFiles([{ ...d('s1', 'Add an about page', `about.html\n\`\`\`html\n${PAGE}\n\`\`\``), inputs: ['index.html'] }]).files.map((f) => f.name), ['about.html']);
+  // The page's own link names a nameless stylesheet first: it is what the page needs.
+  const linked = PAGE.replace('<head>', '<head><link rel="stylesheet" href="css/site.css">');
+  const both = attachFiles([{ ...d('s1', 'Site', `index.html\n\`\`\`html\n${linked}\n\`\`\`\n\`\`\`css\nbody {\n  margin: 0;\n}\n\`\`\``), paths: ['index.html', 'styles.css'] }]);
+  assert.deepEqual(both.files.map((f) => f.name), ['index.html', 'css/site.css']);
+});
+
+test("an edit's file given back in another folder is the file it edits; never when the delivery gives that path too", () => {
+  // QA: "portfolio/index.html" left the chat with two index.html files, and the next edit worked on the old one.
+  const folder = `portfolio/index.html\n\`\`\`html\n${PAGE}\n\`\`\``;
+  assert.deepEqual(attachFiles([{ ...d('s1', 'Rename', folder), inputs: ['index.html'] }]).files.map((f) => f.name), ['index.html']);
+  assert.deepEqual(attachFiles([d('s1', 'Build', folder)]).files.map((f) => f.name), ['portfolio/index.html']); // a new build keeps its folder
+  const tidy = `tidy/app/page.tsx\n\`\`\`tsx\nexport default function Page() {\n  return <h1>Tidy</h1>;\n}\n\`\`\``;
+  assert.deepEqual(attachFiles([{ ...d('s1', 'Edit', tidy), inputs: ['app/page.tsx', 'app/layout.tsx'] }]).files.map((f) => f.name), ['app/page.tsx']);
+  const two = attachFiles([{ ...d('s1', 'Rename', `index.html\n\`\`\`html\n${PAGE}\n\`\`\`\n\n${folder}`), inputs: ['index.html'] }]);
+  assert.deepEqual(two.files.map((f) => f.name), ['index.html', 'portfolio/index.html']);
+  assert.equal(onInputs('Portfolio/INDEX.HTML', ['index.html']), 'index.html');
+  assert.equal(onInputs('a/index.html', ['x/index.html', 'y/index.html']), undefined); // two of that name: not plain
+});
+
+test('two parts that edit the same file: the later one, which started from the earlier version, is the file', () => {
+  // QA (scripts/collide.mts): both parts gave app/page.tsx; one became app/page-2.tsx and its change was lost.
+  const v = (s: string) => `app/page.tsx\n\`\`\`tsx\nexport default function Page() {\n  return <h1>${s}</h1>;\n}\n\`\`\``;
+  const r = attachFiles([
+    { ...d('s1', 'Price', v('$7')), inputs: ['app/page.tsx'] },
+    { ...d('s2', 'Tagline', v('$7, tidy')), inputs: ['app/page.tsx'] },
+  ]);
+  assert.deepEqual(r.files.map((f) => [f.subtask_id, f.name]), [['s2', 'app/page.tsx']]);
+  assert.match(r.files[0].text, /\$7, tidy/);
+  assert.equal(r.texts.get('s1'), 'app/page.tsx\n[file app/page.tsx, 3 lines, not attached: a later part changes it again, and that version is attached]');
+  // Parts that build new files, not edits, still keep both, as before.
+  assert.deepEqual(attachFiles([d('s1', 'A', v('a')), d('s2', 'B', v('b'))]).files.map((f) => f.name), ['app/page.tsx', 'app/page-2.tsx']);
+});
+
+test('namedPaths: the files a brief names, each once; a product named like a file is none', () => {
+  assert.deepEqual(namedPaths('Build it with Next.js.\nDeliver it as the file index.html with a shared `css/site.css`.\nReturn only the complete index.html file.'),
+    ['index.html', 'css/site.css']);
 });
 
 test('a reply with CRLF line endings gives the same files, named the same, with LF endings', () => {
@@ -298,6 +381,26 @@ test('placeholders the user must replace are found in the text and the files, an
   assert.deepEqual(fileGaps(r), ['Placeholders to replace in "Build portfolio": [Your phone]', 'Placeholders to replace in index.html from "Build portfolio": [Your name], [your@email.com]']);
   const many = Array.from({ length: 10 }, (_, i) => `[Your project ${i + 1} link]`).join(' ');
   assert.match(fileGaps(attachFiles([d('s1', 'P', many)]))[0], /\[Your project 8 link\] and 2 more$/);
+});
+
+test('every bracketed placeholder in prose or markup is listed, who and how to reach first; code in brackets is not', () => {
+  // QA: of these only [Your email] and [Company Name] were found, and a landing page shipped reading "[Startup name]".
+  assert.deepEqual(placeholdersIn('[Startup name] [Contact email] [Shop name] [Feature 1] [Plan 1 name] [Phone number] [Restaurant name] [Opening hours] [Your email] [Company Name]'),
+    ['[Startup name]', '[Contact email]', '[Shop name]', '[Phone number]', '[Restaurant name]', '[Your email]', '[Company Name]', '[Feature 1]', '[Plan 1 name]', '[Opening hours]']);
+  // The bakery page (selfdo_web1.md): its brief's own placeholders, the mailto target and a tagline with a colon.
+  const page = `<!doctype html>\n<html><head><title>[Startup name]</title><style>input[type="text"], [data-x] { color: red }</style></head>
+<body><h1>[Startup name]</h1><p>[Tagline: one line about what you do]</p><img alt="[Photo of simit]" src="simit.jpg">
+<p>[Short description of your bakery]</p><p>Simit: [Price]</p><a href="mailto:[Contact email]">Write to us</a>
+<script>const [Header, Footer] = slots; const re = /[A-Z]+/; if (items[0]) go([1, 2]);</script></body></html>`;
+  assert.deepEqual(placeholdersIn(page, 'index.html'),
+    ['[Startup name]', '[Contact email]', '[Tagline: one line about what you do]', '[Photo of simit]', '[Short description of your bakery]', '[Price]']);
+  // Code in brackets, in a component, a stylesheet, a script and a README's own code, is no placeholder.
+  const tsx = `export default function Hero() {\n  const [open, setOpen] = useState(false);\n  useEffect(() => {}, [name]);\n  const pair: [string, number] = ['a', 1];\n  return <h1 className="w-[200px] bg-[#7ff5e3]">[Startup name] for [Price]</h1>;\n}`;
+  assert.deepEqual(placeholdersIn(tsx, 'components/Hero.tsx'), ['[Startup name]', '[Price]']);
+  assert.deepEqual(placeholdersIn('[Unit]\nDescription=app\n[Service]\nExecStart=node index.js', 'deploy/app.conf'), []);
+  assert.deepEqual(placeholdersIn('# App\n\nRun `[ -f .env ] || cp .env.example .env`, then:\n\n```js\nconst [Header, Footer] = slots;\n```\n\nEmail [Your email] for access.', 'README.md'), ['[Your email]']);
+  // Notes, citations, log levels, ranges and spreads are not placeholders either.
+  assert.deepEqual(placeholdersIn('He said [sic]. Price: 3.20 [Source: CoinGecko] [INFO] ready [A-Z] [...items] [[Wiki page]] app/[slug]/page.tsx'), []);
 });
 
 test('code left out is found in a file ("rest of the code", "... existing code ...", a bare ellipsis), not in honest prose', () => {

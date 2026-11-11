@@ -15,12 +15,12 @@ import { readFileSync } from 'node:fs';
 import http from 'node:http';
 
 const { config } = await import('../src/shared/config.ts');
-const { chat, chatTools, expectedOutputTokens, llmSpent24hUsd, MAX_TOOL_ROUNDS } = await import('../src/shared/llm.ts');
-const { AS_DELIVERED, aggregate, selfDo } = await import('../src/planner/prompts.ts');
+const { chat, chatTools, expectedOutputTokens, llmSpent24hUsd, MAX_TOOL_ROUNDS, TOOL_INPUT_CHARS, WEB_SEARCH_FEE_USD } = await import('../src/shared/llm.ts');
+const { AS_DELIVERED, aggregate, selfDo, SELF_DO_MAX_TOKENS, SELF_DO_MAX_TOKENS_CAP } = await import('../src/planner/prompts.ts');
 const { useReferenceSeam } = await import('../src/planner/reference.ts');
 
 // ---- The fake NEAR AI: every chat body it got, and an answer per call ----
-type Answer = { status?: number; raw?: string; message?: any; usage?: { prompt_tokens: number; completion_tokens: number } };
+type Answer = { status?: number; raw?: string; message?: any; usage?: { prompt_tokens: number; completion_tokens: number }; finish?: string };
 let sent: any[] = [], urls: string[] = [];
 let answer: (body: any, n: number) => Answer | Promise<Answer> = () => ({ message: { content: 'ok' } });
 const PRICE = { prompt: 0.000001, completion: 0.000002 };
@@ -37,7 +37,7 @@ globalThis.fetch = (async (input: any, init?: any) => {
   sent.push(body);
   const n = sent.length, a = await answer(body, n);
   if (a.status && a.status !== 200) return new Response(a.raw ?? '{}', { status: a.status });
-  return json({ id: `c${n}`, choices: [{ message: a.message, finish_reason: 'stop' }], usage: a.usage ?? { prompt_tokens: 100, completion_tokens: 50 } });
+  return json({ id: `c${n}`, choices: [{ message: a.message, finish_reason: a.finish ?? 'stop' }], usage: a.usage ?? { prompt_tokens: 100, completion_tokens: 50 } });
 }) as typeof fetch;
 const reset = (a: typeof answer) => { sent = []; urls = []; answer = a; };
 const system = (b: any) => String(b.messages[0].content);
@@ -105,6 +105,61 @@ test(`the tool loop stops after ${MAX_TOOL_ROUNDS} rounds with one answer that m
   assert.equal(r.calls.length, MAX_TOOL_ROUNDS + 1);
 });
 
+test('the tool answers one chat reads are capped in all, and every completion sent with web search counts its fee', async () => {
+  // QA: a self-done research part read 238,655 input tokens (0.46 USD) at up to 12,000 characters an answer, and the
+  // guard counted no search fee at all.
+  const page = 'x'.repeat(20_000);
+  reset((b) => (b.tool_choice === 'none' ? { message: { content: 'Answer.' } }
+    : { message: { content: null, tool_calls: [0, 1, 2, 3].map((i) => toolCall(`r${sent.length}-${i}`, 'read', {})) } }));
+  const before = llmSpent24hUsd();
+  const r = await chatTools('t', config.plannerModel, [{ role: 'user', content: 'hi' }], 4000, { search: true, functions: { read: { description: 'd', parameters: { type: 'object' }, run: async () => page } } });
+  // Round 1: four answers of 12,000 (48,000 of 60,000); round 2: one more fills the room, the rest are not shown; then
+  // the answer, with no tools and no search.
+  assert.equal(TOOL_INPUT_CHARS, 60_000);
+  assert.equal(sent.length, 3);
+  const notShown = 'Not shown: this part has read 60000 characters of tool answers, all Rook allows. Answer with what you have.';
+  assert.deepEqual(sent[2].messages.filter((m: any) => m.role === 'tool').map((m: any) => (m.content === notShown ? 'not shown' : m.content.length)),
+    [12_000, 12_000, 12_000, 12_000, 12_000, 'not shown', 'not shown', 'not shown']);
+  assert.deepEqual([sent[2].tool_choice, 'web_search_options' in sent[2], 'web_search_options' in sent[1]], ['none', false, true]);
+  // Two completions were sent with web search: each counts the fee, in its record and in the day's spend.
+  const tokens = 100 * PRICE.prompt + 50 * PRICE.completion;
+  assert.deepEqual(r.calls.map((c) => c.cost_usd), [tokens + WEB_SEARCH_FEE_USD, tokens + WEB_SEARCH_FEE_USD, tokens].map((x) => Number(x.toFixed(6))));
+  assert.equal(Number((llmSpent24hUsd() - before).toFixed(9)), Number((3 * tokens + 2 * WEB_SEARCH_FEE_USD).toFixed(9)));
+  assert.equal(r.truncated, false);
+});
+
+test('a reply cut at max_tokens says so: chat, the tool loop and self-do carry truncated, and /self-do returns it', async () => {
+  // QA (qa-bigout-3): self-do stopped at max_tokens mid-tag, only a log line said so, and the cut file was used.
+  const cut = 'index.html\n```html\n<!doctype html>\n<html><body><table><tr><td>1-0</td><td>20</td></tr>\n      <';
+  reset(() => ({ message: { content: cut }, finish: 'length' }));
+  const warn = console.warn;
+  console.warn = () => {};
+  const { start } = await import('../src/planner/index.ts');
+  const planner = await start(0);
+  try {
+    assert.equal((await chat('c', config.plannerModel, [{ role: 'user', content: 'hi' }], 100, { sign: false })).truncated, true);
+    assert.equal((await chatTools('t', config.plannerModel, [{ role: 'user', content: 'hi' }], 100, { search: true })).truncated, true);
+    const r = await fetch(`${planner.url}/self-do`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({
+      task_id: 't', subtask_id: 's1', brief: 'Rename\n\nRename it.', criteria: [], files: [{ path: 'index.html', text: '<!doctype html>\n<html></html>' }],
+    }) });
+    const out: any = await r.json();
+    assert.deepEqual([r.status, out.truncated, out.text], [200, true, cut]);
+    reset(() => ({ message: { content: 'All of it.' } }));
+    assert.equal((await selfDo('Copy\n\nWrite it.', [])).truncated, false);
+  } finally { console.warn = warn; await planner.close(); }
+});
+
+test("an edit's output budget is sized to its files, at most the cap; every other part keeps 24,000", async () => {
+  // QA: at 24,000 a rename over 115,418 characters of files was cut off in games.html.
+  reset(() => ({ message: { content: 'ok' } }));
+  await selfDo('Copy\n\nWrite it.', []);
+  await selfDo('Rename\n\nRename it.', [], [{ path: 'index.html', text: 'a'.repeat(3000) }]);
+  await selfDo('Rename\n\nRename it.', [], [{ path: 'games.html', text: 'a'.repeat(71_344) }, { path: 'index.html', text: 'b'.repeat(44_074) }]);
+  await selfDo('Rename\n\nRename it.', [], [{ path: 'big.html', text: 'c'.repeat(300_000) }]);
+  assert.deepEqual([SELF_DO_MAX_TOKENS, SELF_DO_MAX_TOKENS_CAP], [24_000, 64_000]);
+  assert.deepEqual(sent.map((b) => b.max_tokens), [24_000, 24_000, Math.ceil(115_418 / 3) + 8000, 64_000]);
+});
+
 test('a model that refuses web search or tools gets the same call without them; the record hashes the body sent', async () => {
   reset((b) => ('web_search_options' in b ? { status: 400, raw: '{"error":"web_search_options is not supported for this model"}' }
     : 'tools' in b ? { status: 400, raw: '{"error":"This model does not support tools"}' }
@@ -114,6 +169,7 @@ test('a model that refuses web search or tools gets the same call without them; 
   assert.deepEqual(sent.map((b) => ['web_search_options' in b, 'tools' in b, b.reasoning_effort]), [[true, true, 'low'], [false, true, 'low'], [false, false, 'low']]);
   assert.equal(r.calls.length, 1);
   assert.equal(r.calls[0].request_sha256, createHash('sha256').update(JSON.stringify(sent[2])).digest('hex'));
+  assert.equal(r.calls[0].cost_usd, Number((100 * PRICE.prompt + 50 * PRICE.completion).toFixed(6))); // sent without search: no fee
 });
 
 test('ROOK_LLM_TOOLS=0 turns the tools off; canned mode never calls NEAR AI at all', async () => {
@@ -141,6 +197,8 @@ test("self-do follows the brief's file layout, writes a README for a project, an
   assert.match(s, /write a clearly marked placeholder in square brackets, such as \[Your email\]/);
   assert.match(s, /"files" criteria: deliver each listed path as a whole file/);
   assert.match(s, /"live_url" criteria: you cannot put anything online\. Never write a link to a deploy you did not make/);
+  // QA: a one-line title edit came back as "Wait — I introduced a typo... Please use this second version", both shown.
+  assert.match(s, /Write each file once, in its final form: check it before you write it, never give a second version of it, and never correct yourself in the reply \("Wait", "here is the corrected file"\)\./);
   assert.doesNotMatch(s, /The files before the brief/); // no edit rules without files
   assert.match(sent[0].messages[1].content, /^Brief:\n/);
 });
@@ -178,6 +236,7 @@ test('a translated document is the report as delivered, with no frame; the aggre
   assert.match(s, new RegExp(`When the task transforms one document \\(translates, shortens or rewrites a text\\) and one delivered subtask is that document, reply with only the line ${AS_DELIVERED}`));
   assert.match(s, /Only the files listed as attached are delivered: never say a file is included \(a README, a config\) when it is not on that list\./);
   assert.match(s, /each placeholder the user must replace and each script to review before running/);
+  assert.match(s, /Report what each part delivered, never how it was written: never retell a slip, a correction or an earlier version a deliverable mentions\./);
   // With nothing to add, the document alone; with two parts there is no one document, so the deterministic merge.
   assert.equal((await aggregate({ task_id: 't', prompt: 'Translate it', subtasks: [{ ...one[0], deliverable_text: 'Merhaba.' }] })).final_markdown, 'Merhaba.\n');
   const two = await aggregate({ task_id: 't', prompt: 'Translate it', subtasks: [one[0], { ...one[0], id: 's2', title: 'Glossary', deliverable_text: 'Terimler.' }] });
@@ -192,7 +251,7 @@ test('a translated document is the report as delivered, with no frame; the aggre
   assert.ok(user.endsWith('</deliverable>\n\nFiles attached below the report:\n- index.js (89 lines)\n- package.json (13 lines)\n- README.md (44 lines)\n\nSubtasks not delivered (gaps):\n- Deploy\n- package.json runs a script on npm install ("postinstall": "node setup.js"): review it before running npm install'), user.slice(-600));
 });
 
-test('the cost guard: 10 USD a day by default, calls in flight reserve what they are expected to cost, and "busy" is not the daily limit', async () => {
+test('the cost guard: 10 USD a day by default; a call fits beside the calls in flight, "busy" only when waiting helps, else the limit is nearly used', async () => {
   assert.equal(config.llmMaxUsd, 10);
   assert.deepEqual([16000, 24000, 4000, 500].map(expectedOutputTokens), [4000, 6000, 1000, 500]);
   const gates: (() => void)[] = [];
@@ -200,29 +259,39 @@ test('the cost guard: 10 USD a day by default, calls in flight reserve what they
   const warn = console.warn;
   const logs: string[] = [];
   console.warn = (m: unknown) => { logs.push(String(m)); };
+  const refused = (p: Promise<unknown>) => p.then(() => '', (e) => String(e.message));
+  const msg = [{ role: 'user' as const, content: 'hi' }];
   try {
     // A 16000-token call reserves about 4000 output tokens (0.008 USD here), not its whole max_tokens (0.032).
     process.env.ROOK_LLM_MAX_USD = String(llmSpent24hUsd() + 0.012);
-    const msg = [{ role: 'user' as const, content: 'hi' }];
     const first = chat('a', config.plannerModel, msg, 16000, { sign: false });
     while (gates.length < 1) await new Promise((ok) => setImmediate(ok));
-    const second = chat('b', config.plannerModel, msg, 16000, { sign: false }); // 0.008 in flight, under the limit
-    while (gates.length < 2) await new Promise((ok) => setImmediate(ok));
-    // Two in flight (0.016) would spend the limit: Rook is busy, which is no daily limit (the web app reads "cost guard" as that).
-    const busy = await chat('c', config.plannerModel, msg, 16000, { sign: false }).then(() => '', (e) => String(e.message));
-    assert.match(busy, /^Rook is busy, try again in a minute: the LLM calls in flight hold 0\.016\d USD/);
+    // Beside it (0.008 in flight) another 0.008 would pass the limit, but the one in flight alone does not: once it is
+    // done this call starts alone, so Rook is busy, which is no daily limit (the web app reads "cost guard" as that).
+    const busy = await refused(chat('b', config.plannerModel, msg, 16000, { sign: false }));
+    assert.match(busy, /^Rook is busy, try again in a minute: the LLM calls in flight hold 0\.008\d USD/);
     assert.doesNotMatch(busy, /cost guard|per day/);
+    assert.equal(await refused(chat('b2', config.plannerModel, msg, 16000, { sign: false })), busy);
+    // A small call (0.002) fits beside it.
+    const small = chat('s', config.plannerModel, msg, 1000, { sign: false });
+    while (gates.length < 2) await new Promise((ok) => setImmediate(ok));
+    // With 0.010 in flight and a limit of 0.009, the calls in flight alone would spend the day once they settle: a
+    // retry in a minute would meet the daily limit, so the guard says the day's limit is nearly used.
+    process.env.ROOK_LLM_MAX_USD = String(llmSpent24hUsd() + 0.009);
+    assert.match(await refused(chat('c', config.plannerModel, msg, 100, { sign: false })),
+      /^LLM cost guard: the day's limit is nearly used: \d+\.\d{4} USD spent in the last 24 h and 0\.010\d USD held by the LLM calls in flight, of the [\d.]+ USD a day ROOK_LLM_MAX_USD allows$/);
     gates.forEach((g) => g());
-    await Promise.all([first, second]);
+    await Promise.all([first, small]);
     assert.equal(sent.length, 2);
     gates.length = 0;
     reset(() => ({ message: { content: 'done' } }));
+    process.env.ROOK_LLM_MAX_USD = String(llmSpent24hUsd() + 0.012);
     assert.equal((await chat('d', config.plannerModel, msg, 16000, { sign: false })).text, 'done'); // the calls finished: not busy now
     // Spent up to the limit: the daily refusal, as before.
     process.env.ROOK_LLM_MAX_USD = String(llmSpent24hUsd());
     await assert.rejects(chat('e', config.plannerModel, msg, 100, { sign: false }), /^Error: LLM cost guard: \d+\.\d{4} USD spent in the last 24 h \(0\.0000 in flight\), limit ROOK_LLM_MAX_USD=[\d.]+ per day$/);
-    assert.equal(logs.filter((l) => l.includes('Rook is busy')).length, 1);
-    assert.equal(logs.filter((l) => l.includes('LLM cost guard')).length, 1);
+    // Each refusal is logged once per trip.
+    assert.deepEqual(['Rook is busy', 'nearly used', 'per day'].map((w) => logs.filter((l) => l.includes(w)).length), [1, 1, 1]);
   } finally {
     console.warn = warn;
     delete process.env.ROOK_LLM_MAX_USD;

@@ -282,18 +282,34 @@ function withSources(text: string, sources: Source[]): string {
   return left.length ? `${text.trimEnd()}\n\nSources:\n${left.map((s) => `- ${s.title ? `${s.title.replace(/[[\]\n]/g, ' ').trim()}: ` : ''}${s.url}`).join('\n')}` : text;
 }
 
+/** Self-do's output budget: room for a long deliverable at low effort (reasoning models count their thinking in it). */
+export const SELF_DO_MAX_TOKENS = 24_000;
+/**
+ * ponytail: the most output tokens an edit asks for. The price list doesn't say a model's output limit, and GLM-5.x
+ * writes well past this; an edit that needs more still comes back cut off, and fails (the runner never accepts it).
+ */
+export const SELF_DO_MAX_TOKENS_CAP = 64_000;
+/**
+ * The output budget for a part with `files`: an edit gives back every file it changes whole, so it gets room for all
+ * of them (about 3 characters a token) plus SELF_DO_MAX_TOKENS' margin for thinking and its note, at most the cap. At
+ * 24,000 a rename over 115,418 characters was cut off in games.html and lost 62% of it.
+ */
+export const selfDoMaxTokens = (files: WorkFile[]) =>
+  Math.min(SELF_DO_MAX_TOKENS_CAP, Math.max(SELF_DO_MAX_TOKENS, Math.ceil(files.reduce((n, f) => n + f.text.length, 0) / 3) + 8000));
+
 /**
  * Rook writes one part itself. `files`: an edit's inputs (the conversation's current files the part changes), sent
  * whole before the brief; the reply gives back every file it changes, whole. With tools on (llmTools), the model may
- * search the web and open pages, and what it read or cited is kept as sources after the text.
+ * search the web and open pages, and what it read or cited is kept as sources after the text. `truncated`: the reply
+ * was cut at max_tokens, so its last file is missing its end: the runner never accepts it.
  */
-export async function selfDo(brief: string, criteria: Criterion[], files: WorkFile[] = []): Promise<{ text: string; calls: LlmCall[]; sources: Source[] }> {
-  if (config.llm === 'canned') return { text: cannedSelfDo(brief, criteria, files), calls: [], sources: [] };
+export async function selfDo(brief: string, criteria: Criterion[], files: WorkFile[] = []): Promise<{ text: string; calls: LlmCall[]; sources: Source[]; truncated: boolean }> {
+  if (config.llm === 'canned') return { text: cannedSelfDo(brief, criteria, files), calls: [], sources: [], truncated: false };
   const tools = llmTools();
   // A page written as a Markdown essay, or cut short with "rest of the code here", is no file the user can open. A
   // project flattened into one page, or a site with an invented owner, prices and reviews, is no project of theirs.
   const system = `You are a careful analyst writing one deliverable in Markdown for the brief you are given.
-When the brief asks for code or a file (a web page, a script, a config), deliver the complete file in one fenced code block tagged with its language (\`\`\`html ... \`\`\`), with the file's full path on the line before the block (for example index.html or app/pricing/page.tsx). When it asks for several files (a project), follow the brief's file layout (its folders, file names and the files it lists) and deliver each file that way, one block per file. A web page asked for with no layout is one index.html with its CSS and JavaScript inline. A project of several files also gets a README.md with the exact steps to install and run it. Write every line of every file: no placeholders such as "rest of the code here" or "...". Add at most a short note after the block.${files.length ? `
+When the brief asks for code or a file (a web page, a script, a config), deliver the complete file in one fenced code block tagged with its language (\`\`\`html ... \`\`\`), with the file's full path on the line before the block (for example index.html or app/pricing/page.tsx). When it asks for several files (a project), follow the brief's file layout (its folders, file names and the files it lists) and deliver each file that way, one block per file. A web page asked for with no layout is one index.html with its CSS and JavaScript inline. A project of several files also gets a README.md with the exact steps to install and run it. Write every line of every file: no placeholders such as "rest of the code here" or "...". Write each file once, in its final form: check it before you write it, never give a second version of it, and never correct yourself in the reply ("Wait", "here is the corrected file"). Add at most a short note after the block.${files.length ? `
 The files before the brief are the work as it is now. Change only what the brief asks and keep everything else exactly as it is (text, names, links, code). Give back every file you change whole, each in its own block with its path on the line before; leave out the files you do not change, and never write "unchanged" or "rest stays the same" inside a file.` : ''}
 Never invent facts about the user, their business or their work: names, contact details, projects, employers, prices, reviews, testimonials, client names, metrics or certifications. Use the facts the brief gives; where one is missing, write a clearly marked placeholder in square brackets, such as [Your email] or [Pro plan price], so the user sees what to fill in.
 It will be checked automatically against the acceptance criteria listed below:
@@ -309,13 +325,14 @@ ${tools
   const user = `${files.length ? `${editFilesBlock(files)}\n\n` : ''}Brief:\n${brief}\n\nAcceptance criteria:\n${criteria.map((c) => `- ${c.kind}: ${c.description} ${JSON.stringify(c.spec)}`).join('\n')}`;
   const messages = [{ role: 'system' as const, content: system }, { role: 'user' as const, content: user }];
   // Reasoning models count their thinking in max_tokens: at 6000, coding parts (a web page) came back empty on mainnet,
-  // failed every check three times and were abandoned. Low effort and room for a long deliverable.
+  // failed every check three times and were abandoned. Low effort and room for a long deliverable, or for an edit's files.
+  const max = files.length ? selfDoMaxTokens(files) : SELF_DO_MAX_TOKENS;
   const r = tools
-    ? await chatTools('self_do', config.plannerModel, messages, 24000, { effort: 'low', search: true, functions: { fetch_url: FETCH_URL } })
-    : await chat('self_do', config.plannerModel, messages, 24000, { effort: 'low' }).then(({ text, call }) => ({ text, calls: [call], sources: [] as Source[] }));
+    ? await chatTools('self_do', config.plannerModel, messages, max, { effort: 'low', search: true, functions: { fetch_url: FETCH_URL } })
+    : await chat('self_do', config.plannerModel, messages, max, { effort: 'low' }).then(({ text, call, truncated }) => ({ text, calls: [call], sources: [] as Source[], truncated }));
   // An empty reply is the model failing, not a deliverable to judge: an error, so the run says so instead of "failed checks".
   if (!r.text.trim()) throw Object.assign(new Error("Rook's model returned an empty answer for this part"), { calls: r.calls });
-  return { text: withSources(r.text, r.sources), calls: r.calls, sources: r.sources };
+  return { text: withSources(r.text, r.sources), calls: r.calls, sources: r.sources, truncated: r.truncated };
 }
 
 type AggIn = z.infer<typeof AggregateRequest>;
@@ -340,6 +357,7 @@ Rules:
 - Otherwise, start with a title and a short executive summary.
 - Then one section per delivered subtask, in the given order, headed with the subtask title and a line "Source: <source>" naming who produced it (use the source attribute exactly: an agent's handle, or Rook when Rook wrote that part itself).
 - Keep every figure exactly as the deliverable states it, including any SIMULATED or uncertainty markers; do not add figures that are not in a deliverable.
+- Report what each part delivered, never how it was written: never retell a slip, a correction or an earlier version a deliverable mentions.
 - Rook took each code file out of the deliverables and attaches it below the report as it was delivered; a marker such as [file index.html, 312 lines, attached below the report] stands in its place. In that part's section, name the file and say in a sentence what it is. Never write code for it or rewrite it. Only the files listed as attached are delivered: never say a file is included (a README, a config) when it is not on that list.
 - End with a "## Gaps" section listing each subtask that was not delivered, each file not attached, each placeholder the user must replace and each script to review before running (from the list given), or "None" if there are none.
 - When earlier messages come before the task, the task is what they add up to (a latest message such as "make it shorter" changes the earlier request): title and summarise the report by that task, not by the latest message's wording.

@@ -5,6 +5,7 @@ import {
   CONVERSATION_FILES, CONVERSATION_FILES_CHARS, MAX_HISTORY_HANDLES, type AgentHistory, type DeliveredFile, type EventType, type Evaluation, type LlmCall,
   type Part, type Plan, type PlanSubtask, type Receipt, type RookEvent, type SubtaskStatus, type TaskStatus,
 } from '../shared/types.ts';
+import { cutShort, onInputs } from '../planner/files.ts';
 import type { ChainBinding } from './chain-ledger.ts';
 import type { Ledger, Recipient } from './ledger.ts';
 
@@ -244,16 +245,24 @@ export function workspaceOf(chain: Task[]): { files: DeliveredFile[]; left: stri
 }
 
 /**
- * A run's report files: the workspace with each file this run delivered replacing the one at its path, new ones
- * after. A file carried over unchanged has no part in this run (subtask_id ''). `changed`: the paths this run
- * delivered new or with different text.
+ * A run's report files: the workspace with each file this run delivered replacing the one at its path, in the parts'
+ * order, new ones after. A file carried over unchanged has no part in this run (subtask_id ''). `changed`: the paths
+ * this run delivered new or with different text. `inputs`: the paths each part edits, by subtask id: a delivered file
+ * at another path that stands for one of them ("portfolio/index.html" for index.html, files.ts onInputs) replaces it,
+ * unless its part delivered that path too; before, the chat kept both, and the next edit worked on the old one. A
+ * page cut off before its end (no </html>) never replaces a whole one.
  */
-export function withWorkspace(workspace: DeliveredFile[], delivered: DeliveredFile[]): { files: DeliveredFile[]; changed: string[] } {
+export function withWorkspace(workspace: DeliveredFile[], delivered: DeliveredFile[], inputs: Record<string, string[] | undefined> = {}): { files: DeliveredFile[]; changed: string[] } {
   const out = new Map(workspace.map((f) => [f.name, { ...f, subtask_id: '' }]));
   const changed: string[] = [];
-  for (const f of delivered) {
-    if (out.get(f.name)?.text !== f.text && !changed.includes(f.name)) changed.push(f.name);
-    out.set(f.name, f);
+  for (const d of delivered) {
+    const own = inputs[d.subtask_id] ?? [];
+    const p = out.has(d.name) ? undefined : onInputs(d.name, own);
+    const name = p && !delivered.some((x) => x !== d && x.subtask_id === d.subtask_id && x.name === p) ? p : d.name;
+    if (out.has(name) && cutShort(name, d.text)) continue;
+    const f = name === d.name ? d : { ...d, name };
+    if (out.get(name)?.text !== f.text && !changed.includes(name)) changed.push(name);
+    out.set(name, f);
   }
   return { files: [...out.values()], changed };
 }
