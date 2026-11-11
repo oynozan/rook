@@ -85,9 +85,12 @@ test('a draft may ask instead of planning: questions with no subtasks, at most 5
   assert.equal(Draft.safeParse({ subtasks: [sub('a')], questions: ['Your name?'] }).success, false); // ask or plan, not both
   assert.equal(Draft.safeParse({ subtasks: [], questions: [] }).success, false);
   assert.equal(Draft.safeParse({ subtasks: [], questions: ['  '] }).success, false);
-  assert.equal(Draft.safeParse({ subtasks: [], questions: Array(6).fill('Your name?') }).success, false);
+  // More than 5 keeps the first 5, the most important as the draft lists them, rather than asking the model again.
+  const asks = Array.from({ length: 7 }, (_, i) => `Question ${i + 1}?`);
+  assert.deepEqual(Draft.parse({ subtasks: [], questions: asks }).questions, asks.slice(0, 5));
   assert.equal(Draft.safeParse({ subtasks: [sub('a')], assumptions: ['Images are not included.'] }).success, true);
-  assert.equal(Draft.safeParse({ subtasks: [sub('a')], assumptions: Array(6).fill('x') }).success, false);
+  const given = Array.from({ length: 6 }, (_, i) => `Assumption ${i + 1}.`);
+  assert.deepEqual(Draft.parse({ subtasks: [sub('a')], assumptions: given }).assumptions, given.slice(0, 5));
   // The edit fields are optional, and a model's null is no value.
   assert.equal(Draft.safeParse({ subtasks: [sub('a', { inputs: ['index.html'], rook_edit: true })] }).success, true);
   assert.equal(Draft.safeParse({ subtasks: [sub('a', { inputs: null, rook_edit: null })], questions: null, assumptions: null }).success, true);

@@ -415,6 +415,25 @@ test('a plan with every part dropped ends the task as failed, with the reason in
   }
 });
 
+test('a plan with every part over budget names what the cheapest agents ask and the budget that would hire them', async () => {
+  // QA: "Every part costs more than this budget allows; try a larger budget." left the user guessing how much larger.
+  const over = (...needs: (string | undefined)[]) => needs.map((need_atomic, i) => ({ title: `Part ${i + 1}`, reason: 'over budget', ...(need_atomic ? { need_atomic } : {}) }));
+  const empty = async (dropped: any[], reserve_share?: number) => {
+    plan = { subtasks: [], dropped, budget: budget('0'), notes: [], llm_calls: [] };
+    return (await call(`${orch.url}/tasks`, { prompt: 'p', budget_usdc: '1', ...(reserve_share === undefined ? {} : { reserve_share }) })).error;
+  };
+  // The budget whose share after the reserve (20% unless the task names another) pays the cheapest quote, to the cent up.
+  assert.equal(await empty(over('6000000')), 'The cheapest agent found for this part asks 6.00 USDC, more than this budget allows. A budget of about 7.50 USDC would hire one.');
+  assert.equal(await empty(over('1234567')), 'The cheapest agent found for this part asks 1.234567 USDC, more than this budget allows. A budget of about 1.55 USDC would hire one.');
+  assert.equal(await empty(over('1000000'), 0.5), 'The cheapest agent found for this part asks 1.00 USDC, more than this budget allows. A budget of about 2.00 USDC would hire one.');
+  assert.equal(await empty(over('6000000', '2000000')),
+    'Every part costs more than this budget allows: the cheapest agents found for them ask 2.00 to 6.00 USDC. A budget of about 10.00 USDC would hire one for each part.');
+  // Never a budget past the largest Rook takes (ROOK_MAX_BUDGET_USDC, 50 by default).
+  assert.equal(await empty(over('45000000')), 'The cheapest agent found for this part asks 45.00 USDC, more than this budget allows. Even the largest budget Rook takes, 50.00 USDC, is too small to hire one.');
+  // A part that doesn't say what its agents ask (an older planner): no figure to give.
+  assert.equal(await empty(over('6000000', undefined)), 'Every part costs more than this budget allows; try a larger budget.');
+});
+
 test("a delivered web page reaches the snapshot's final_result as a file, also through the deterministic merge; the final event leaves it out", async () => {
   const page = '<!doctype html>\n<html><body>Ozan</body></html>';
   for (const prompt of ['make me a portfolio website like oynozan.com', 'AGG-DOWN portfolio']) {
@@ -473,7 +492,11 @@ test('an agent with no reachable backend (-32603) is asked again once, after the
 // ---- conversations ----
 
 const holdersPlan = () => ({ subtasks: [sub('s1', 'Holders', '300000', [cand('holders-good', '300000')])], dropped: [], budget: budget('300000'), notes: [], llm_calls: [] });
-const HOLDERS_PARTS = [{ title: 'Holders', brief: 'Holders\nPlease report.' }]; // holdersPlan's parts, as a revision sends them
+// holdersPlan's parts, as a revision sends them: what the user saw, with the criteria and search terms the planner keeps.
+const HOLDERS_PARTS = [{
+  title: 'Holders', brief: 'Holders\nPlease report.', search_terms: ['Holders'],
+  criteria: [{ id: 'c1', kind: 'contains', description: 'x', spec: { pattern: '.' } }],
+}];
 const ended = (id: string) => until(async () => { const x = await snap(id); return ['closed', 'failed', 'killed'].includes(x.task.status) ? x : false; });
 
 test('a follow-up on a finished task gives the planner the earlier messages and the newest report, and the aggregator the earlier messages', async () => {
@@ -694,6 +717,30 @@ test('the conversation sent to the planner keeps the first and the newest messag
   assert.ok(Conversation.safeParse(c).success);
   // Short ones go as they are; with no report, there is no report field.
   assert.deepEqual(conversationFor(chain.slice(-2), chain.at(-1)!), { earlier: ['m0', 'm1'], revising: true });
+
+  // A revision sends each part as the user saw it, with what the planner keeps of it, and the planner's schema keeps it
+  // all: before, only the title and brief went, so a revision re-drafted the criteria of parts it left as they were.
+  const { setPlan } = await import('../src/orchestrator/store.ts');
+  const open = chain.at(-1)!;
+  const mail = { id: 'c1', kind: 'contains', description: 'Email link', spec: { pattern: 'mailto:elif@sahin.studio' } };
+  const part = (id: string, title: string, o: any = {}) => ({
+    id, title, brief: `${title}\n\nDo it.`, search_terms: [title], criteria: [mail], cap_atomic: '0', deadline_s: 0, self_do: false, candidates: [], ...o,
+  });
+  setPlan(open, { subtasks: [
+    part('s1', 'Portfolio site', { category: 'dev_tools', self_do_ok: true }),
+    part('s2', 'Rename', { self_do: true, self_do_ok: true, self_do_reason: 'rook_edit', inputs: ['index.html'] }),
+  ], dropped: [], budget: budget('0'), notes: [], llm_calls: [] } as any);
+  const revision = conversationFor(chain.slice(-2), open);
+  const parts = [
+    { title: 'Portfolio site', brief: 'Portfolio site\n\nDo it.', criteria: [mail], search_terms: ['Portfolio site'], category: 'dev_tools', self_do_ok: true },
+    { title: 'Rename', brief: 'Rename\n\nDo it.', criteria: [mail], search_terms: ['Rename'], self_do_ok: true, inputs: ['index.html'], self_do_reason: 'rook_edit' },
+  ];
+  assert.deepEqual(revision.plan, parts);
+  assert.deepEqual(Conversation.parse(revision).plan, parts);
+  // Read leniently: a field that no longer parses (a plan stored long ago) is left out, never a refused request.
+  const old = Conversation.parse({ ...revision, plan: [{ ...parts[0], criteria: [{ id: 'c1', kind: 'gone', spec: {} }], search_terms: [] }] });
+  const [kept] = old.plan!;
+  assert.deepEqual([kept.title, kept.criteria, kept.search_terms, kept.category, kept.self_do_ok], ['Portfolio site', undefined, undefined, 'dev_tools', true]);
 
   // With files: every report's files, oldest to newest, a later version of a path replacing the earlier one in its
   // place; whole, apart from the report, which keeps them out (on mainnet a 407-line page lost its footer and script).

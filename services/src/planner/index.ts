@@ -8,7 +8,7 @@ import { NearRpcError, rpc } from '../shared/near.ts';
 import type { AgentListing } from '../market-gateway/index.ts';
 import {
   ACCOUNT_FIXES, MAX_CATEGORY_LISTED, MAX_PICKS, applySelection, buildPlan, carryParts, editsOnly, filterSearch, fitting, fixAccounts, goodRecord,
-  hireable, inputsBlocked, isAction, isRookEdit, keepCriteria, marketCategory, nearAccountIds, placeholderQuestions, planParts, prefilter,
+  hireable, inputsBlocked, isAction, isRookEdit, keepCriteria, marketCategory, nearAccountIds, placeholderQuestions, prefilter,
   type AccountState, type QuoteResult,
 } from './plan.ts';
 import { BUDGET_HOW, aggregate, draft, select, selfDo } from './prompts.ts';
@@ -88,9 +88,8 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
   // a page re-read from an earlier message turned a rename into a clone of it. A revision keeps its reference: the
   // plan it revises carries what the page showed, else the earlier messages' pages are read again.
   const conv = req.conversation;
-  // The parts of the plan being revised, with whatever the orchestrator sends beyond their title and brief (criteria,
-  // search terms): Conversation's schema keeps only those two, so the rest is read from the body as sent.
-  const parts = conv?.plan?.length ? planParts((body as { conversation?: { plan?: unknown } })?.conversation?.plan) : [];
+  // The parts of the plan being revised, with their criteria and the rest of each part as the orchestrator sends it.
+  const parts = conv?.plan ?? [];
   const refs = await readReferences(conv?.revising && !conv.plan?.length ? [req.prompt, ...[...conv.earlier].reverse()] : [req.prompt]);
   const { draft: drafted0, notATask, questions, assumptions, notes: draftNotes, budgetAtomic: drafted, action: draftAction } = await llmStep(calls, () => draft(req.prompt, sent, sent - share(sent, req.reserve_share), conv, refs));
   if (!drafted0.length && !questions?.length) throw new HttpError(422, notATask || 'This does not read as a task Rook can plan: say what you want done.', { llm_calls: calls });
@@ -132,7 +131,8 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
 
   // A small edit Rook makes itself at once needs no agent: it is never searched for, picked or quoted.
   const files = conv?.files?.map((f) => f.path) ?? [];
-  const edits = d.map((s) => isRookEdit(s, files));
+  const sizes = new Map(conv?.files?.map((f) => [f.path, f.text.length]));
+  const edits = d.map((s) => isRookEdit(s, files, sizes));
   const hire = d.flatMap((_, i) => (edits[i] ? [] : [i]));
   progress({ stage: 'searching', subtasks: hire.map((index) => ({ index, title: d[index].title })) });
 
@@ -193,7 +193,7 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
     if (typeof w === 'number' && Number.isFinite(w)) windows.set(h, { s: w, at: Date.now() });
   }
 
-  const out = buildPlan({ draft: d, selected, quotes, recipients: x402.recipients ?? [], budget_atomic: budget, reserve_share: req.reserve_share, history, files });
+  const out = buildPlan({ draft: d, selected, quotes, recipients: x402.recipients ?? [], budget_atomic: budget, reserve_share: req.reserve_share, history, files, sizes });
   // A part whose files are over what Rook sends with one part: the plan is shown, never funded.
   const blocked = inputsBlocked(out.subtasks, conv?.files ?? []);
   // Rook's own edits only take no money: no total the message names is adopted for them (their budget figures are 0).

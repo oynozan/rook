@@ -82,6 +82,7 @@ export type Candidate = {
 export type SelfDoReason = 'no_agent' | 'over_budget' | 'rook_edit';
 export type PlanSubtask = {
   id: string; title: string; brief: string; search_terms: string[];
+  category?: string; // the market category the draft named, when Rook knows it: a part carried into a later plan lists it again
   criteria: Criterion[]; cap_atomic: string; deadline_s: number; self_do: boolean;
   self_do_reason?: SelfDoReason; // set on every self_do subtask
   self_do_need_atomic?: string; // over_budget only: the cheapest quoted price, what one hire would have cost
@@ -140,6 +141,22 @@ const Earlier = z.array(z.string().min(1)).min(1).max(CONVERSATION_MESSAGES); //
 export const WorkFile = z.object({ path: z.string().min(1).max(300), text: z.string() });
 export type WorkFile = z.infer<typeof WorkFile>;
 /**
+ * A part of the plan a message revises, as the user saw it: its title and brief, and the rest of the part the planner
+ * keeps (its criteria, search terms, market category, whether Rook may write it, the files it edits, why Rook does it).
+ * Read leniently: a field that doesn't parse is left out, never a refused request (a plan stored long ago may hold an
+ * older criterion).
+ */
+export const PlanPart = z.object({
+  title: z.string(), brief: z.string(),
+  criteria: z.array(Criterion).optional().catch(undefined),
+  search_terms: z.array(z.string().min(1)).min(1).max(3).optional().catch(undefined),
+  category: z.string().nullish().catch(undefined),
+  self_do_ok: z.boolean().optional().catch(undefined),
+  inputs: z.array(z.string().min(1)).max(CONVERSATION_FILES).optional().catch(undefined),
+  self_do_reason: z.string().optional().catch(undefined),
+});
+export type PlanPart = z.infer<typeof PlanPart>;
+/**
  * The conversation a task's prompt continues (docs/agentic-system.md 5.1). `earlier`: the user's earlier messages, oldest
  * first. `revising`: the prompt changes a plan that has not run, so the whole revised task is planned. `report`: the
  * newest report in the conversation, cut to CONVERSATION_REPORT_CHARS. `files`: the conversation's current files, whole
@@ -151,7 +168,7 @@ export const Conversation = z.object({
   files: z.array(WorkFile).max(CONVERSATION_FILES)
     .refine((fs) => fs.reduce((n, f) => n + f.text.length, 0) <= CONVERSATION_FILES_CHARS, `files hold more than ${CONVERSATION_FILES_CHARS} characters`).optional(),
   questions: z.array(z.string().min(1)).max(10).optional(),
-  plan: z.array(z.object({ title: z.string(), brief: z.string() })).max(10).optional(),
+  plan: z.array(PlanPart).max(10).optional(),
 });
 export type Conversation = z.infer<typeof Conversation>;
 export const PlanRequest = z.object({
