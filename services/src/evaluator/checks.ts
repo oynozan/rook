@@ -311,10 +311,13 @@ export type ContainsResult = { matched: boolean; how?: 'as written' | 'as a rege
  * ponytail: a deliberate regex runs unguarded; a catastrophic-backtracking one would stall this process.
  */
 export function containsMatch(pattern: string, text: string): ContainsResult {
-  if (fold(text).includes(fold(pattern))) return { matched: true, how: 'as written' };
-  if (REGEX_INTENT.test(pattern)) {
+  // The planner marks a deliberate regex /like this/ (plan.ts deliberateRegex): only its body is the pattern.
+  const slashed = /^\/(.+)\/$/s.exec(pattern)?.[1];
+  if (slashed === undefined && fold(text).includes(fold(pattern))) return { matched: true, how: 'as written' };
+  const body = slashed ?? (REGEX_INTENT.test(pattern) ? pattern : undefined);
+  if (body !== undefined) {
     let re: RegExp | undefined;
-    try { re = new RegExp(pattern, 'i'); } catch { /* not a regex after all: read as written */ }
+    try { re = new RegExp(body, 'i'); } catch { /* not a regex after all: read as written */ }
     if (re) {
       if (re.test('')) return { matched: false, vacuous: true };
       if (re.test(text)) return { matched: true, how: 'as a regex' };

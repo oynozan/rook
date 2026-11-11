@@ -512,13 +512,17 @@ const fenceFor = (text: string) => '`'.repeat([...text.matchAll(/`+/g)].reduce((
  * delivered work as it is, never from a model's retelling of it. The language tag lets a reply in the same shape be
  * read back as files (planner/files.ts).
  */
-export function messageFor(brief: string, files: WorkFile[]): string {
+export function messageFor(brief: string, files: WorkFile[], publish = false): string {
   if (!files.length) return brief;
   const blocks = files.map((f) => {
     const fence = fenceFor(f.text), lang = f.path.split('/').at(-1)!.match(/.\.([A-Za-z0-9]{1,10})$/)?.[1] ?? '';
     return `${f.path}\n${fence}${lang}\n${f.text}\n${fence}`;
   });
-  return `${brief.trimEnd()}\n\n## Current files\n\nThe files to change, exactly as they are now, each under its path. Change only what is asked above, and send back every file you change whole, under the same path.\n\n${blocks.join('\n\n')}`;
+  // A deploy publishes the files as they are: "send back every file you change" asked it for code, not a link.
+  const how = publish
+    ? 'The files to publish, exactly as they are, each under its path. Publish them unchanged and answer with the live link.'
+    : 'The files to change, exactly as they are now, each under its path. Change only what is asked above, and send back every file you change whole, under the same path.';
+  return `${brief.trimEnd()}\n\n## Current files\n\n${how}\n\n${blocks.join('\n\n')}`;
 }
 
 /** Bytes an agent sent inside its reply: text when they read as UTF-8 text, else just their size. */
@@ -845,7 +849,7 @@ async function hire1(ledger: Ledger, t: Task, s: Sub, c: Candidate, row: Accepts
     saveTask(t);
     let sent: GatewayResult<{ task: A2ATask }>;
     try {
-      sent = await call(gw('/send'), { handle: c.handle, text: messageFor(s.brief, inputsFor(t, s)), payment: auth.header });
+      sent = await call(gw('/send'), { handle: c.handle, text: messageFor(s.brief, inputsFor(t, s), s.criteria.some((c) => c.kind === 'live_url')), payment: auth.header });
     } catch (e) {
       sent = { ok: false, error: { code: 'network', message: msg(e) } };
     }

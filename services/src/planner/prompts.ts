@@ -313,7 +313,7 @@ When the brief asks for code or a file (a web page, a script, a config), deliver
 The files before the brief are the work as it is now. Change only what the brief asks and keep everything else exactly as it is (text, names, links, code). Give back every file you change whole, each in its own block with its path on the line before; leave out the files you do not change, and never write "unchanged" or "rest stays the same" inside a file.` : ''}
 Never invent facts about the user, their business or their work: names, contact details, projects, employers, prices, reviews, testimonials, client names, metrics or certifications. Use the facts the brief gives; where one is missing, write a clearly marked placeholder in square brackets, such as [Your email] or [Pro plan price], so the user sees what to fill in.
 It will be checked automatically against the acceptance criteria listed below:
-- "contains" criteria: the text must match the regex pattern (case-insensitive).
+- "contains" criteria: the text must contain the pattern as written (case-insensitive); a pattern written /like this/ is a regex the text must match.
 - "numeric_match" and "cross_check" criteria: whenever you state such a figure, print it on its own line exactly as "Label: value" with the given label, digits only plus an optional % (for example "Holder count: 412530").
 - "files" criteria: deliver each listed path as a whole file, in its own block with that path on the line before it.
 - "live_url" criteria: you cannot put anything online. Never write a link to a deploy you did not make; say plainly that the work is not online yet.

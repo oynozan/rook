@@ -173,6 +173,9 @@ test('contains: matched as written in the delivered files, a regex only on purpo
   // A regex on purpose still works; a plain phrase still matches across punctuation.
   assert.deepEqual(containsMatch('colou?r', 'Pick a color'), { matched: true, how: 'as a regex' });
   assert.deepEqual(containsMatch('top 10|Top ten', 'the Top ten holders'), { matched: true, how: 'as a regex' });
+  // The planner writes a deliberate regex /like this/ (plan.ts): its body is matched, never the slashes as text.
+  assert.deepEqual(containsMatch('/holders?\\s+count/', 'Holder count: 412530'), { matched: true, how: 'as a regex' });
+  assert.equal(containsMatch('/^Holders$/', 'Holder count').matched, false);
   assert.deepEqual(containsMatch('Price USD', 'Price (USD): 3.12'), { matched: true, how: 'ignoring punctuation and spacing' });
   assert.equal(containsMatch('Why?', 'What is this').matched, false); // a question, not "Wh" with an optional "y"
   assert.equal(containsMatch('| Name | Price |', '| Name | Cost |').matched, false); // a table row, not empty alternatives

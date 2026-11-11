@@ -1123,6 +1123,17 @@ test('an image link, data, a text file and a photo sent as bytes are all kept: t
   assert.match(s.final_result.final_markdown, /File: logo\.png https:\/\/cdn\.example\/a\/9f2/);
 });
 
+test('an agent is sent the files to change, or for a deploy the files to publish as they are', async () => {
+  const { messageFor } = await import('../src/orchestrator/runner.ts');
+  const files = [{ path: 'index.html', text: '<h1>Hi</h1>' }];
+  assert.equal(messageFor('Brief', []), 'Brief');
+  assert.match(messageFor('Make it red', files), /Change only what is asked above, and send back every file you change whole/);
+  const deploy = messageFor('Deploy the site', files, true);
+  assert.ok(deploy.includes('The files to publish, exactly as they are, each under its path. Publish them unchanged and answer with the live link.'));
+  assert.doesNotMatch(deploy, /send back every file/);
+  assert.ok(deploy.endsWith('index.html\n```html\n<h1>Hi</h1>\n```'));
+});
+
 test('deliveryOf reads data urls and a file part with its bytes inline, and never throws on what an agent sends', async () => {
   const { deliveryOf } = await import('../src/orchestrator/runner.ts');
   const b64 = (s: string) => Buffer.from(s).toString('base64');
