@@ -15,10 +15,10 @@ import { InlineText, Markdown } from '@/components/app/Markdown';
 import { ReportFiles } from '@/components/app/ReportFiles';
 import { clockTime, RunParts, useClock } from '@/components/app/RunParts';
 import { attemptNote, canEdit, canSendAgain, failedDraft, messageProblem, redoWait, shownInstead, shownTasks } from '@/lib/chat-actions';
-import { ASK_LEAD, conversationOf, missingParts, PLACEHOLDERS_ANSWER, questionsOf, retryMessage, revisedPlan } from '@/lib/conversations';
+import { ASK_LEAD, askPrompt, conversationOf, missingParts, PLACEHOLDERS_ANSWER, questionsOf, retryMessage, revisedPlan } from '@/lib/conversations';
 import { checkDraft, parseBudget } from '@/lib/draft';
 import { deliveredParts, feedFrom, type FeedLine, type Now } from '@/lib/feed';
-import { costLabel, editLine, fallbackLine, planCost, planNotes, reserveSpent, spendLabel, timeLine } from '@/lib/plan-view';
+import { costLabel, criterionCheck, droppedLines, editLine, emptyPlanLead, fallbackLine, planBlocked, planCost, planNotes, reserveSpent, spendLabel, timeLine } from '@/lib/plan-view';
 import { nowLine, partViews, runHeadline, type Line } from '@/lib/run-view';
 import {
   balanceProblem, closeTaskTransaction, confirmFailure, contractHasTask, fetchTxOutcome, fundingFrom, fundingMismatch, fundingTerms, fundingTransaction, isWalletCancel,
@@ -27,7 +27,8 @@ import {
   type CloseResult, type Funding, type FundingResult, type KeptTransfer, type Terms,
 } from '@/lib/funding';
 import { explorerTx, NETWORK, rpcFor, type Network } from '@/lib/network';
-import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary } from '@/lib/server/orchestrator';
+import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary, Unaccepted } from '@/lib/server/orchestrator';
+import { unacceptedLine } from '@/lib/report';
 import { detail, pageUnreachable } from '@/lib/errors';
 import { useMode } from '@/hooks/mode';
 import { allSelfDoWhy, budgetToHire, selfDoWhy } from '@/lib/planner';
@@ -350,7 +351,13 @@ function PlanRow({ subtask: s, usage, reserve, why, started }: { subtask: PlanVi
             </details>
           )}
           <p className="text-sm text-ink/65">Must pass</p>
-          <ul className="mt-1 space-y-0.5">{s.criteria.map((c) => <li key={c.id}>{c.description}</li>)}</ul>
+          <ul className="mt-1 space-y-0.5">
+            {s.criteria.map((c) => {
+              // A check that loads something (an image, a cited source, the live link) says so: its words alone may promise less.
+              const how = criterionCheck(c);
+              return <li key={c.id}>{c.description}{how && <span className="block text-sm text-ink/60">{how}</span>}</li>;
+            })}
+          </ul>
           {time && <p className="mt-3 text-sm text-ink/65">{time}</p>}
           {s.candidates.length > 0 && (
             <>
@@ -463,6 +470,46 @@ function MoneyCard({ ledger, receipts, network, simNote, titles }: { ledger: Tas
         </ol>
       )}
     </div>
+  );
+}
+
+/**
+ * For each part the run left out, the best paid delivery that failed Rook's checks (final_result.unaccepted), closed
+ * until opened: who sent it and which checks it failed, then the delivery itself. It isn't part of the report, and a
+ * later change never builds on it. Agent text: shown as plain React text only (Markdown).
+ */
+function UnacceptedWork({ items, titles }: { items: Unaccepted[]; titles: Map<string, string> }) {
+  return (
+    <section className="mt-6">
+      <h3 className="text-xl font-medium tracking-[-0.01em]">Work that didn&apos;t pass</h3>
+      <p className="text-sm text-ink/65">Rook paid for this work, but it failed Rook&apos;s checks, so it isn&apos;t part of the report and later changes don&apos;t build on it.</p>
+      <ul className="mt-2 rounded-2xl border border-ink/15">
+        {items.map((u) => <UnacceptedRow key={u.subtask_id} u={u} part={titles.get(u.subtask_id)} />)}
+      </ul>
+    </section>
+  );
+}
+
+function UnacceptedRow({ u, part }: { u: Unaccepted; part?: string }) {
+  const [open, setOpen] = useState(false);
+  const id = useId();
+  return (
+    <li className="min-w-0 border-b border-ink/10 px-4 py-3 last:border-b-0">
+      {part && <p className="font-medium wrap-break-word">{part}</p>}
+      <button
+        type="button"
+        aria-expanded={open}
+        aria-controls={open ? id : undefined}
+        onClick={() => setOpen((o) => !o)}
+        className="-mx-2 flex min-h-11 max-w-full cursor-pointer items-baseline gap-2 rounded-lg px-2 py-2 text-left text-sm text-alert transition-colors hover:bg-ink/5 motion-reduce:transition-none"
+      >
+        <span className={`shrink-0 transition-transform duration-200 motion-reduce:transition-none ${open ? 'rotate-90' : ''}`} aria-hidden="true">›</span>
+        <span className="min-w-0 wrap-break-word">{unacceptedLine(u)}</span>
+      </button>
+      <Reveal open={open}>
+        <div id={id}><Markdown markdown={u.text} className="mt-1" /></div>
+      </Reveal>
+    </li>
   );
 }
 
@@ -1138,11 +1185,11 @@ type Answer = (prompt: string, budget: string) => Promise<boolean>;
  * `revised`: a newer message is revising this plan and is still being planned, so the plan waits for it. `onRedo`: this
  * is the newest message and nothing above it is planning or running, so it can be sent again or edited; `redoing`:
  * that is under way; `locked`: another message is being sent. `onAnswer`: this is the newest message, so a button
- * may send the next one (Use placeholders, Try this part again).
+ * may send the next one (Use placeholders, Try this part again). `chat`: the chat's first request, which names its zip.
  */
-function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo, redoing, locked, onAnswer }: {
+function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo, redoing, locked, onAnswer, chat }: {
   id: string; loaded: Loaded; tasks: TaskSummary[] | null; onGrow: () => void; fresh: boolean; onRevealed: (id: string) => void; revised: boolean;
-  onRedo?: Redo; redoing: boolean; locked: boolean; onAnswer?: Answer;
+  onRedo?: Redo; redoing: boolean; locked: boolean; onAnswer?: Answer; chat?: string;
 }) {
   const { snap, events, problem, down, refetch } = loaded;
   const router = useRouter();
@@ -1194,7 +1241,9 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
   }, [awaitingFunding, sentLive, funding, fundingConfirmed, fundingTrouble, id, refetch]);
   // Chain mode, a plan waiting for approval: the wallet's USDC is checked now, while the plan can still be cancelled, so
   // a wallet short of the budget never leaves an approved task waiting for funding.
-  const needsFunds = status === 'planned' && chain && !free && !paymentsOff;
+  // A plan Rook says can't be funded as it is (planBlocked) offers no funding, so the wallet isn't read for it.
+  const blocked = snap?.plan ? planBlocked(snap.plan) : null;
+  const needsFunds = status === 'planned' && chain && !free && !paymentsOff && !blocked;
   const funds = useUsdcShortfall(needsFunds ? snap?.task.budget_atomic ?? null : null);
   const known = tasks?.find((t) => t.id === id)?.status;
   const [revealing, setRevealing] = useState(fresh); // a plan just drafted here: agents land first, then the plan
@@ -1304,6 +1353,8 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
   // A finished run's parts that delivered nothing: the header names them, and the next step is trying them again.
   const missing = final_result ? missingParts(final_result.abandoned, titles) : [];
   const questions = asking ? questionsOf(plan, task.error) : [];
+  // Only the newest message's questions ask for an answer; an action in the world is never done on placeholders.
+  const ask = asking ? askPrompt({ newest: !!onAnswer, action: plan?.action }) : null;
 
   // The message's own problem (not a task, a budget out of range): editing it is what helps, so that comes first.
   const aboutMessage = messageProblem(task.error);
@@ -1335,8 +1386,8 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
           {questions.length > 0 && (
             <ul className="mt-2 space-y-1.5">{questions.map((q, i) => <li key={i} className="pl-4 -indent-3">• <InlineText text={q} /></li>)}</ul>
           )}
-          <p className="mt-3 text-sm text-ink/65">Answer below. Or Rook can use clearly marked placeholders for you to replace later.</p>
-          {onAnswer && (
+          {ask && <p className="mt-3 text-sm text-ink/65">{ask.line}</p>}
+          {ask?.placeholders && onAnswer && (
             <div className="mt-3 flex flex-wrap gap-3">
               <ActionButton onClick={() => void answer(PLACEHOLDERS_ANSWER)} busy={answering} disabled={locked || redoing || editing}>{answering ? 'Sending…' : 'Use placeholders'}</ActionButton>
             </div>
@@ -1359,12 +1410,23 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
         </RookMessage>
       )}
 
-      {/* Every part was dropped: the task ended there, with the orchestrator's reason (no agent fits, or over budget). */}
+      {/* Every part was dropped: the task ended there. Why, part by part (what an over-budget part's cheapest agent asks,
+          and the budget that would hire it), in place of the orchestrator's one sentence for all; and what the plan
+          took as given, which still matters for the next message. */}
       {plan && !asking && !revealing && plan.subtasks.length === 0 && (
         <RookMessage>
-          <p>Rook couldn&apos;t draft a plan for this task.</p>
-          {task.error && <p className="mt-1 text-sm text-ink/65">{task.error}</p>}
-          {plan.dropped.length > 0 && <ul className="mt-2 text-sm text-ink/65">{plan.dropped.map((d, i) => <li key={i}>{d.title}: {d.reason}</li>)}</ul>}
+          {plan.dropped.length > 0 ? (
+            <>
+              <p>{emptyPlanLead(plan.dropped)}</p>
+              <ul className="mt-2 space-y-1">{droppedLines(plan, mode?.max_budget_atomic).map((l, i) => <li key={i} className="pl-4 -indent-3">• {l}</li>)}</ul>
+            </>
+          ) : (
+            <>
+              <p>Rook couldn&apos;t draft a plan for this task.</p>
+              {task.error && <p className="mt-1 text-sm text-ink/65">{task.error}</p>}
+            </>
+          )}
+          <PlanFacts plan={plan} />
           {editMessage && <div className="mt-3 flex flex-wrap gap-3">{editMessage}</div>}
         </RookMessage>
       )}
@@ -1373,7 +1435,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
         <RookMessage>
           {free ? (
             <p>
-              Here&apos;s the plan. {allSelfDoWhy(plan.subtasks.map((s) => s.self_do_reason), budgetToHire(plan), mode?.max_budget_atomic)}{' '}
+              Here&apos;s the plan. {allSelfDoWhy(plan.subtasks, budgetToHire(plan), mode?.max_budget_atomic)}{' '}
               Nothing is hired, so nothing is paid and nothing leaves your wallet.{task.status === 'cancelled' && (task.replaced_by ? ` ${REPLACED}` : ' You cancelled it.')}
             </p>
           ) : (
@@ -1389,7 +1451,14 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
           )}
           <PlanCard plan={plan} usage={usage} started={started} />
           <PlanFacts plan={plan} />
-          {plan.dropped.length > 0 && <p className="mt-2 text-sm text-ink/65">Left out: {plan.dropped.map((d) => `${d.title} (${d.reason})`).join(', ')}</p>}
+          {plan.dropped.length > 0 && (
+            <div className="mt-3 text-sm text-ink/65">
+              <p>Left out of this plan:</p>
+              <ul className="mt-1 space-y-0.5">{droppedLines(plan, mode?.max_budget_atomic).map((l, i) => <li key={i} className="pl-4 -indent-3">• {l}</li>)}</ul>
+            </div>
+          )}
+          {/* Why it can't be funded as it is: said in place of the funding button, never after the money moved. */}
+          {blocked && task.status === 'planned' && <p role="alert" className="mt-3 text-alert">{blocked}</p>}
           {/* Stopped before Rook bound the wallet's transfer: whatever the feed shows, its USDC is the funder's to take back. */}
           {task.status === 'killed' && !ledger && snap.funding_sent && (
             <HeldFunding id={id} sent={snap.funding_sent} want={(funding && termsOf(funding)) ?? planTerms(task.budget_atomic, plan)}
@@ -1397,18 +1466,20 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
           )}
           {task.status === 'planned' && (
             <div className="rook-in mt-4 flex flex-wrap gap-3" style={{ animationDelay: `${250 + plan.subtasks.length * 90}ms` }}>
-              <ActionButton primary onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account || paymentsOff || !!funds.short || revised || redoing}
-                title={paymentsOff ? undefined : !wallet.account ? 'Connect your wallet first' : funds.short ? 'Your wallet holds less USDC than this budget' : revised ? 'Wait for the revised plan below' : undefined}>
-                {busy === 'approve' ? (funds.checking ? 'Checking your USDC balance…' : chain && !free ? 'Preparing the transfer…' : 'Starting…') : free ? 'Start' : paymentsOff ? 'Approve' : noMoney ? 'Run simulation' : `Fund ${usdc(task.budget_atomic)} USDC and start`}
-              </ActionButton>
+              {!blocked && (
+                <ActionButton primary onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account || paymentsOff || !!funds.short || revised || redoing}
+                  title={paymentsOff ? undefined : !wallet.account ? 'Connect your wallet first' : funds.short ? 'Your wallet holds less USDC than this budget' : revised ? 'Wait for the revised plan below' : undefined}>
+                  {busy === 'approve' ? (funds.checking ? 'Checking your USDC balance…' : chain && !free ? 'Preparing the transfer…' : 'Starting…') : free ? 'Start' : paymentsOff ? 'Approve' : noMoney ? 'Run simulation' : `Fund ${usdc(task.budget_atomic)} USDC and start`}
+                </ActionButton>
+              )}
               {funds.short && <ActionButton onClick={() => void funds.check()} busy={funds.checking}>{funds.checking ? 'Checking…' : 'Check again'}</ActionButton>}
               <ActionButton onClick={() => act('cancel')} busy={busy === 'cancel'} disabled={redoing}>Cancel</ActionButton>
             </div>
           )}
           {task.status === 'planned' && revised && <p className="mt-2 text-sm text-ink/60">Your newer message is revising this plan. Wait for the revised plan below.</p>}
-          {task.status === 'planned' && !free && !paymentsOff && noMoney && <p className="mt-2 text-sm text-ink/60">A simulated {usdc(task.budget_atomic)} USDC budget: nothing leaves your wallet and no agent is paid.</p>}
+          {task.status === 'planned' && !blocked && !free && !paymentsOff && noMoney && <p className="mt-2 text-sm text-ink/60">A simulated {usdc(task.budget_atomic)} USDC budget: nothing leaves your wallet and no agent is paid.</p>}
           {task.status === 'planned' && funds.short && <p role="alert" className="mt-2 text-sm text-alert">{funds.short}</p>}
-          {task.status === 'planned' && !free && !paymentsOff && !noMoney && !funds.short && <p className="mt-2 text-sm text-ink/60">One click: your wallet opens to send the {usdc(task.budget_atomic)} USDC budget to the Rook contract on NEAR {network}, and the run starts once it lands. Each subtask spends at most its cap plus what Rook tops up from the reserve, and whatever isn&apos;t spent comes back to you.</p>}
+          {task.status === 'planned' && !blocked && !free && !paymentsOff && !noMoney && !funds.short && <p className="mt-2 text-sm text-ink/60">One click: your wallet opens to send the {usdc(task.budget_atomic)} USDC budget to the Rook contract on NEAR {network}, and the run starts once it lands. Each subtask spends at most its cap plus what Rook tops up from the reserve, and whatever isn&apos;t spent comes back to you.</p>}
         </RookMessage>
       )}
 
@@ -1461,7 +1532,10 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
             </div>
           )}
           <Markdown markdown={final_result.final_markdown} />
-          {!!final_result.files?.length && <ReportFiles files={final_result.files} titles={titles} name={titles.get(final_result.files[0].subtask_id) ?? task.prompt} />}
+          {/* The zip carries the chat's name (its first request), not this message's: QA got "make-the-accent-color-orange.zip" for a whole site. */}
+          {!!final_result.files?.length && <ReportFiles files={final_result.files} titles={titles} name={chat ?? titles.get(final_result.files[0].subtask_id) ?? task.prompt}
+            changed={final_result.changed} edit={planned.some((s) => !!s.inputs?.length)} />}
+          {!!final_result.unaccepted?.length && <UnacceptedWork items={final_result.unaccepted} titles={titles} />}
 
           {!free && <MoneyCard ledger={ledger} receipts={receipts} network={network} simNote={simNote} titles={titles} />}
         </RookMessage>
@@ -1510,15 +1584,16 @@ function TaskThread({ account, hidden, onReady, onSummary, ...props }: ThreadPro
   const t = snap?.task;
   const [status, prompt, created, parent, budget, supersedes] = [t?.status, t?.prompt, t?.created_at, t?.parent_id ?? null, t?.budget_atomic, t?.supersedes ?? null];
   const hasPlan = !!snap?.plan?.subtasks.length;
+  const action = !!snap?.plan?.action; // the composer offers no placeholders for an action in the world
   // The parts a finished run didn't deliver, so the composer can offer to try them again.
   const titles = new Map((snap?.plan?.subtasks ?? []).map((s) => [s.id, s.title]));
   const missing = missingParts(snap?.final_result?.abandoned, titles).join('\n');
   // superseded_by is left to the list: a snapshot loaded before an edit in another tab would override it.
   useEffect(() => {
     if (status && prompt !== undefined && created) {
-      onSummary(id, { id, status, prompt, created_at: created, parent_id: parent, budget_atomic: budget, has_plan: hasPlan, supersedes, ...(missing ? { missing: missing.split('\n') } : {}) });
+      onSummary(id, { id, status, prompt, created_at: created, parent_id: parent, budget_atomic: budget, has_plan: hasPlan, supersedes, ...(missing ? { missing: missing.split('\n') } : {}), ...(action ? { action } : {}) });
     }
-  }, [id, status, prompt, created, parent, budget, hasPlan, supersedes, missing, onSummary]);
+  }, [id, status, prompt, created, parent, budget, hasPlan, supersedes, missing, action, onSummary]);
   useEffect(() => () => onSummary(id, null), [id, onSummary]);
   return hidden ? null : <Thread {...props} loaded={loaded} />;
 }
@@ -1692,7 +1767,7 @@ export function Chat({ tasks }: { tasks: TaskSummary[] | null }) {
                 <TaskThread key={`${task}:${wallet.account}`} id={task} account={wallet.account} hidden={sending?.id === task} onReady={onReady} onSummary={onSummary}
                   tasks={tasks} onGrow={follow} fresh={justDrafted.current.has(task)} onRevealed={onRevealed} revised={revised === task}
                   onRedo={task === newest && !redoBlocked ? redo : undefined} redoing={redoing === task} locked={!!sending || (redoing !== null && redoing !== task)}
-                  onAnswer={task === newest ? send : undefined} />
+                  onAnswer={task === newest ? send : undefined} chat={conversation?.title} />
               ))}
               {sending && (
                 <>

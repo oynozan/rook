@@ -36,14 +36,19 @@ export function conversations(tasks: TaskSummary[]): Conversation[] {
   }).sort((a, b) => byAge(b.latest, a.latest));
 }
 
-const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-
 /**
- * What tells apart chats that start with the same request: the day each started ("9 Nov"), and when that is the same
- * too, its place among them by age ("9 Nov · 2"). Only those chats get one. The day is UTC, so the server and the
- * browser render the same text.
+ * What tells apart chats that start with the same request, in the viewer's time zone (`timeZone`; the runtime's own when
+ * left out): the day each started ("11 Nov"); when that is the same too, the time it started ("11 Nov, 02:57"); and
+ * when even the minute is the same, its place among them by age ("11 Nov, 02:57 · 2"). Only those chats get one. The
+ * page renders it only in the browser (AppShell), so a server in another time zone never shows the wrong day.
  */
-export function chatDates(convs: Conversation[]): Map<string, string> {
+export function chatDates(convs: Conversation[], timeZone?: string): Map<string, string> {
+  const day = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', timeZone });
+  const time = new Intl.DateTimeFormat('en-GB', { hour: '2-digit', minute: '2-digit', hourCycle: 'h23', timeZone });
+  const at = (c: Conversation) => {
+    const d = new Date(c.tasks[0].created_at);
+    return Number.isNaN(d.getTime()) ? { day: '', time: '' } : { day: day.format(d), time: time.format(d) };
+  };
   const same = new Map<string, Conversation[]>();
   for (const c of convs) {
     const key = c.title.trim().toLowerCase();
@@ -52,14 +57,14 @@ export function chatDates(convs: Conversation[]): Map<string, string> {
   const out = new Map<string, string>();
   for (const group of same.values()) {
     if (group.length < 2) continue;
-    const day = (c: Conversation) => {
-      const d = new Date(c.tasks[0].created_at);
-      return Number.isNaN(d.getTime()) ? '' : `${d.getUTCDate()} ${MONTHS[d.getUTCMonth()]}`;
-    };
     const byAgeAsc = [...group].sort((a, b) => byAge(a.tasks[0], b.tasks[0]));
     for (const c of group) {
-      const sameDay = byAgeAsc.filter((x) => day(x) === day(c));
-      out.set(c.id, sameDay.length > 1 ? `${day(c)} · ${sameDay.indexOf(c) + 1}`.trim() : day(c));
+      const when = at(c);
+      const sameDay = byAgeAsc.filter((x) => at(x).day === when.day);
+      if (sameDay.length < 2) { out.set(c.id, when.day); continue; }
+      const sameMinute = sameDay.filter((x) => at(x).time === when.time);
+      const label = when.day && when.time ? `${when.day}, ${when.time}` : '';
+      out.set(c.id, sameMinute.length > 1 ? `${label} · ${sameMinute.indexOf(c) + 1}`.trim() : label);
     }
   }
   return out;
@@ -158,29 +163,41 @@ const NAMED = new RegExp([
   String.raw`\b(?:reduce|lower|cut|raise|increase|drop|bring)\b[^\d\n]{0,30}?\bto\s+${AMOUNT}`, // "cut it to two dollars"
   String.raw`\bfor\s+${MONEY}`, // "do it for 2 USDC", "for $1.5"
 ].join('|'), 'gi');
+// Any language: a number next to a currency word ("1,5 USDC", "2 dolar", "$3", "5 dólares", "1,5 USDC'ye") in a message
+// that names the budget in a word of its language ("Bütçeyi 1,5 USDC yap.", "presupuesto de 2 USD").
+// \b sees no edge before a letter outside ASCII (Cyrillic), so the start is "no letter before".
+const BUDGET_WORD = /(?<![\p{L}\d])(?:budget|bütçe|butce|presupuest|orçamento|orcamento|budżet|бюджет|anggaran|ngân sách|bajet)|预算|予算|예산|ميزانية|बजट|งบประมาณ/iu;
+const DIGITS = String.raw`(\d+(?:[.,]\d+)?)(?![.,]?\d)`;
+const CURRENCY_ANY = String.raw`(?:usdc|usd|dollars?|dolar\p{L}*|dólar\p{L}*|dolares|bucks?|долл\p{L}*|ドル|美元|달러)`;
+const MONEY_ANY = new RegExp(String.raw`\$\s*${DIGITS}|(?<![\p{L}\d.,])${DIGITS}\s*${CURRENCY_ANY}(?![\p{L}\d])(?:['’]\p{L}*)?`, 'giu');
 
 /**
- * Amounts the message itself names as its budget ("make it 1.5 USDC", "budget: 2", "reduce it to 1", "for $2"), in
- * atomic USDC. Rook plans at a total the message names instead of the Budget field, so the wallet check before drafting
- * takes the smallest of these and the field. Other amounts ("tokens under $1", "a 1 USD fee", "budget for 1 week")
- * don't count, so a wallet short of the field's budget still hears it before planning is paid for. The plan's own
- * budget is checked again before it is funded.
+ * Amounts the message itself names as its budget ("make it 1.5 USDC", "budget: 2", "reduce it to 1", "for $2",
+ * "Bütçeyi 1,5 USDC yap."), in atomic USDC, each once. Rook plans at a total the message names instead of the Budget
+ * field, so the wallet check before drafting takes the smallest of these and the field. Other amounts ("tokens under
+ * $1", "a 1 USD fee", "budget for 1 week") don't count, so a wallet short of the field's budget still hears it before
+ * planning is paid for. The plan's own budget is checked again before it is funded.
  */
 export function amountsNamed(prompt: string): bigint[] {
   const out: bigint[] = [];
-  for (const m of prompt.matchAll(NAMED)) {
-    const raw = m.slice(1).find((g) => g !== undefined) ?? '';
+  const add = (raw: string) => {
     const b = parseBudget(WORD_NUMBERS[raw.toLowerCase()] ?? raw);
-    if (b.ok) out.push(b.atomic);
+    if (b.ok && !out.includes(b.atomic)) out.push(b.atomic);
+  };
+  for (const m of prompt.matchAll(NAMED)) {
+    const raw = m.slice(1).find((g) => g !== undefined);
+    if (raw) add(raw);
   }
+  if (BUDGET_WORD.test(prompt)) for (const m of prompt.matchAll(MONEY_ANY)) add(m[1] ?? m[2]);
   return out;
 }
 
 /** The composer's placeholder in a conversation: what sending does there. `chain` as in waitReason. */
 export function placeholderFor(current: TaskSummary | null, budget: string, chain = false): string {
   if (!current) return 'Ask a follow-up';
-  // Rook asked for details: the next message answers it, whatever the budget field says.
-  if (current.status === 'asking') return 'Answer here, or say “use placeholders”';
+  // Rook asked for details: the next message answers it, whatever the budget field says. An action in the world (a
+  // booking, a post) is never done on placeholders, so none are offered.
+  if (current.status === 'asking') return current.action ? 'Answer here' : 'Answer here, or say “use placeholders”';
   const wait = waitReason(current.status, chain);
   if (wait) return wait;
   const usdc = changedBudget(budget, current);
@@ -192,10 +209,22 @@ export function placeholderFor(current: TaskSummary | null, budget: string, chai
   return 'Change the task, or try it again';
 }
 
-/** Rook's questions, as its message opens them. */
-export const ASK_LEAD = 'Before I plan this, I need a few details:';
+/** Rook's questions, as its message opens them: in Rook's voice, as the questions and the rest of the page are. */
+export const ASK_LEAD = 'Rook needs a few details before it plans this:';
 /** The answer the "Use placeholders" button sends: the planner takes it as an answer to its questions. */
 export const PLACEHOLDERS_ANSWER = 'Use placeholders';
+
+/**
+ * The line under Rook's questions, and whether the "Use placeholders" button shows: only on the newest message, which
+ * nothing has answered yet (an answered one keeps its questions and nothing else), and never for an action in the
+ * world (a booking, a post, a purchase), which Rook never does on placeholders. Null: no line, no button.
+ */
+export function askPrompt(o: { newest: boolean; action?: boolean }): { line: string; placeholders: boolean } | null {
+  if (!o.newest) return null;
+  return o.action
+    ? { line: 'Answer below. Rook needs the real details for this, so it never fills them in for you.', placeholders: false }
+    : { line: 'Answer below. Or Rook can use clearly marked placeholders for you to replace later.', placeholders: true };
+}
 
 /**
  * Rook's questions to show for a task that is asking (PlanView.questions), each trimmed; when its plan carries none

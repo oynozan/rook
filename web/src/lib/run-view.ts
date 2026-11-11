@@ -11,9 +11,9 @@ import type { HireView, PlanView, RookEvent, SubtaskView } from '@/lib/server/or
  * ponytail: the services' defaults (services/src/shared/config.ts). A Rook run with another ROOK_PAYMENT_GRACE_S,
  * ROOK_HIRE_PATIENCE_S or ROOK_UNREACHABLE_RETRY_S would need /mode to send them, or the times shown are off.
  */
-export const GRACE_S = 600, PATIENCE_S = 1800, RETRY_S = 180;
+export const GRACE_S = 600, PATIENCE_S = 720, RETRY_S = 180;
 
-/** How long Rook waits on a hire before it gives up on it (runner.ts slaEnd): the agent's SLA plus a grace, at most 30 min. */
+/** How long Rook waits on a hire before it gives up on it (runner.ts slaEnd): the agent's SLA plus a grace, at most 12 min. */
 export const patienceS = (sla: number) => Math.min(Math.max(0, sla || 0) + GRACE_S, PATIENCE_S);
 
 /** What one part is doing. Times are milliseconds on Rook's clock (its events' ts and its hires' started_at). */

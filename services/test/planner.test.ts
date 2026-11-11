@@ -103,7 +103,7 @@ test('a 1-day payment window (87000 s, the market default) is kept; one over ROO
     assert.deepEqual(p.subtasks[0].candidates.map((c) => c.handle).sort(), ['a-day', 'four-hours']);
     assert.ok(p.notes.includes('"a": quote from two-weeks dropped: payment window 1210200 s is not from 1 to 90000 s (ROOK_MAX_PAYMENT_TIMEOUT_S)'), p.notes.join(String.fromCharCode(10)));
     assert.ok(p.notes.some((n) => n.includes('fraction') && n.includes('60.5 s')));
-    assert.equal(p.subtasks[0].deadline_s, 1800); // Rook waits at most ROOK_HIRE_PATIENCE_S, not the advertised day
+    assert.equal(p.subtasks[0].deadline_s, 720); // Rook waits at most ROOK_HIRE_PATIENCE_S, not the advertised day
     process.env.ROOK_MAX_PAYMENT_TIMEOUT_S = '15000';
     assert.deepEqual(plan().subtasks[0].candidates.map((c) => c.handle), ['four-hours']);
   } finally {
@@ -134,7 +134,8 @@ test('budget fitting walks priority order: over budget becomes self_do when allo
   // An over-budget part says what one hire would have cost (its cheapest quote), so the app can name a budget.
   assert.deepEqual(p.subtasks.map((s) => s.self_do_need_atomic), [undefined, '400000', undefined]);
   assert.equal(p.subtasks[1].deadline_s, 0);
-  assert.deepEqual(p.dropped, [{ title: 'big-no', reason: 'over budget' }, { title: 'nobody', reason: 'no fitting agent' }]);
+  // A part dropped over budget carries its cheapest quote too, so the user sees the budget that hires it.
+  assert.deepEqual(p.dropped, [{ title: 'big-no', reason: 'over budget', need_atomic: '400000' }, { title: 'nobody', reason: 'no fitting agent' }]);
 });
 
 test('cross_check must reference an earlier kept subtask; references are renumbered after drops', () => {
@@ -162,8 +163,8 @@ test('invalid criteria are removed with a note; a broken regex is matched as wri
   const judge = (q: string) => ({ id: 'j', kind: 'llm_judge', description: q, spec: { question: q } });
   const p = buildPlan(input({
     draft: [
-      sub('a', { criteria: [
-        { id: 'c1', kind: 'contains', description: 'bad', spec: { pattern: '([' } },
+      sub('a', { brief: 'a\n\nList each route as app.get("/todos", ([req]) => ...).', criteria: [
+        { id: 'c1', kind: 'contains', description: 'bad', spec: { pattern: '/([/' } },
         { id: 'c2', kind: 'numeric_match', description: 'no bounds', spec: { label: 'X' } },
         { id: 'c3', kind: 'schema', description: 'bad schema', spec: { json_schema: { type: 'not-a-type' } } },
       ] }),
@@ -173,11 +174,10 @@ test('invalid criteria are removed with a note; a broken regex is matched as wri
     selected: [[agent('x')], [agent('x')], [agent('x')]],
     quotes: { x: row('100000') },
   }));
-  // An Express plan lost both its route checks as "invalid regex": the evaluator passes a pattern found verbatim, so
-  // a broken one is kept as that literal.
+  // An Express plan lost both its route checks as "invalid regex": a broken one is kept as the literal text it holds,
+  // which the evaluator finds as written (only a pattern in slashes is a regex).
   assert.ok(p.notes.includes('criterion s1.c1: invalid regex, matched as written instead'), p.notes.join('\n'));
-  assert.deepEqual(p.subtasks[0].criteria.map((c: any) => [c.kind, c.spec.pattern]), [['contains', '\\(\\[']]);
-  assert.ok(new RegExp((p.subtasks[0].criteria[0] as any).spec.pattern, 'i').test('app.get("/todos", ([req]) => ...)'));
+  assert.deepEqual(p.subtasks[0].criteria.map((c: any) => [c.kind, c.spec.pattern]), [['contains', '([']]);
   assert.ok(p.notes.some((n) => n.startsWith('criterion s1.c2 removed')));
   assert.ok(p.notes.some((n) => n.startsWith('criterion s1.c3 removed: invalid JSON schema')));
   assert.ok(p.notes.includes('criterion s2.c3 removed: more than 2 llm_judge criteria'));
@@ -386,7 +386,7 @@ test('the reply shape in the draft prompt carries no literal amount, nor any oth
   // It once ended with "budget_usdc":1.5: a low-effort model could copy that into a message naming no budget.
   const [[system]] = await promptsSent(({ draft }) => draft('Due diligence on the NEAR token', 3_000_000n, 2_400_000n));
   const shape = system.content.slice(system.content.indexOf('Reply shape')).split('\n\n')[0];
-  assert.match(shape, /^Reply shape \(leave "budget_usdc" out unless the message names a total budget\):\n\{"subtasks":/);
+  assert.match(shape, /^Reply shape \(leave "budget_usdc" out unless the message names a total budget, and "action" out unless the task is an action in the world\)\.[^\n]*\n\{"subtasks":/);
   assert.match(shape, /"budget_usdc":<[^>]+>\}$/); // where it goes, as a placeholder
   assert.doesNotMatch(shape, /\d/);
   assert.doesNotMatch(shape, /:\s*(true|false|null)\b/);
@@ -450,7 +450,8 @@ test('a total budget named in the message is planned at, within the limits; one 
   assert.equal(plans[1].budget.from_message, undefined);
   // A total the model read into a message with no amount in it is its mistake: planned at the budget sent, with a note.
   assert.deepEqual([plans[2].budget.budget_atomic, plans[2].budget.from_message], ['3000000', undefined]);
-  assert.equal(plans[2].notes[0], 'the draft set a budget of 1.50 USDC, but the message names no such budget: planned at the budget sent');
+  // Said to the user in plain words (a note that starts with "Rook " is shown on the plan card).
+  assert.equal(plans[2].notes[0], 'Rook kept the budget at 3.00 USDC: your message doesn\x27t name a total of 1.50 USDC. To change the budget, name the total you want, like \'make it 1.50 USDC\', or send your next message with a different budget.');
   assert.deepEqual(errors, [
     [422, 'Your message asks for a budget of 60.00 USDC, but the most Rook takes is 50.00 USDC.'],
     [422, 'Your message asks for a budget of 0.05 USDC, but the smallest the Rook contract takes is 0.10 USDC.'],
@@ -524,9 +525,10 @@ test('an agent whose price fits is hired even when the full cap does not fit; fa
   const shape = (p: ReturnType<typeof buildPlan>) => p.subtasks.map((s) => [s.title, s.self_do, s.cap_atomic, s.candidates.map((c) => c.handle)]);
 
   const alone = buildPlan(input({ budget_atomic: 1_000_000n, draft: [a], selected: [selected.a], quotes }));
-  // The cap takes what is left (0.80); the 0.90 fallback gets its last 0.10 from the 0.20 reserve.
-  assert.deepEqual(shape(alone), [['a', false, '800000', ['half', 'more']]]);
-  assert.equal(alone.budget.reserve_atomic, '200000');
+  // The cap first took what is left (0.80) to cover the 0.90 fallback, but once 'half' is paid 0.50 (x402 pays up
+  // front) the 0.90 needs a 0.60 top-up the 0.20 reserve can't give: dropped, and the cap shrinks back to 0.50.
+  assert.deepEqual(shape(alone), [['a', false, '500000', ['half']]]);
+  assert.equal(alone.budget.reserve_atomic, '500000');
 
   // With 'b' too, both are hired at their price first. 'dear' ranks first in 'b' but 0.90 is more than the 0.30 left,
   // so 'fits' is hired and 'dear' follows it, until the prune finds 0.90 > its 0.25 cap + the 0.25 reserve. 'a' keeps
@@ -620,16 +622,19 @@ test('halves round up exactly: market successes and p_pass have no float drift',
   assert.match(c.rank_reason, /\(market 15 of 50, Rook 185 of 348\)/);
 });
 
-test('no record at all gives p_pass 0.5; ties break on p_pass, delivered jobs, then handle', () => {
+test('no pass rate gives p_pass 0.5, never having delivered gives the measured 0.1; ties break on p_pass, delivered jobs, then handle', () => {
   const p = buildPlan(input({
     draft: [sub('a')],
-    selected: [[agent('new-b', { success_rate: null, delivered_jobs: 30 }), agent('new-a', { success_rate: null, delivered_jobs: 0 })]],
-    quotes: { 'new-a': row('100000'), 'new-b': row('100000') },
+    selected: [[agent('new-c', { success_rate: null, delivered_jobs: 0 }), agent('new-b', { success_rate: null, delivered_jobs: 30 }), agent('new-a', { success_rate: null, delivered_jobs: 3 })]],
+    quotes: { 'new-a': row('100000'), 'new-b': row('100000'), 'new-c': row('100000') },
   }));
   const cs = p.subtasks[0].candidates;
-  assert.ok(cs.every((c) => c.p_pass === 0.5 && c.expected_cost_atomic === '200000'));
-  assert.deepEqual(cs.map((c) => c.handle), ['new-b', 'new-a']); // more delivered jobs first at equal expected cost
-  assert.equal(cs[1].rank_reason, '0.10 USDC / 0.5 pass chance (no record yet) = 0.20 USDC expected');
+  assert.ok(cs.slice(0, 2).every((c) => c.p_pass === 0.5 && c.expected_cost_atomic === '200000'));
+  assert.deepEqual(cs.map((c) => c.handle), ['new-b', 'new-a', 'new-c']); // more delivered jobs first at equal expected cost
+  assert.equal(cs[1].rank_reason, '0.10 USDC / 0.5 pass chance (3 market jobs with no pass rate) = 0.20 USDC expected');
+  // Agents with no market record delivered 2 of 23 paid mainnet hires (2026-11-11): 0.1, not Laplace's 0.5.
+  assert.deepEqual([cs[2].p_pass, cs[2].expected_cost_atomic], [0.1, '1000000']);
+  assert.equal(cs[2].rank_reason, '0.10 USDC / 0.1 pass chance (no record yet) = 1.00 USDC expected');
 });
 
 test('caps never fall below the first-ranked price, and the drop rule follows rank, not price', () => {
@@ -645,7 +650,17 @@ test('caps never fall below the first-ranked price, and the drop rule follows ra
 
   // Sweep: whatever the prices and records, the lead is the first-ranked agent whose price fits the allocatable budget
   // (16.00 of 20.00) and is never dropped, lead price <= cap <= 2 x lead price, the cap covers nothing more than the
-  // kept candidates need, and the kept ones are the lead, then the rest in rank order, minus those above cap + reserve.
+  // kept candidates need, and the kept ones are the lead, then the rest in rank order, minus those the part can't pay
+  // once each agent before it was paid (the lead from the cap, a fallback topped up from what is left of the reserve).
+  const inSequence = (cs: ReturnType<typeof buildPlan>['subtasks'][number]['candidates'], cap: bigint, reserve: bigint) => {
+    let balance = cap, left = reserve;
+    return cs.filter((c) => {
+      const p = BigInt(c.price_atomic), short = p > balance ? p - balance : 0n;
+      if (short > left) return false;
+      left -= short; balance += short - p;
+      return true;
+    });
+  };
   let seed = 7;
   const rnd = (n: number) => (seed = (seed * 48271) % 2147483647) % n;
   const fallbackCap = (ps: bigint[]) => { const [f, s = f] = ps, both = s > f ? s : f; return both < 2n * f ? both : 2n * f; };
@@ -664,7 +679,7 @@ test('caps never fall below the first-ranked price, and the drop rule follows ra
     assert.equal(reserve, (20_000_000n * BigInt(Math.min(9000, Math.floor(Number(((20_000_000n - cap) * 10_000n) / 20_000_000n) / 100) * 100))) / 10_000n, `case ${i}`);
     assert.equal(s.candidates[0].handle, all[lead].handle, `case ${i}`);
     const listed = [all[lead], ...all.slice(0, lead), ...all.slice(lead + 1)];
-    assert.deepEqual(s.candidates.map((c) => c.handle), listed.filter((c) => BigInt(c.price_atomic) <= cap + reserve).map((c) => c.handle), `case ${i}`);
+    assert.deepEqual(s.candidates.map((c) => c.handle), inSequence(listed, cap, reserve).map((c) => c.handle), `case ${i}`);
   }
 });
 
@@ -781,7 +796,7 @@ test('the draft prompt plans one artifact as one subtask, lets Rook write what a
   assert.match(DRAFT_SYSTEM, /Return 1 to 5 subtasks, at most 5: one per artifact or independent deliverable/);
   assert.doesNotMatch(DRAFT_SYSTEM, /Return 3 to 5 subtasks|Keep each subtask narrow/);
   assert.match(DRAFT_SYSTEM, /"self_do_ok"[^\n]*true when a language model alone can produce it from its brief: writing, copy, translation, design briefs, code \(a complete web page or a script included\)/);
-  assert.match(DRAFT_SYSTEM, /false only when it needs live, current, on-chain or market data, media a model cannot write as text \(images, audio, video\), or acting in the world/);
+  assert.match(DRAFT_SYSTEM, /false only when it needs on-chain data or live market data \(balances, holders, prices, volumes as of now\), media a model cannot write as text \(images, audio, video\), or acting in the world/);
   assert.match(DRAFT_SYSTEM, /never invent facts about a site, person or product/);
   assert.match(DRAFT_SYSTEM, /When Rook could not read a page the task names, the brief gives the URL and asks the agent to look at it, and does not describe it/);
 });

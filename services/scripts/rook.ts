@@ -104,6 +104,16 @@ function printPlan(task: any) {
     }
     console.log();
   }
+  // Facts only the user can give: nothing was planned. The CLI sends no follow-up, so the answers go in a new prompt.
+  if (p.questions?.length) {
+    console.log(bold('Rook needs a few details before it plans this:'));
+    for (const q of p.questions) console.log(`  - ${q}`);
+    console.log(dim('  Put the answers in the prompt and plan again.'));
+  }
+  if (p.assumptions?.length) {
+    console.log(bold('Rook will assume'));
+    for (const a of p.assumptions) console.log(`  - ${a}`);
+  }
   if (p.dropped?.length) {
     console.log(bold('Dropped'));
     for (const d of p.dropped) console.log(`  - ${d.title}: ${d.reason}`);
@@ -120,6 +130,8 @@ function printPlan(task: any) {
   console.log(`${bold('Task id')} ${task.id}`);
   // A plan with every part dropped ends the task: say why (task.error) rather than only the drop list.
   if (task.status === 'failed' && task.error) console.log(red(task.error));
+  // Why the plan can't be funded as it is: shown, never approved (/approve refuses it with this sentence).
+  if (p.blocked) console.log(red(p.blocked));
 }
 
 // ---- event stream ----
@@ -212,6 +224,11 @@ function printSummary(snap: any) {
     console.log(bold('\n======================'));
     if (snap.final_result.attribution?.length) console.log(`Attribution: ${snap.final_result.attribution.map((a: any) => `${a.subtask_id} <- ${a.agent_handle}`).join(', ')}`);
     if (snap.final_result.abandoned?.length) console.log(yellow(`Abandoned: ${snap.final_result.abandoned.join(', ')}`));
+    for (const u of snap.final_result.unaccepted ?? []) {
+      const failed = u.failed.map((f: any) => `${f.description}${f.detail ? ` (${f.detail})` : ''}`).join('; ');
+      console.log(yellow(`\nPaid but not accepted, ${u.subtask_id} <- ${u.agent_handle}: failed ${failed}`));
+      console.log(u.text.trim());
+    }
   }
 
   if (snap.receipts?.length) {
@@ -257,7 +274,7 @@ async function create(pos: string[], flags: Record<string, string | true>) {
   console.log(dim(`planning against ${config.urls.orchestrator} ...`));
   const task = await api('/tasks', body);
   printPlan(task);
-  if (task.status !== 'planned') { process.exitCode = 1; return null; }
+  if (task.status !== 'planned' || task.plan?.blocked) { process.exitCode = 1; return null; }
   return task;
 }
 

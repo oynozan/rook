@@ -72,14 +72,14 @@ test('a line never says "no record yet" beside failed hires, nor "ranked after t
   const fresh = agent('fresh', { success_rate: null, delivered_jobs: 0 });
   // The only candidate, one stall and no record: no "no record yet", no others to be ranked after.
   const [only] = plan([fresh], { fresh: '80000' }, { history: { fresh: { pass: 0, fail: 0, stalled: 1 } } }).subtasks[0].candidates;
-  assert.equal(only.rank_reason, "0.08 USDC / 0.5 pass chance (no finished job yet) = 0.16 USDC expected; Rook's last job to this agent failed to send or timed out");
+  assert.equal(only.rank_reason, "0.08 USDC / 0.1 pass chance (no finished job yet) = 0.80 USDC expected; Rook's last job to this agent failed to send or timed out");
   // The healthy agent is over budget, so the stalled one leads: nothing is before it.
   const p = plan([agent('good', { success_rate: 100, delivered_jobs: 50 }), fresh], { good: '900000', fresh: '80000' },
     { budget_atomic: 1_000_000n, history: { fresh: { pass: 0, fail: 0, stalled: 1 } } });
   assert.deepEqual(handles(p), ['fresh', 'good']);
   assert.doesNotMatch(p.subtasks[0].candidates[0].rank_reason, /ranked after/);
   // No record at all and no stall: as before.
-  assert.equal(plan([fresh], { fresh: '80000' }).subtasks[0].candidates[0].rank_reason, '0.08 USDC / 0.5 pass chance (no record yet) = 0.16 USDC expected');
+  assert.equal(plan([fresh], { fresh: '80000' }).subtasks[0].candidates[0].rank_reason, '0.08 USDC / 0.1 pass chance (no record yet) = 0.80 USDC expected');
   // Market jobs with no pass rate: they are a record of delivering, not "no record yet".
   const [busy] = plan([agent('busy', { success_rate: null, delivered_jobs: 30 })], { busy: '100000' }).subtasks[0].candidates;
   assert.equal(busy.rank_reason, '0.10 USDC / 0.5 pass chance (30 market jobs with no pass rate) = 0.20 USDC expected');
@@ -89,41 +89,43 @@ test('a line never says "no record yet" beside failed hires, nor "ranked after t
 
 test('an agent that never delivered anywhere does not lead a proven one only to save a few cents', () => {
   // Live, t_174f2180 s2: o17-crypto-intelligence-v (0.05, no record, 2 h SLA) led cited-web-research-brief (0.15,
-  // market 11 of 11, Rook 7 of 9). One no-show costs Rook's whole 30 min patience to save 0.10 USDC.
+  // market 11 of 11, Rook 7 of 9). One no-show costs Rook's whole 12 min patience to save 0.10 USDC.
   const o17 = agent('o17-crypto', { success_rate: null, delivered_jobs: 0, sla_seconds: 7200 });
   const cited = agent('cited-research', { success_rate: 100, delivered_jobs: 11, sla_seconds: 3600 });
   const p = plan([o17, cited], { 'o17-crypto': '50000', 'cited-research': '150000' }, { history: { 'cited-research': { pass: 7, fail: 2 } } });
   assert.deepEqual(handles(p), ['cited-research', 'o17-crypto']);
   const [lead, next] = p.subtasks[0].candidates;
   assert.equal(lead.rank_reason, '0.15 USDC / 0.864 pass chance (market 11 of 11, Rook 7 of 9) = 0.173685 USDC expected');
-  assert.equal(next.rank_reason, '0.05 USDC / 0.5 pass chance (no record yet) = 0.10 USDC expected; ranked after cited-research: it has delivered no job yet, and a no-show holds the part up to 30 min');
-  assert.deepEqual([lead.expected_cost_atomic, next.expected_cost_atomic], ['173685', '100000']); // money per pass, as before
+  // At the measured 0.1 pass chance of an agent that never delivered, it costs more per pass as well.
+  assert.equal(next.rank_reason, '0.05 USDC / 0.1 pass chance (no record yet) = 0.50 USDC expected');
+  assert.deepEqual([lead.expected_cost_atomic, next.expected_cost_atomic], ['173685', '500000']);
   // Live, t_f56afaec s1: o17-web-research-v (0.05, market 0 of 0) led token-holder-distribution-2 (0.50, 7 of 7, 120 s).
   const holders = agent('holders-2', { success_rate: 100, delivered_jobs: 7, sla_seconds: 120 });
   const web = agent('o17-web', { success_rate: 0, delivered_jobs: 0, sla_seconds: 7200 });
   assert.deepEqual(handles(plan([web, holders], { 'o17-web': '50000', 'holders-2': '500000' })), ['holders-2', 'o17-web']);
-  // Saving a whole USDC is worth the risk: the unproven agent leads, and the proven one's line says nothing odd.
-  const dear = plan([o17, cited], { 'o17-crypto': '50000', 'cited-research': '1200000' }, { history: { 'cited-research': { pass: 7, fail: 2 } } });
+  // Saving over 2 USDC is worth the risk: the unproven agent leads, and the proven one's line says nothing odd.
+  const dear = plan([o17, cited], { 'o17-crypto': '50000', 'cited-research': '2500000' }, { history: { 'cited-research': { pass: 7, fail: 2 } } });
   assert.deepEqual(handles(dear), ['o17-crypto', 'cited-research']);
   assert.doesNotMatch(dear.subtasks[0].candidates[1].rank_reason, /;/);
   // A short SLA makes a no-show cheap in time: Rook gives up on it after its SLA plus the 10 min grace.
   const quick = agent('quick-new', { success_rate: null, delivered_jobs: 0, sla_seconds: 60 });
-  assert.deepEqual(handles(plan([quick, cited], { 'quick-new': '50000', 'cited-research': '400000' }, { history: { 'cited-research': { pass: 7, fail: 2 } } })), ['quick-new', 'cited-research']);
-  // But a no-show is waited out to the end of that grace, not its SLA alone: a 10 min SLA holds the part 20 min.
-  const tenMin = agent('ten-min-new', { success_rate: null, delivered_jobs: 0, sla_seconds: 600 });
+  assert.deepEqual(handles(plan([quick, cited], { 'quick-new': '50000', 'cited-research': '2200000' }, { history: { 'cited-research': { pass: 7, fail: 2 } } })), ['quick-new', 'cited-research']);
+  // But a no-show is waited out to the end of that grace, not its SLA alone: a 1 min SLA holds the part 11 min. Cheaper
+  // per pass than the proven agent, it is still ranked after it for that wait, and its line says why.
+  const tenMin = agent('ten-min-new', { success_rate: null, delivered_jobs: 0, sla_seconds: 60 });
   const near = agent('cited-research', { success_rate: 100, delivered_jobs: 11, sla_seconds: 600 });
-  const graced = plan([tenMin, near], { 'ten-min-new': '50000', 'cited-research': '220000' }, { history: { 'cited-research': { pass: 7, fail: 2 } } });
+  const graced = plan([tenMin, near], { 'ten-min-new': '10000', 'cited-research': '220000' }, { history: { 'cited-research': { pass: 7, fail: 2 } } });
   assert.deepEqual(handles(graced), ['cited-research', 'ten-min-new']);
-  assert.match(graced.subtasks[0].candidates[1].rank_reason, /; ranked after cited-research: it has delivered no job yet, and a no-show holds the part up to 20 min$/);
+  assert.match(graced.subtasks[0].candidates[1].rank_reason, /; ranked after cited-research: it has delivered no job yet, and a no-show holds the part up to 11 min$/);
 });
 
 test("a proven agent's failed tries cost its usual time: the market's median when listed, else its SLA up to Rook's patience", () => {
-  // Both pass half the time. 'slow' lists a 1-day SLA, so a failed try holds the part 30 min; 'fast' answers in 2 min.
+  // Both pass half the time. 'slow' lists a 1-day SLA, so a failed try holds the part 12 min; 'fast' answers in 2 min.
   const slow = agent('slow', { success_rate: 50, delivered_jobs: 10, sla_seconds: 86_400 });
   const fast = agent('fast', { success_rate: 50, delivered_jobs: 10, sla_seconds: 86_400, response_s: 120 } as any);
   const p = plan([slow, fast], { slow: '100000', fast: '110000' });
   assert.deepEqual(handles(p), ['fast', 'slow']);
-  assert.equal(p.subtasks[0].candidates[1].rank_reason, '0.10 USDC / 0.5 pass chance (market 5 of 10) = 0.20 USDC expected; ranked after fast: a failed try of this agent holds the part about 30 min');
+  assert.equal(p.subtasks[0].candidates[1].rank_reason, '0.10 USDC / 0.5 pass chance (market 5 of 10) = 0.20 USDC expected; ranked after fast: a failed try of this agent holds the part about 12 min');
   // Equal SLAs: time changes nothing, and money per pass decides (the simulator's pairs keep their cheap-first order).
   const even = plan([agent('pricey'), agent('cheap-low', { success_rate: 50 }), agent('cheap-high', { success_rate: 95, sla_seconds: 45 })],
     { pricey: '300000', 'cheap-low': '150000', 'cheap-high': '150000' });

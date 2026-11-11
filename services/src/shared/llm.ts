@@ -13,7 +13,8 @@ export type LlmVerification = Pick<LlmCall, 'signer_recovered' | 'attested' | 'a
 export type SignedLlmCall = LlmCall;
 
 const DAY_MS = 86_400_000;
-let spentUsd = 0, reservedUsd = 0, tripped = false, busy = false;
+let spentUsd = 0, reservedUsd = 0;
+let refusing: '' | 'limit' | 'nearly' | 'busy' = ''; // the refusal last logged: each one is logged once per trip
 const spends: { at: number; usd: number }[] = [];
 /** USD spent by this process since it started (reporting). */
 export const llmSpentUsd = () => spentUsd;
@@ -61,26 +62,36 @@ export type Msg =
 export const expectedOutputTokens = (maxTokens: number) => Math.min(maxTokens, Math.max(1000, Math.round(maxTokens / 4)));
 
 /**
- * Refuse a call before it is sent when the 24 h window is spent (the daily limit) or when the calls in flight would
- * spend it (Rook is busy: they finish within a minute, and most cost less than reserved).
+ * A web search's fee, counted for every completion sent with web search on. NEAR AI's reply doesn't say what its
+ * searches cost, and the guard counted tokens only: a research part could spend more than the guard saw.
+ * ponytail: a fixed price per completion, whether or not the model searched (the dearest common list price, 25 USD per
+ * 1000 searches), so the guard over-counts (fails closed) as it does for a model missing from the price list.
  */
-function guard() {
+export const WEB_SEARCH_FEE_USD = 0.025;
+
+/**
+ * Refuse a call before it is sent. The 24 h window is spent: the daily limit. With calls in flight, this one must fit
+ * beside them at what each is expected to cost (`expected`, this one's). When the calls in flight alone would spend the
+ * window once they settle, waiting doesn't help (the retry meets the daily limit): the day's limit is nearly used.
+ * Otherwise Rook is busy: once they finish, this call starts alone, as any call does while the window isn't spent.
+ */
+function guard(expected: number) {
   const today = llmSpent24hUsd(), limit = config.llmMaxUsd;
+  const refuse = (kind: typeof refusing, msg: string, log = msg) => {
+    if (refusing !== kind) console.warn(`[llm] ${log}`);
+    refusing = kind;
+    throw new Error(msg);
+  };
   if (today >= limit) {
     const msg = `LLM cost guard: ${today.toFixed(4)} USD spent in the last 24 h (${reservedUsd.toFixed(4)} in flight), limit ROOK_LLM_MAX_USD=${limit} per day`;
-    if (!tripped) console.warn(`[llm] ${msg}; refusing calls${spends.length ? ` until ${new Date(spends[0].at + DAY_MS).toISOString()} at the earliest` : ' until calls in flight finish'}`);
-    tripped = true;
-    throw new Error(msg);
+    refuse('limit', msg, `${msg}; refusing calls${spends.length ? ` until ${new Date(spends[0].at + DAY_MS).toISOString()} at the earliest` : ' until calls in flight finish'}`);
   }
-  tripped = false;
-  // Never "cost guard" here: the web app reads that as the daily limit, which this is not.
-  if (today + reservedUsd >= limit) {
-    const msg = `Rook is busy, try again in a minute: the LLM calls in flight hold ${reservedUsd.toFixed(4)} USD, and ${today.toFixed(4)} USD is spent in the last 24 h of the ${limit} USD a day ROOK_LLM_MAX_USD allows`;
-    if (!busy) console.warn(`[llm] ${msg}`);
-    busy = true;
-    throw new Error(msg);
+  if (reservedUsd > 0 && today + reservedUsd + expected >= limit) {
+    // "LLM cost guard" is what the web app reads as the daily limit: right for "nearly used", never for "busy".
+    if (today + reservedUsd >= limit) refuse('nearly', `LLM cost guard: the day's limit is nearly used: ${today.toFixed(4)} USD spent in the last 24 h and ${reservedUsd.toFixed(4)} USD held by the LLM calls in flight, of the ${limit} USD a day ROOK_LLM_MAX_USD allows`);
+    refuse('busy', `Rook is busy, try again in a minute: the LLM calls in flight hold ${reservedUsd.toFixed(4)} USD, and ${today.toFixed(4)} USD is spent in the last 24 h of the ${limit} USD a day ROOK_LLM_MAX_USD allows`);
   }
-  busy = false;
+  refusing = '';
 }
 
 // Request fields a model may refuse with a 400 that names them: the call is sent again without that field. NEAR AI
@@ -88,7 +99,8 @@ function guard() {
 // web search or function calling refuses those.
 const OPTIONAL: [string, RegExp][] = [['reasoning_effort', /reasoning_effort/], ['web_search_options', /web_search/], ['tool_choice', /tool_choice/], ['tools', /\btools?\b|function[ _]?call/i]];
 
-type Completion = { text: string; message: any; call: SignedLlmCall };
+/** `truncated`: the reply stopped at max_tokens (finish_reason "length"), so its end is missing. */
+type Completion = { text: string; message: any; call: SignedLlmCall; truncated: boolean };
 
 /** One completion: guarded, sent (the optional fields a model refuses dropped), costed, recorded and signed. */
 async function complete(purpose: string, model: string, messages: Msg[], maxTokens: number, opts: { sign?: boolean; effort?: Effort; extra?: Record<string, unknown> }): Promise<Completion> {
@@ -106,8 +118,9 @@ async function complete(purpose: string, model: string, messages: Msg[], maxToke
   // calls cannot all slip under the limit together.
   // ponytail: the window lives in this process (each service has its own, and a restart clears it). Upgrade: keep the
   // spend rows in the orchestrator's SQLite (ROOK_DB) and sum them across services.
-  guard();
-  const expected = (body.length / 3) * price.prompt + expectedOutputTokens(maxTokens) * price.completion;
+  const searchFee = () => ('web_search_options' in req ? WEB_SEARCH_FEE_USD : 0);
+  const expected = (body.length / 3) * price.prompt + expectedOutputTokens(maxTokens) * price.completion + searchFee();
+  guard(expected);
   reservedUsd += expected;
   let raw = '', status = 0;
   try {
@@ -131,9 +144,12 @@ async function complete(purpose: string, model: string, messages: Msg[], maxToke
   // Some open models put their reasoning in <think> tags ahead of the answer.
   const text: string = String(message?.content ?? '').replace(/^\s*<think>[\s\S]*?<\/think>\s*/i, '');
   // Reasoning models spend hidden tokens; a cut-off reply is otherwise silent (truncated deliverables, invalid JSON).
-  if (j.choices?.[0]?.finish_reason === 'length') console.warn(`[llm] ${purpose}: reply cut off at max_tokens=${maxTokens} (${model})`);
+  // The caller hears it too: a self-do edit cut at max_tokens lost 62% of games.html and passed as whole.
+  const truncated = j.choices?.[0]?.finish_reason === 'length';
+  if (truncated) console.warn(`[llm] ${purpose}: reply cut off at max_tokens=${maxTokens} (${model})`);
   const inTok = j.usage?.prompt_tokens ?? 0, outTok = j.usage?.completion_tokens ?? 0;
-  const cost = inTok * price.prompt + outTok * price.completion;
+  // The search fee only when the body sent still asked for web search (a model that refuses it gets the call without).
+  const cost = inTok * price.prompt + outTok * price.completion + searchFee();
   spentUsd += cost;
   spends.push({ at: Date.now(), usd: cost });
 
@@ -144,16 +160,16 @@ async function complete(purpose: string, model: string, messages: Msg[], maxToke
     signer_recovered: false, attested: null, attestation_checked_at: null,
   };
   if (opts.sign !== false) await attachSignature(call);
-  return { text, message, call };
+  return { text, message, call, truncated };
 }
 
 /**
  * One chat completion. `sign: false` skips the signature fetch (simulated agents: not Rook's evidence, and the
- * fetch retries for about 3 s when a model is not verifiable).
+ * fetch retries for about 3 s when a model is not verifiable). `truncated`: the reply was cut at max_tokens.
  */
-export async function chat(purpose: string, model: string, messages: Msg[], maxTokens = 4000, opts: { sign?: boolean; effort?: Effort } = {}): Promise<{ text: string; call: SignedLlmCall }> {
-  const { text, call } = await complete(purpose, model, messages, maxTokens, opts);
-  return { text, call };
+export async function chat(purpose: string, model: string, messages: Msg[], maxTokens = 4000, opts: { sign?: boolean; effort?: Effort } = {}): Promise<{ text: string; call: SignedLlmCall; truncated: boolean }> {
+  const { text, call, truncated } = await complete(purpose, model, messages, maxTokens, opts);
+  return { text, call, truncated };
 }
 
 /** Whether Rook's own writer may search the web and open pages: ROOK_LLM_TOOLS (on unless "0"), never in canned mode. */
@@ -166,29 +182,35 @@ export type ToolFn = { description: string; parameters: object; run: (args: any)
 export const MAX_TOOL_ROUNDS = 6;
 const MAX_CALLS_PER_ROUND = 4;
 const TOOL_ANSWER_CHARS = 12_000;
+/**
+ * The most text tool answers may add to one chat, in all. Every round sends the whole list again: a self-done research
+ * part read 238,655 input tokens (0.46 USD, about 20 normal calls) at up to 12,000 characters an answer.
+ */
+export const TOOL_INPUT_CHARS = 60_000;
 
 /**
  * A chat in which the model may look things up: NEAR AI's built-in web search (`search`; its citations come back as
  * message.annotations url_citation) and Rook's own `functions` (OpenAI-style tool_calls). At most MAX_TOOL_ROUNDS
- * rounds of tool calls, then one completion that must answer (tool_choice "none"). Every completion is guarded,
- * costed, recorded and signed like a plain chat. On failure the error carries the calls already paid for.
- * ponytail: the guard counts tokens only; a fee NEAR AI may bill for a web search on top is not counted.
+ * rounds of tool calls, and TOOL_INPUT_CHARS of tool answers in all, then one completion that must answer (tool_choice
+ * "none", no search). Every completion is guarded, costed (web search fee included), recorded and signed like a plain
+ * chat. `truncated`: the answer was cut at max_tokens. On failure the error carries the calls already paid for.
  */
-export async function chatTools(purpose: string, model: string, messages: Msg[], maxTokens: number, opts: { effort?: Effort; search?: boolean; functions?: Record<string, ToolFn> }): Promise<{ text: string; calls: LlmCall[]; sources: Source[] }> {
+export async function chatTools(purpose: string, model: string, messages: Msg[], maxTokens: number, opts: { effort?: Effort; search?: boolean; functions?: Record<string, ToolFn> }): Promise<{ text: string; calls: LlmCall[]; sources: Source[]; truncated: boolean }> {
   const calls: LlmCall[] = [], sources = new Map<string, string>();
   const source = (url: unknown, title: unknown) => { if (typeof url === 'string' && /^https?:\/\//i.test(url) && !sources.has(url)) sources.set(url, String(title ?? '').slice(0, 200)); };
   const fns = opts.functions ?? {};
   const tools = Object.entries(fns).map(([name, f]) => ({ type: 'function', function: { name, description: f.description, parameters: f.parameters } }));
   const msgs = [...messages];
+  let room = TOOL_INPUT_CHARS;
   try {
     for (let round = 0; ; round++) {
-      const last = round === MAX_TOOL_ROUNDS;
+      const last = round === MAX_TOOL_ROUNDS || room <= 0;
       const extra = { ...(opts.search && !last ? { web_search_options: {} } : {}), ...(tools.length ? { tools, ...(last ? { tool_choice: 'none' } : {}) } : {}) };
       const r = await complete(round ? `${purpose}:round${round + 1}` : purpose, model, msgs, maxTokens, { effort: opts.effort, extra });
       calls.push(r.call);
       for (const a of Array.isArray(r.message?.annotations) ? r.message.annotations : []) if (a?.type === 'url_citation') source(a.url_citation?.url, a.url_citation?.title);
       const asked: ToolCall[] = Array.isArray(r.message?.tool_calls) ? r.message.tool_calls : [];
-      if (!asked.length || last) return { text: r.text, calls, sources: [...sources].map(([url, title]) => ({ url, title })) };
+      if (!asked.length || last) return { text: r.text, calls, sources: [...sources].map(([url, title]) => ({ url, title })), truncated: r.truncated };
       msgs.push({ role: 'assistant', content: r.message.content ?? null, tool_calls: asked });
       // Every call the model made gets an answer, or the next completion is refused.
       const answers = await Promise.all(asked.map(async (tc, i): Promise<string> => {
@@ -204,7 +226,14 @@ export async function chatTools(purpose: string, model: string, messages: Msg[],
           return out.content;
         } catch (e: any) { return `The tool failed: ${String(e?.message ?? e).slice(0, 300)}`; }
       }));
-      asked.forEach((tc, i) => msgs.push({ role: 'tool', tool_call_id: tc.id, content: answers[i].slice(0, TOOL_ANSWER_CHARS) }));
+      // In order, each answer takes what is left of the room; past it the model is told to answer with what it has.
+      asked.forEach((tc, i) => {
+        const take = Math.min(answers[i].length, TOOL_ANSWER_CHARS, Math.max(room, 0));
+        room -= take;
+        const content = take || !answers[i] ? answers[i].slice(0, take)
+          : `Not shown: this part has read ${TOOL_INPUT_CHARS} characters of tool answers, all Rook allows. Answer with what you have.`;
+        msgs.push({ role: 'tool', tool_call_id: tc.id, content });
+      });
     }
   } catch (e: any) {
     throw Object.assign(e instanceof Error ? e : new Error(String(e)), { calls });
@@ -242,12 +271,58 @@ export async function verifySignature(call: SignedLlmCall, s: any, att: Pick<Ret
   call.signature_verified = textOk && call.signer_recovered && call.attested !== false;
 }
 
-/** Extract one JSON object from model text: strip code fences, take first "{" to last "}". */
-export function parseJsonObject(text: string): unknown {
+/** Extract one JSON object from model text: strip code fences, take first "{" to last "}"; `repair`: mend it first (repairJson). */
+export function parseJsonObject(text: string, repair = false): unknown {
   const t = text.replace(/```(?:json)?/gi, '');
   const a = t.indexOf('{'), b = t.lastIndexOf('}');
   if (a < 0 || b <= a) throw new Error('no JSON object in model output');
-  return JSON.parse(t.slice(a, b + 1));
+  const slice = t.slice(a, b + 1);
+  return JSON.parse(repair ? repairJson(slice) : slice);
+}
+
+/**
+ * One JSON object from a model with its common faults mended, so it parses: a double quote inside a string that closes
+ * nothing (QA: an assumption that said `say "deploy it"` failed whole plans with "Expected ',' or ']' after array
+ * element"), a raw line break or tab inside a string, an escape JSON lacks (\'), and a comma before a closing bracket. A
+ * quote closes its string only when what follows can come next in the JSON around it: a ":" after a key; after a value,
+ * "," then the next key (in an object) or value (in an array), or the closing bracket. ponytail: a string holding
+ * `", "` followed by a quoted word still reads as two values; the reply is then asked for again, as before.
+ */
+export function repairJson(text: string): string {
+  const VALUE = String.raw`\s*(?:"|\{|\[|-?\d|true\b|false\b|null\b)`;
+  const KEY = String.raw`\s*"(?:[^"\\\n]|\\.)*"\s*:`;
+  const stack: ('{' | '[')[] = [];
+  let out = '', inString = false, isKey = false, expectKey = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === '\\') {
+        const next = text[i + 1] ?? '';
+        out += /["\\/bfnrtu]/.test(next) ? ch + next : next === '\n' ? '\\n' : next;
+        i++;
+        continue;
+      }
+      if (ch === '\n') { out += '\\n'; continue; }
+      if (ch === '\r') { out += '\\r'; continue; }
+      if (ch === '\t') { out += '\\t'; continue; }
+      if (ch !== '"') { out += ch; continue; }
+      const rest = text.slice(i + 1), top = stack[stack.length - 1];
+      const closes = isKey ? /^\s*:/.test(rest)
+        : top === '{' ? new RegExp(String.raw`^\s*(?:\}|,${KEY})`).test(rest)
+          : top === '[' ? new RegExp(String.raw`^\s*(?:\]|,${VALUE})`).test(rest)
+            : true;
+      if (closes) { inString = false; out += ch; } else out += '\\"';
+      continue;
+    }
+    if (ch === '"') { inString = true; isKey = expectKey; expectKey = false; out += ch; continue; }
+    if (ch === '{') { stack.push('{'); expectKey = true; } else if (ch === '[') { stack.push('['); expectKey = false; } else if (ch === '}' || ch === ']') stack.pop();
+    else if (ch === ',') {
+      if (/^\s*[}\]]/.test(text.slice(i + 1))) continue; // a trailing comma
+      expectKey = stack[stack.length - 1] === '{';
+    }
+    out += ch;
+  }
+  return out;
 }
 
 /** Ask for one JSON object, validate with zod, retry once with the error. */
@@ -264,8 +339,20 @@ export async function json<T>(purpose: string, model: string, schema: z.ZodType<
     } catch (e: any) {
       throw Object.assign(e instanceof Error ? e : new Error(String(e)), { calls }); // keep the calls already paid for
     }
+    let parsed: unknown, syntax: string | undefined;
+    try { parsed = parseJsonObject(text); } catch (e: any) { syntax = e?.message ?? String(e); }
+    if (syntax !== undefined) {
+      // The raw reply, so a failure can be read afterwards (QA: "invalid JSON twice", and no draft to see why).
+      const at = Number(/position (\d+)/.exec(syntax)?.[1] ?? NaN);
+      console.warn(`[llm] ${purpose}: reply is not JSON (${syntax.slice(0, 200)}); ${text.length} characters${Number.isFinite(at) ? `, around the error: ${JSON.stringify(text.slice(Math.max(0, at - 300), at + 300))}` : ''}; reply starts: ${JSON.stringify(text.slice(0, 2000))}`);
+      try {
+        parsed = parseJsonObject(text, true);
+        console.warn(`[llm] ${purpose}: parsed after mending stray quotes, line breaks or trailing commas`);
+      } catch { /* asked again below */ }
+    }
     try {
-      return { data: schema.parse(parseJsonObject(text)), calls };
+      if (parsed === undefined) throw new Error(syntax);
+      return { data: schema.parse(parsed), calls };
     } catch (e: any) {
       lastErr = e?.message ?? String(e);
       messages.push({ role: 'assistant', content: text }, { role: 'user', content: `That reply was invalid: ${lastErr.slice(0, 1500)}\nReply again with one corrected JSON object only.` });

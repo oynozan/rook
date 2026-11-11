@@ -3,7 +3,7 @@
 import { AnimatePresence, motion } from 'motion/react';
 import { useTheme } from 'next-themes';
 import { usePathname, useRouter } from 'next/navigation';
-import { useCallback, useEffect, useRef, useState, type MouseEvent, type ReactNode, type Ref } from 'react';
+import { useCallback, useEffect, useRef, useState, useSyncExternalStore, type MouseEvent, type ReactNode, type Ref } from 'react';
 import { Mark } from '@/components/Navbar';
 import { useSmoothScroll } from '@/components/SmoothScroll';
 import { ThemeToggle } from '@/components/ui/theme-toggle';
@@ -68,18 +68,22 @@ function PanelToggle({ label, onClick }: { label: string; onClick: () => void })
   );
 }
 
+const noSubscription = () => () => {};
+
 /**
  * One entry per conversation: its first request, and the state of the task a new message would act on. Links to its
  * newest task. Its delete button shows on hover and focus, and always on touch screens.
  */
 function TaskList({ tasks, onNavigate, onDelete }: { tasks: TaskSummary[] | null; onNavigate: () => void; onDelete: (chat: ChatRef) => void }) {
   const pathname = usePathname();
+  // Dates are in the viewer's time zone, which only the browser knows: the server's render (and hydration) has none.
+  const inBrowser = useSyncExternalStore(noSubscription, () => true, () => false);
   const { chain, down } = useMode(); // chain mode: an approved task waits for the owner's funding transfer
   const label = (s: string) => (chain && s === 'approved' ? 'Needs funding' : STATUS[s] ?? s);
   if (tasks === null) return <p className="px-3 text-sm text-ink/65">Your tasks can&apos;t load: {down ?? "Rook's services aren't answering"}. They&apos;ll be back here on their own once Rook answers.</p>;
   if (!tasks.length) return <p className="px-3 text-sm text-ink/65">Tasks you draft will appear here.</p>;
   const list = conversations(shownTasks(tasks));
-  const dates = chatDates(list); // chats that start with the same request, told apart
+  const dates = inBrowser ? chatDates(list) : new Map<string, string>(); // chats that start with the same request, told apart
   return (
     <ul>
       {list.map((c) => {

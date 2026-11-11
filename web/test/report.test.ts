@@ -49,9 +49,16 @@ test("the services' file marker reads as plain words; Rook's own work is from Ro
 
 test('a file marker inside a line reads as plain words, and a dotfile keeps its name for a download', async () => {
   const { inlineMarkers } = await import('@/lib/report');
-  assert.equal(inlineMarkers('- **next.config.mjs** [file next.config.mjs, 6 lines, attached below the report]'), '- **next.config.mjs** next.config.mjs (6 lines), under Files');
+  // The words just before already name the file: only the count follows (QA: "The file is index.html index.html (160 lines)").
+  assert.equal(inlineMarkers('- **next.config.mjs** [file next.config.mjs, 6 lines, attached below the report]'), '- **next.config.mjs** (6 lines, under Files)');
+  assert.equal(inlineMarkers('The file is index.html [file index.html, 160 lines, attached below the report], the complete portfolio page.'),
+    'The file is index.html (160 lines, under Files), the complete portfolio page.');
+  assert.equal(inlineMarkers('The file `index.html` [file index.html, 160 lines, attached below the report] is the full page.'), 'The file `index.html` (160 lines, under Files) is the full page.');
+  assert.equal(inlineMarkers('Styles: style.css [file css/style.css, 9 lines, attached below the report]'), 'Styles: style.css (9 lines, under Files)');
+  // Otherwise the name stays: nothing before, another word, or a name that only ends the same way.
   assert.equal(inlineMarkers('See [file a.js, 1 line, not attached: too big] and [file b.css, 2 lines, attached below the report].'),
-    'See a.js (1 line, not attached: too big) and b.css (2 lines), under Files.');
+    'See a.js (1 line, not attached: too big) and b.css (2 lines, under Files).');
+  assert.equal(inlineMarkers('myindex.html [file index.html, 9 lines, attached below the report]'), 'myindex.html index.html (9 lines, under Files)');
   assert.equal(inlineMarkers('[file] is a word'), '[file] is a word');
   assert.equal(downloadName('.env.example'), '.env.example');
   assert.equal(downloadName('app/.gitignore'), '.gitignore');
@@ -88,7 +95,22 @@ test('inline Markdown splits into plain parts; only an http(s) link stays a link
   ]);
   // A star in arithmetic or a snake_case name is no emphasis.
   assert.deepEqual(inlineParts('2 * 3 * 4 and my_var_name'), [{ kind: 'text', text: '2 * 3 * 4 and my_var_name' }]);
-  assert.deepEqual(inlineParts('see [file a.js, 3 lines, attached below the report]'), [{ kind: 'text', text: 'see a.js (3 lines), under Files' }]);
+  assert.deepEqual(inlineParts('see [file a.js, 3 lines, attached below the report]'), [{ kind: 'text', text: 'see a.js (3 lines, under Files)' }]);
+});
+
+test('a bare web address in a report is a link; what ends the sentence after it is not part of it', async () => {
+  const { inlineParts } = await import('@/lib/report');
+  // QA: the "- Title: https://..." source lines Rook's writer lists were plain text.
+  assert.deepEqual(inlineParts('- CoinGecko: https://www.coingecko.com/en/coins/near. Also (https://en.wikipedia.org/wiki/Near_(protocol)) and https://x.io/a_b_c, done'), [
+    { kind: 'text', text: '- CoinGecko: ' }, { kind: 'link', text: 'https://www.coingecko.com/en/coins/near', href: 'https://www.coingecko.com/en/coins/near' },
+    { kind: 'text', text: '. Also (' }, { kind: 'link', text: 'https://en.wikipedia.org/wiki/Near_(protocol)', href: 'https://en.wikipedia.org/wiki/Near_(protocol)' },
+    { kind: 'text', text: ') and ' }, { kind: 'link', text: 'https://x.io/a_b_c', href: 'https://x.io/a_b_c' }, { kind: 'text', text: ', done' },
+  ]);
+  // Only http(s); code stays code; a [link](url) stays one link; no address, no link.
+  assert.deepEqual(inlineParts('javascript:alert(1) `https://code.example` [docs](https://a.com/x) http://.'), [
+    { kind: 'text', text: 'javascript:alert(1) ' }, { kind: 'code', text: 'https://code.example' }, { kind: 'text', text: ' ' },
+    { kind: 'link', text: 'docs', href: 'https://a.com/x' }, { kind: 'text', text: ' ' }, { kind: 'text', text: 'http://.' },
+  ]);
 });
 
 test("a part's preview is plain words: no marks, rules or pipes", async () => {
@@ -96,4 +118,14 @@ test("a part's preview is plain words: no marks, rules or pipes", async () => {
   const { preview } = await import('@/lib/run-view');
   assert.equal(plainText('As of **9 November 2026** the [price](https://x.io) is `1.2`.\n\n---\n\n| A | B |\n|---|---|\n| 1 | 2 |'), 'As of 9 November 2026 the price is 1.2. A · B; 1 · 2');
   assert.equal(preview('# Report\n\n- **One** thing\n1. Two\n> three\n***'), 'Report One thing 1. Two three');
+});
+
+test('a paid delivery that failed its checks names its agent and each check it failed, in the check\'s own words', async () => {
+  const { unacceptedLine } = await import('@/lib/report');
+  // QA (t_d25d1b4e): three paid deliveries failed, and the report showed none of them.
+  assert.equal(unacceptedLine({ agent_handle: 'deep-researcher', failed: [{ id: 'c3', description: 'Cites a source for each figure', detail: 'No source for the 2025 TVL figure.\n' }] }),
+    'Paid but not accepted: deep-researcher — failed: Cites a source for each figure (No source for the 2025 TVL figure)');
+  assert.equal(unacceptedLine({ agent_handle: 'web-dev', failed: [{ id: 'c1', description: 'Has a contact form', detail: '' }, { id: 'linked_files', description: '', detail: 'not delivered: styles.css' }] }),
+    'Paid but not accepted: web-dev — failed: Has a contact form; linked_files (not delivered: styles.css)');
+  assert.equal(unacceptedLine({ agent_handle: 'x', failed: [] }), 'Paid but not accepted: x — failed: a check');
 });

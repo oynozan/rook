@@ -4,18 +4,19 @@
 // skipping what is done and polling hires whose payment header was out; unwind() returns what a stopped task, or a
 // closing one whose close failed, still holds, and keeps trying until the books close.
 // Error events carry `message` (for logs and the CLI) and `kind`, which a client words for people: eval_retry,
-// close_retry, unreachable_retry (retried); payment_lookup, receipt, paid_anyway, unpaid, aggregate, restore_note, rook_writes (notes); abandoned,
-// unchecked, return, close, unwind, run, restore, inputs_too_large (problems; the last one's message is a plain sentence).
-// Agent-related ones name `agent_handle`.
+// close_retry, unreachable_retry (retried); payment_lookup, receipt, paid_anyway, unpaid, aggregate, restore_note, rook_writes, judge_only (notes); abandoned,
+// unchecked, return, close, unwind, run, restore, inputs_too_large, cut_off (problems; the last two's messages are
+// plain sentences for the user). Agent-related ones name `agent_handle`.
 import { randomUUID } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { attach, cannedAggregate, agentOf, isMerged } from '../planner/canned.ts';
+import { namedPaths } from '../planner/files.ts';
 import { config } from '../shared/config.ts';
 import { call } from '../shared/http.ts';
 import { formatUsdc } from '../shared/money.ts';
 import {
   TERMINAL, type A2AState, type A2ATask, type AcceptsRow, type AggregateResult, type Candidate, type Evaluation,
-  type GatewayResult, type LlmCall, type Part, type TaskStatus, type WorkFile, type X402Config,
+  type GatewayResult, type LlmCall, type Part, type TaskStatus, type Unaccepted, type WorkFile, type X402Config,
 } from '../shared/types.ts';
 import { OtherContract, Unrebuildable, type ChainLedger } from './chain-ledger.ts';
 import { LedgerError, type Ledger, type Recipient } from './ledger.ts';
@@ -139,10 +140,7 @@ export async function runTask(ledger: Ledger, t: Task) {
 
     if (!t.final_result) { // written already when a restart came during the close
       advance(t, 'aggregating');
-      const subtasks = t.subtasks.map((s) => ({
-        id: s.id, title: s.title, status: s.final_outcome ?? s.status,
-        agent_handle: s.accepted?.agent_handle, deliverable_text: s.accepted?.text,
-      }));
+      const subtasks = t.subtasks.map(aggPart);
       // In a conversation the aggregator reads the prompt with the messages before it ("make it shorter" changes them).
       const req = { task_id: t.id, prompt: t.prompt, ...(t.earlier_prompts?.length ? { earlier: t.earlier_prompts } : {}), subtasks };
       let agg: AggregateResult;
@@ -159,12 +157,15 @@ export async function runTask(ledger: Ledger, t: Task) {
       signal.throwIfAborted();
       t.llm_calls.push(...(agg.llm_calls ?? []));
       // The chat's files with this run's replacing the same paths: Files always shows the whole latest version, never
-      // only the one file an edit changed.
-      const { files, changed } = withWorkspace(t.workspace ?? [], agg.files ?? []);
+      // only the one file an edit changed, and an edit's file given back in another folder still replaces its input.
+      const { files, changed } = withWorkspace(t.workspace ?? [], agg.files ?? [], Object.fromEntries(t.subtasks.map((s) => [s.id, s.inputs])));
       // Stored before the close: the report is paid for, so a close that fails (or a restart) never loses it.
+      // A part left out after paid deliveries that failed: the best one comes along apart from the report (unacceptedOf).
+      const unaccepted = t.subtasks.map(unacceptedOf).filter((u) => u !== null);
       t.final_result = {
         final_markdown: agg.final_markdown, attribution: agg.attribution ?? [], files, changed,
         abandoned: t.subtasks.filter((s) => s.final_outcome === 'abandoned').map((s) => s.id),
+        ...(unaccepted.length ? { unaccepted } : {}),
       };
       saveTask(t);
     }
@@ -195,9 +196,9 @@ export async function runTask(ledger: Ledger, t: Task) {
 /** The books are closed: the run ends with its report and what it spent and refunded. */
 function closed(ledger: Ledger, t: Task) {
   const v = ledger.view(t.id)!;
-  // The files (up to 3 MB) stay out of the event, which every reconnect replays and the task doc keeps: a client
-  // reads them from the snapshot, as it does the report.
-  const { files: _, ...result } = t.final_result!;
+  // The files (up to 3 MB) and the unaccepted deliveries stay out of the event, which every reconnect replays and the
+  // task doc keeps: a client reads them from the snapshot, as it does the report.
+  const { files: _, unaccepted: __, ...result } = t.final_result!;
   emit(t, 'final', { ...result, spent_atomic: v.spent_atomic, refunded_atomic: v.refunded_atomic, reserve_used_atomic: v.reserve_used_atomic });
   setStatus(t, 'closed');
 }
@@ -431,8 +432,15 @@ async function runSubtask(ledger: Ledger, t: Task, s: Sub, done: Map<string, Def
   else if (tooLarge) { // never sent cut short: an agent would rebuild what it can't see
     emit(t, 'error', { kind: 'inputs_too_large', message: tooLarge }, s.id);
     finish(t, s, 'abandoned', done);
-  } else if (s.self_do) await selfDo(t, s, done);
-  else await hireLoop(ledger, t, s, done);
+  } else {
+    // A part that edits a file an earlier part edits too starts once that part is done, from its version (inputsFor):
+    // side by side, each changed the file as it was, and one change was lost. Never on a part that waits for this one
+    // (cross_check), which would wait for ever.
+    const first = t.subtasks.filter((x) => x.n < s.n && overlaps(x, s) && !waitsFor(x, s));
+    if (first.length) await abortable(Promise.all(first.map((x) => done.get(x.id)!.promise)), t.abort.signal);
+    if (s.self_do) await selfDo(t, s, done);
+    else await hireLoop(ledger, t, s, done);
+  }
   if (!s.self_do && ledger.view(t.id)?.subtasks.find((x) => x.n === s.n)?.returned_atomic === null) {
     await ledgerOp(t, 'returnLeftover', s, () => ledger.returnLeftover(t.id, s.n));
   }
@@ -448,11 +456,55 @@ export function inputsOf(t: Task, s: { inputs?: string[] }): WorkFile[] {
   return [...new Set(s.inputs ?? [])].filter((p) => ws.has(p)).map((path) => ({ path, text: ws.get(path)! }));
 }
 
+/** Both parts edit a file of the chat. */
+const overlaps = (a: Sub, b: Sub) => !!a.inputs?.some((p) => b.inputs?.includes(p));
+/** `a` waits for `b` before it is judged (a cross_check against it). */
+const waitsFor = (a: Sub, b: Sub) => a.criteria.some((c) => c.kind === 'cross_check' && c.spec.other_subtask === b.id);
+
+/**
+ * What the aggregator and files.ts get for a part: its delivery, and what names the delivery's files: the paths it
+ * edits, and the ones it is asked for (its files criterion, else the paths its brief names).
+ */
+function aggPart(s: Sub) {
+  const asked = [...new Set(s.criteria.flatMap((c) => (c.kind === 'files' ? c.spec.paths : [])))];
+  return {
+    id: s.id, title: s.title, status: s.final_outcome ?? s.status, agent_handle: s.accepted?.agent_handle, deliverable_text: s.accepted?.text,
+    ...(s.inputs?.length ? { inputs: s.inputs } : {}), paths: asked.length || s.inputs?.length ? asked : namedPaths(s.brief),
+  };
+}
+
+/**
+ * The files a part starts from (its inputs): the chat's files it edits, each as the last earlier part that edits it too
+ * left it (those run first, runSubtask), else as the chat has it. What the agent or Rook's writer gets, and what the
+ * evaluator checks the edit against.
+ */
+export function inputsFor(t: Task, s: Sub): WorkFile[] {
+  const base = inputsOf(t, s);
+  const before = t.subtasks.filter((x) => x.n < s.n && x.final_outcome === 'passed' && overlaps(x, s));
+  if (!base.length || !before.length) return base;
+  const files = attach(before.map(aggPart)).files;
+  return base.map((f) => ({ path: f.path, text: files.findLast((x) => x.name === f.path)?.text ?? f.text }));
+}
+
+const inputBytes = (t: Task, s: Sub) => inputsOf(t, s).reduce((n, f) => n + Buffer.byteLength(f.text), 0);
+const kb = (bytes: number) => `${Math.ceil(bytes / 1024)} KB`;
+
 /** Why a part's input files can't be sent, in plain words; null when they can (or it has none). */
 export function inputsTooLarge(t: Task, s: Sub): string | null {
-  const bytes = inputsOf(t, s).reduce((n, f) => n + Buffer.byteLength(f.text), 0);
+  const bytes = inputBytes(t, s);
   if (bytes <= INPUTS_MAX_BYTES) return null;
-  return `The files "${s.title}" changes come to ${Math.ceil(bytes / 1024)} KB, more than the ${INPUTS_MAX_BYTES / 1024} KB Rook can send with one part, so that part isn't sent.`;
+  return `"${s.title}" changes ${kb(bytes)} of files, more than the ${kb(INPUTS_MAX_BYTES)} Rook can send with one part, so Rook didn't send it.`;
+}
+
+/**
+ * Why the plan can't be funded as it is (Plan.blocked), in plain words; null when it can. A part whose files Rook can't
+ * send was planned, funded and only then left out ("Rook hit a problem on its side"), and its note was never shown.
+ */
+export function blockedBy(t: Task): string | null {
+  const big = t.subtasks.map((s) => [s, inputBytes(t, s)] as const).filter(([, b]) => b > INPUTS_MAX_BYTES);
+  if (!big.length) return null;
+  const which = big.map(([s, b]) => `"${s.title}" changes ${kb(b)} of files`).join(', and ');
+  return `This plan can't run: ${which}, more than the ${kb(INPUTS_MAX_BYTES)} Rook can send with one part. Ask for the change on fewer or smaller files.`;
 }
 
 /** A Markdown fence longer than any run of backticks in `text`, so the file inside can't close it early. */
@@ -463,13 +515,17 @@ const fenceFor = (text: string) => '`'.repeat([...text.matchAll(/`+/g)].reduce((
  * delivered work as it is, never from a model's retelling of it. The language tag lets a reply in the same shape be
  * read back as files (planner/files.ts).
  */
-export function messageFor(brief: string, files: WorkFile[]): string {
+export function messageFor(brief: string, files: WorkFile[], publish = false): string {
   if (!files.length) return brief;
   const blocks = files.map((f) => {
     const fence = fenceFor(f.text), lang = f.path.split('/').at(-1)!.match(/.\.([A-Za-z0-9]{1,10})$/)?.[1] ?? '';
     return `${f.path}\n${fence}${lang}\n${f.text}\n${fence}`;
   });
-  return `${brief.trimEnd()}\n\n## Current files\n\nThe files to change, exactly as they are now, each under its path. Change only what is asked above, and send back every file you change whole, under the same path.\n\n${blocks.join('\n\n')}`;
+  // A deploy publishes the files as they are: "send back every file you change" asked it for code, not a link.
+  const how = publish
+    ? 'The files to publish, exactly as they are, each under its path. Publish them unchanged and answer with the live link.'
+    : 'The files to change, exactly as they are now, each under its path. Change only what is asked above, and send back every file you change whole, under the same path.';
+  return `${brief.trimEnd()}\n\n## Current files\n\n${how}\n\n${blocks.join('\n\n')}`;
 }
 
 /** Bytes an agent sent inside its reply: text when they read as UTF-8 text, else just their size. */
@@ -553,6 +609,72 @@ function failedVerdict(s: Sub) {
   return s.rehire_count > config.maxRehires;
 }
 
+/** The checks a failed evaluation failed, each with its kind and detail. */
+const failedChecks = (ev: Evaluation) =>
+  ev.failed_criteria.map((id) => ({ id, ...(ev.results.find((r) => r.criterion_id === id) ?? { kind: id, detail: '' }) }));
+
+/** It failed only llm_judge criteria: every machine check passed. */
+const judgeOnly = (ev: Evaluation) => ev.verdict === 'fail' && ev.failed_criteria.length > 0 && failedChecks(ev).every((c) => c.kind === 'llm_judge');
+
+/**
+ * Re-hire rule once a delivery of the part failed only llm_judge criteria (every machine check passed). The next agent
+ * meets the same judge, so a re-hire mostly pays again for the same verdict: on mainnet (t_d25d1b4e) a part paid 0.90
+ * USDC for three deliveries, two of them failed only by the judge, and the user got none. So from then on Rook hires
+ * `next` only as the part's first re-hire, and only when its price fits what is left of the part's cap (no top-up from
+ * the reserve); a second such failure ends the hiring. Checked before every hire, on top of ROOK_MAX_REHIRES. True
+ * when Rook stops here: it says why (error kind judge_only), and the report offers the best paid delivery, marked as
+ * not passing (unacceptedOf).
+ */
+function judgeOnlyStop(ledger: Ledger, t: Task, s: Sub, next: Candidate): boolean {
+  // One per hire: a restart between a hire's evaluation and its receipt judges it again, and that is still one failure.
+  const judged = [...new Map(s.evaluations.filter((e) => e.hire_id !== null && judgeOnly(e)).map((e) => [e.hire_id, e])).values()];
+  if (!judged.length) return false;
+  // What is left of the cap, never the balance: a top-up an unpaid hire left there is the reserve's money.
+  const v = ledger.view(t.id)!.subtasks.find((x) => x.n === s.n)!;
+  const left = v.cap_atomic > v.spent_atomic ? v.cap_atomic - v.spent_atomic : 0n;
+  const why = judged.length > 1 ? ''
+    : s.rehire_count > 1 ? ', and Rook already hired again once for this part'
+    : BigInt(next.price_atomic) > left ? `, and the next agent, ${next.handle}, asks ${formatUsdc(next.price_atomic)} USDC, more than the ${formatUsdc(left)} USDC left of this part's cap`
+    : null;
+  if (why === null) return false;
+  const which = judged.length > 1 ? `Two deliveries for ${s.id}` : `A delivery for ${s.id}`;
+  const agent = s.hires.find((h) => h.id === judged.at(-1)!.hire_id)?.agent_handle;
+  emit(t, 'error', {
+    kind: 'judge_only', ...(agent ? { agent_handle: agent } : {}),
+    message: `${which} passed every machine check but failed the judge${why}. Another agent would likely fail it too, so Rook hires no one else for ${s.id}.`,
+  }, s.id);
+  return true;
+}
+
+/** Checks whose failure means the delivery is never offered as usable: an injection, a file cut off, nothing delivered. */
+const UNSAFE = ['injection', 'cut_off', 'non_empty'];
+/** What a built-in check asks, for one a delivery can fail and still be offered (evaluator 6.2). */
+const BUILT_IN: Record<string, string> = { linked_files: 'Every file its pages load is delivered', edit_scope: 'Changes only what was asked' };
+
+/**
+ * A part abandoned after paid deliveries that were judged and failed: the best of them, to show apart from the report,
+ * marked as not passing. Best: fewest failed checks, then the latest. Never one that failed a check in UNSAFE. Null when
+ * the part passed, or none was paid and judged. Read from the hires and evaluations the task stores, so a restart
+ * loses nothing. On mainnet (t_d25d1b4e) a part paid 0.90 USDC for three good deliveries a strict judge failed, and the
+ * user got none of them.
+ */
+export function unacceptedOf(s: Sub): Unaccepted | null {
+  if (s.final_outcome !== 'abandoned') return null;
+  let best: Unaccepted | null = null;
+  for (const h of s.hires) {
+    const ev = s.evaluations.findLast((e) => e.hire_id === h.id);
+    if (!h.paid || ev?.verdict !== 'fail' || !h.deliverable_text?.trim()) continue;
+    const checks = failedChecks(ev);
+    if (checks.some((c) => UNSAFE.includes(c.kind))) continue;
+    if (best && checks.length > best.failed.length) continue; // a later one with as few failures wins
+    best = {
+      subtask_id: s.id, hire_id: h.id, agent_handle: h.agent_handle, text: h.deliverable_text,
+      failed: checks.map((c) => ({ id: c.id, description: s.criteria.find((x) => x.id === c.id)?.description ?? BUILT_IN[c.id] ?? c.id, detail: c.detail })),
+    };
+  }
+  return best;
+}
+
 /** Every paid hire gets a receipt (8.8); verdict and attestation are null when it was never judged. */
 async function writeReceipt(ledger: Ledger, t: Task, s: Sub, hire: Hire, ev: Evaluation | null) {
   hire.verdict = ev?.verdict ?? null;
@@ -618,10 +740,13 @@ async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Defer
       pending = null;
       hire = h.paid ? h : await resumeHire(ledger, t, s, h);
     } else {
-      // The plan's order (lowest expected cost first, docs 5.2 step 4), never re-sorted by price here.
-      const c = s.candidates.find((x) => !s.tried.includes(x.handle)) ?? await unreachableAgain(t, s);
-      if (!c) return giveUp(t, s, done);
-      if (!s.tried.includes(c.handle)) s.tried.push(c.handle);
+      // The plan's order (lowest expected cost first, docs 5.2 step 4), never re-sorted by price here. Then an agent
+      // that had no reachable backend, once (unreachableAgain).
+      const c = s.candidates.find((x) => !s.tried.includes(x.handle))
+        ?? s.candidates.find((x) => s.unreachable?.includes(x.handle) && !s.retried?.includes(x.handle));
+      if (!c || judgeOnlyStop(ledger, t, s, c)) return giveUp(t, s, done);
+      if (s.tried.includes(c.handle)) await unreachableAgain(t, s, c);
+      else s.tried.push(c.handle);
       setSub(t, s, 'quoting');
       const row = await quote(ledger, t, s, c);
       if (!row) continue;
@@ -658,14 +783,11 @@ async function hireLoop(ledger: Ledger, t: Task, s: Sub, done: Map<string, Defer
  * skill). Once every other candidate is tried, such an agent is asked again, once, after ROOK_UNREACHABLE_RETRY_S: on
  * mainnet the only affordable agent of a part answered it and the part was lost, though the agent was fine later.
  */
-async function unreachableAgain(t: Task, s: Sub): Promise<Candidate | undefined> {
-  const c = s.candidates.find((x) => s.unreachable?.includes(x.handle) && !s.retried?.includes(x.handle));
-  if (!c) return undefined;
+async function unreachableAgain(t: Task, s: Sub, c: Candidate) {
   (s.retried ??= []).push(c.handle);
   saveTask(t);
   emit(t, 'error', { kind: 'unreachable_retry', agent_handle: c.handle, message: `${c.handle} had no reachable backend; asking it again in ${config.unreachableRetryS} s` }, s.id);
   await sleep(config.unreachableRetryS * 1000, undefined, { signal: t.abort.signal });
-  return c;
 }
 
 /**
@@ -796,7 +918,7 @@ async function hire1(ledger: Ledger, t: Task, s: Sub, c: Candidate, row: Accepts
     saveTask(t);
     let sent: GatewayResult<{ task: A2ATask }>;
     try {
-      sent = await call(gw('/send'), { handle: c.handle, text: messageFor(s.brief, inputsOf(t, s)), payment: auth.header });
+      sent = await call(gw('/send'), { handle: c.handle, text: messageFor(s.brief, inputsFor(t, s), s.criteria.some((c) => c.kind === 'live_url')), payment: auth.header });
     } catch (e) {
       sent = { ok: false, error: { code: 'network', message: msg(e) } };
     }
@@ -983,11 +1105,13 @@ async function evaluate(t: Task, s: Sub, text: string, parts: Part[], hire_id: s
   // still loads an unchanged styles.css passes linked_files (evaluator/index.ts reads paths named in the brief as there).
   const known = (t.workspace ?? []).map((f) => f.name);
   const brief = known.length ? `${s.brief}\n\nFiles the project already has (unchanged unless this delivery gives them again): ${known.join(', ')}` : s.brief;
+  // An edit's files as they were before it, as the agent got them: the checker compares the edit with them.
+  const inputs = inputsFor(t, s);
   let ev: Evaluation;
   for (let attempt = 1; ; attempt++) {
     try {
       ev = await call<Evaluation>(config.urls.evaluator + '/evaluate', {
-        task_id: t.id, subtask_id: s.id, brief, criteria: s.criteria, deliverable: { text, parts }, peers,
+        task_id: t.id, subtask_id: s.id, brief, criteria: s.criteria, ...(inputs.length ? { inputs } : {}), deliverable: { text, parts }, peers,
       }, { signal });
       break;
     } catch (e) {
@@ -1008,17 +1132,26 @@ async function evaluate(t: Task, s: Sub, text: string, parts: Part[], hire_id: s
 /**
  * self_do subtasks: the planner writes the deliverable; no ledger involvement. An error abandons this subtask only. A
  * part that edits the chat's files (a rook_edit, or a hired part Rook writes after all) gets them whole, as an agent does.
+ * A reply cut off at the model's output limit is a failed attempt, never judged or used: a rename cut off mid-tag passed
+ * every check and replaced games.html with 38% of it.
  */
 async function selfDo(t: Task, s: Sub, done: Map<string, Deferred>) {
   const signal = t.abort.signal;
-  const files = inputsOf(t, s);
+  const files = inputsFor(t, s);
   for (;;) {
     setSub(t, s, 'working'); // Rook writes it now, as a hired agent works on its part
-    const r = await call<{ text: string; llm_calls: LlmCall[] }>(config.urls.planner + '/self-do', {
+    const r = await call<{ text: string; llm_calls: LlmCall[]; truncated?: boolean }>(config.urls.planner + '/self-do', {
       task_id: t.id, subtask_id: s.id, brief: s.brief, criteria: s.criteria, ...(files.length ? { files } : {}),
     }, { signal });
     signal.throwIfAborted();
     t.llm_calls.push(...(r.llm_calls ?? []));
+    if (r.truncated) {
+      const last = failedVerdict(s);
+      const kept = files.length ? ', and your files stay as they were' : '';
+      emit(t, 'error', { kind: 'cut_off', message: `Rook's answer for "${s.title}" was cut off before its end (longer than its model writes in one answer), so Rook didn't use it${kept}.${last ? '' : ' Rook tries again.'}` }, s.id);
+      if (last) return finish(t, s, 'abandoned', done);
+      continue;
+    }
     const ev = await evaluate(t, s, r.text, [{ text: r.text }], null, 'rook:self-do', done);
     if (ev.verdict === 'pass') {
       s.accepted = { hire_id: null, agent_handle: 'rook:self-do', text: r.text };

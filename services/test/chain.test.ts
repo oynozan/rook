@@ -343,9 +343,12 @@ test('simulator: a delegate nonce is used only once its task settles; expired de
   assert.deepEqual([r.status, r.body.error], [402, `delegate expired at block ${chain.height} (now ${chain.height})`]);
   const h = await pay('sim-tokencheck-fast', 5n);
   assert.equal((await send('sim-tokencheck-fast', h, ' ')).body.error.code, -32602);
-  r = await send('sim-tokencheck-fast', h); // the empty-brief call used nothing
+  // This task runs 1 s, not the file's 100 ms: under load the next send came after it had settled, and found nonce 5 free.
+  const held = await pay('sim-tokencheck', 5n);
+  process.env.SIM_DELIVERY_MS = '1000';
+  try { r = await send('sim-tokencheck-fast', h); } finally { process.env.SIM_DELIVERY_MS = '100'; } // the empty-brief call used nothing
   assert.ok(r.body.result, JSON.stringify(r.body));
-  assert.match((await send('sim-tokencheck', await pay('sim-tokencheck', 5n))).body.error, /already used/); // held while it runs
+  assert.match((await send('sim-tokencheck', held)).body.error, /already used/); // held while it runs
 
   await until('sim-tokencheck-fast', r.body.result.task.id, 'FAILED'); // unpaid: nonce 5 is free again
   r = await send('sim-tokencheck', await pay('sim-tokencheck', 5n));

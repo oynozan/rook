@@ -127,9 +127,29 @@ export function problemLine(data: { kind?: string; message?: string; agent_handl
     case 'restart': return problem('Rook restarted during this task, so the run stopped there.');
     case 'planner': return problem(`Rook couldn't draft a plan for this task: ${plannerReason(message)}`);
     case 'no_plan': return problem(message);
+    // Rook's own answer stopped at its model's output limit (runner.ts selfDo), never used: a sentence for the user, as
+    // written. A retry while Rook tries again; the last one leaves the part out.
+    case 'cut_off': return / Rook tries again\.$/.test(message) ? retry(message) : { text: message, tone: 'alert', label: 'Cut off' };
+    // Rook stopped re-hiring after the judge alone failed the work (runner.ts judgeOnlyStop): a choice, not a fault.
+    case 'judge_only': return note(`${who ? `${who}'s` : 'The'} work on ${it} passed every machine check but not the judge. Another agent would likely fail it too, so Rook hires no one else for it.`);
+    // A part whose files are past what Rook sends with one part (runner.ts inputsTooLarge): the user's request is too
+    // big, not Rook broken, so never "a problem on its side". Older services said "The files "X" changes come to 325 KB".
+    case 'inputs_too_large': {
+      const size = message.match(/(?:come to|changes) (\d+) KB(?: of files)?, more than the (\d+) KB/);
+      const why = size ? `the files it changes come to ${size[1]} KB, more than the ${size[2]} KB Rook can send with one part` : 'the files it changes are more than Rook can send with one part';
+      return { text: `${part ? `“${part}”` : 'This part'} wasn't sent: ${why}. Ask for the change on fewer files.`, tone: 'alert', label: 'Not sent' };
+    }
     default: return problem(`Rook hit a problem on its side${why()}.`);
   }
 }
+
+/**
+ * The evaluator's own file checks a failed evaluation names (services/src/evaluator/index.ts), said in plain words in
+ * place of "failed a check": a cut-off file first, as it is often why an edit lost lines too. Null for any other check.
+ */
+const fileCheck = (failed?: string[]) => failed?.includes('cut_off') ? 'cut_off' : failed?.includes('edit_scope') ? 'edit_scope' : null;
+/** edit_scope: the edit changed nothing, more than the brief asks, or not every place it asks. */
+const EDIT_SCOPE = "didn't make just the change asked for";
 
 /** What the run's status says a line means, while the page replays the lines one by one. */
 export type Now = { state: string; label: string; detail?: string };
@@ -171,8 +191,9 @@ export function feedFrom(events: RookEvent[], ctx: FeedContext): FeedLine[] {
       lines.push({ key, text: n === 1 ? `Rook is doing ${it} itself.` : `Rook is trying ${it} again.`, tone: 'normal', now: { state: 'writing', label: 'Rook is working on', detail: it } });
     }
     else if (type === 'evaluation' && (self || agent === 'rook:self-do')) {
-      const it = part(subtask_id), pass = data.verdict === 'pass';
-      lines.push({ key, text: `Rook's own work on ${it} ${pass ? 'passed every check' : 'failed a check'}.`, tone: 'normal', now: { state: 'analyzing', label: pass ? 'Passed' : 'Failed a check', detail: it } });
+      const it = part(subtask_id), pass = data.verdict === 'pass', check = pass ? null : fileCheck(data.failed_criteria);
+      const what = pass ? 'passed every check' : check === 'cut_off' ? 'has a file cut off before its end' : check === 'edit_scope' ? EDIT_SCOPE : 'failed a check';
+      lines.push({ key, text: `Rook's own work on ${it} ${what}.`, tone: 'normal', now: { state: 'analyzing', label: pass ? 'Passed' : check === 'cut_off' ? 'Cut off' : 'Failed a check', detail: it } });
     }
     // Whether an unpaid hire cost anything is known only once its authorization is released (it can still land).
     else if (type === 'a2a_state' && ['FAILED', 'REJECTED', 'CANCELED'].includes(data.state)) lines.push({ key, text: `${agent} didn't deliver${on}.`, tone: 'normal', now: { state: 'analyzing', label: 'No delivery', detail: agent } });
@@ -197,7 +218,11 @@ export function feedFrom(events: RookEvent[], ctx: FeedContext): FeedLine[] {
     else if (type === 'evaluation') {
       if (data.verdict === 'pass') lines.push({ key, text: `${agent} passed every check${on}.`, tone: 'normal', now: { state: 'analyzing', label: 'Passed', detail: agent } });
       else if (data.failed_criteria?.includes('injection')) lines.push({ key, text: `${agent}'s delivery${fore} tried to give Rook instructions. Flagged and rejected.`, tone: 'alert', flag: true, now: { state: 'analyzing', label: 'Flagged', detail: agent } });
-      else lines.push({ key, text: `${agent} failed a check${on}.`, tone: 'alert', flag: true, now: { state: 'analyzing', label: 'Failed a check', detail: agent } });
+      else {
+        const check = fileCheck(data.failed_criteria);
+        const text = check === 'cut_off' ? `${agent}'s delivery${fore} has a file cut off before its end.` : check === 'edit_scope' ? `${agent}'s edit${fore} ${EDIT_SCOPE}.` : `${agent} failed a check${on}.`;
+        lines.push({ key, text, tone: 'alert', flag: true, now: { state: 'analyzing', label: check === 'cut_off' ? 'Cut off' : 'Failed a check', detail: agent } });
+      }
     } else if (type === 'security_alert' && data.source === 'quote') lines.push({ key, text: alertLine(data.flag, agent), detail: data.flag, tone: 'alert', flag: true, now: { state: 'analyzing', label: 'Security alert' } });
     else if (type === 'quote_rejected') lines.push({ key, text: `Skipped ${agent}${fore}: ${skipReason(data.reason)}.`, detail: data.reason, tone: 'muted', now: { state: 'researching', label: 'Skipped', detail: agent } });
     else if (type === 'ledger' && data.op === 'topUp') lines.push({ key, text: `Topped up ${usdc(data.amount_atomic)} USDC from the reserve${fore}.`, tone: 'muted', fromReserve: Number(data.amount_atomic), now: { state: 'analyzing', label: 'Topped up', detail: `${usdc(data.amount_atomic)} USDC` } });

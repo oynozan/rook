@@ -251,3 +251,35 @@ Two paid runs in the web app (headless Chromium, the same injected wallet), each
 1. `-32603` on a paid send is the market's "no reachable backend right now, retry in a few minutes" (its x402 caller skill). Four of six paid sends got it; each payment was voided. Rook now asks such an agent again, once, after the other candidates, `ROOK_UNREACHABLE_RETRY_S` (180) later.
 2. A part no hired agent delivered was left out of the report, so run 10 delivered nothing. A part the draft marked `self_do_ok` is now written by Rook instead (run 11), and its cap still goes back.
 3. The page's live event stream broke every 5 minutes while an agent worked: the web proxy's fetch has a 300 s body timeout, and a reconnect with nothing new waited for headers until it gave up (a 503). The orchestrator now sends its headers at once and a keep-alive comment every 25 s.
+
+### 8.2 QA rounds on mainnet (2026-11-11)
+
+Role accounts topped up and USDC bought from `oynozan.near`, for testing:
+
+| What | Transaction |
+|---|---|
+| 0.5 NEAR to `orch.oynozan.near` (it pays gas for `fund_subtask`, `record_receipt`, `close_task`) | `4dtrpcmnVTpPL9tcKtiHCDc8k6X2xrkuWoLLKLJkydj8` |
+| 0.2 NEAR to `signer.oynozan.near` (it pays gas for `register_subtask_key`) | `DZdZihpfUgdFeSew9WNegH52JUo2Wo8NVX7Q3TLfXNS6` |
+| 3 NEAR wrapped, then swapped for 10.82 USDC on Ref | wrap `LG8nPxqXBXinpUgLTHvTFxB5uaitrM17a9aEriB2tgn`, swap `8xvncB9w5AQkCjdESpcbxVexEWeS9RiTxUbh8RmFrfrj` |
+
+**Run `t_d25d1b4e`**: "Write a short brief on the NEAR AI security breach reported this week ... Cite sources.", budget 1.00 USDC, one research part.
+
+| Agent | Paid (USDC) | Verdict | Payment |
+|---|---|---|---|
+| `cited-web-research-brief` | 0.15 | fail | `4WEauED8jAqJBsuc2TmeMa32DPdQNh5GdNaqbFaActWy` |
+| `kaminari-research` | 0.25 | fail | `Ag7i33GcSAoTGsLCaoa1FM9WjJn1WAtiptTDjWFfybm9` |
+| `o17-web-research-v` | 0 | timed out, cancelled, authorization voided | none |
+| `web-research` | 0.50 | fail | `DXChUnGBJ9sQm2AwN34HPocmhko4pNWgC2FPbfBJqGhU` |
+
+Spent 0.90, refunded 0.10. The payment, receipt and refund chain worked, but the user got nothing for 0.90: two of the three deliveries were good and failed only an over-strict `llm_judge`. Fixes:
+1. The report now offers the best paid delivery of an abandoned part under "Work that didn't pass" (`final_result.unaccepted`), marked with the checks it failed, never one that failed `injection`, `cut_off` or `non_empty`, and never added to the report, its files or the chat's workspace (docs/agentic-system.md 8.2).
+2. After a delivery fails only `llm_judge` checks, Rook hires again only as the part's first re-hire, and only within what is left of the part's cap; a second such failure stops hiring for the part (`judge_only`, 8.6).
+3. Research is now checked with a `sources` criterion that opens the cited pages and finds each figure on them, in place of a judge asked to hunt for links.
+
+**Web run, a portfolio and two edits** (QA round 2 code, `3a4add6`):
+- `t_095f2819`, "Rename Ozan Andaç to Jordan Çelik everywhere": a free Rook edit. The rename was right three times, and each attempt failed a check the planner wrote as "Old name is gone" with the pattern "Ozan Andaç", which only passes while the old name is still there. A `contains` check can now require text to be gone (`absent: true`), and the planner turns a check on text the brief replaces or removes into one (`a27d320`).
+- `t_dcae3309`, "Add a button in the hero that says Hire me": planned as a hire (styling counts as new design), 1.00 USDC funded, `filipe-agent-works` quoted 0.25 and never delivered in its 30 minutes; Rook cancelled it unpaid and writes the part itself (`self_do_ok`).
+
+**Re-run on `c61009b`** (the `absent` check, the sources check and the judge-only rule live):
+- `t_de680f41`, the same rename: planned with `{"pattern":"Ozan Andaç","absent":true}`, passed on Rook's first attempt, free.
+- `t_c96e4f89`, "Write a short brief on the current circulating supply and market cap of the NEAR token, with each figure's source link.", budget 1.00 USDC: `cited-web-research-brief` paid 0.15 (payment `6qLsKf34yFF1FoqDEyjLDRcsYZyjxtLRAYfb1SWVoafm`, receipt `3gKajiM7Rck6zxW9iJ4hyL4kgbqKoSijjc1Dit8cVUnk`) and passed on the first hire. Its `sources` check opened both cited CoinGecko API pages and found the circulating supply (1,311,369,533) and the market cap (4,836,664,246 USD) on the page cited for each.

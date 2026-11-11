@@ -5,8 +5,12 @@
 // last part, a Next.js project lost app/ and components/ (page.tsx, page-2.tsx) and could not run.
 import type { DeliveredFile } from '../shared/types.ts';
 
-/** One merged delivery: the part it answers and who wrote it (as in the attribution). */
-export type Delivery = { subtask_id: string; agent_handle: string; title: string; text: string };
+/**
+ * One merged delivery: the part it answers and who wrote it (as in the attribution). `inputs`: the chat's files the part
+ * edits (PlanSubtask.inputs); `paths`: the files it is asked for (its files criterion, or the ones its brief names).
+ * Both name what an unnamed or misplaced file of the delivery is (attachFiles).
+ */
+export type Delivery = { subtask_id: string; agent_handle: string; title: string; text: string; inputs?: string[]; paths?: string[] };
 /** A file found but not attached, for the report's gaps. */
 export type Unattached = { name: string; title: string; why: string };
 /** Bracketed placeholders a part left for the user to fill in ("[Your email]"), in one of its files or (no `name`) its text. */
@@ -129,17 +133,32 @@ function commentPath(line: string | undefined): string | undefined {
 // Products named like files: "Built with Next.js:" before a ```js block names no file.
 const PRODUCT = /^(?:node|next|nuxt|vue|react|express|nest|three|d3|chart|alpine|ember|angular|solid|preact|gatsby|moment|day|anime|p5|pixi|leaflet)\.js$/i;
 
+/** The file paths a text (a brief) names, each once, in order; products named like files ("Next.js") are not files. */
+export function namedPaths(text: string): string[] {
+  return [...new Set(text.split(/\r?\n/).flatMap(pathsIn).filter((p) => !PRODUCT.test(baseOf(p))))];
+}
+
 const OPEN = /^ {0,3}(`{3,}|~{3,})(.*)$/;
 const DOC_START = /^\s*(<!doctype\s+html|<html[\s>])/i;
+const DOC_END = /<\/html\s*>/i;
+
+/**
+ * A file that is an HTML document with no </html>: cut off before its end. A reply cut at the model's max_tokens
+ * ended mid-tag ("<td>20</td></tr>\n      <"), and its games.html, 62% short, was attached and passed as whole.
+ */
+export function cutShort(name: string, text: string): boolean {
+  return kindOfPath(name) === 'html' && DOC_START.test(text.slice(0, 2000).trimStart().split('\n', 1)[0] ?? '') && !DOC_END.test(text);
+}
 
 // What opens an inner fence: a language word (```bash, ```json:package.json), never code that starts with a run of
 // backticks ("```</pre>" in a page that shows a fence).
 const LANG_WORD = /^[A-Za-z][\w+#.:/-]*$/;
 
 /**
- * The line that closes the fence opened at line `i` (lines.length when none does: a delivery cut short still has its
- * file). A fence closes only on a run of its own character at least as long, alone on its line; an inner fence of
- * that character opened with a language is closed first, so a ```markdown README keeps its own ```bash blocks.
+ * The line that closes the fence opened at line `i` (lines.length when none does: the delivery was cut short there, so
+ * the block is cut off, scan). A fence closes only on a run of its own character at least as long, alone on its line;
+ * an inner fence of that character opened with a language is closed first, so a ```markdown README keeps its own
+ * ```bash blocks.
  */
 function closing(lines: string[], i: number, fence: string): number {
   const ch = fence[0], inner: number[] = [];
@@ -159,12 +178,13 @@ function closing(lines: string[], i: number, fence: string): number {
 /**
  * `strong`: named by the block's own fence words, its first line, or a line before it that is only the path. Otherwise
  * a name comes from a mention in the line before ("the full page, index.html:"); `weak`: such a block is also short, so
- * it may be a piece of the file it names ("add this to your index.html:").
+ * it may be a piece of the file it names ("add this to your index.html:"). `cut`: the block or page never ends (its
+ * fence never closes, or a page has no </html>): the reply was cut off, so it is never attached as a whole file.
  */
-type Found = { kind: string; name?: string; text: string; from: number; to: number; short: boolean; strong: boolean; weak: boolean }; // lines [from, to)
+type Found = { kind: string; name?: string; text: string; from: number; to: number; short: boolean; strong: boolean; weak: boolean; cut: boolean }; // lines [from, to)
 
 /** What a fenced block is: its kind and name, or undefined when it is no file. */
-function fileOf(info: string, body: string[], prose: string | undefined): Omit<Found, 'text' | 'from' | 'to'> | undefined {
+function fileOf(info: string, body: string[], prose: string | undefined): Omit<Found, 'text' | 'from' | 'to' | 'cut'> | undefined {
   const words = info.trim().slice(0, 300); // an info string is a language and a name; the rest is no name
   const lang = (words.split(/\s+/)[0] ?? '').toLowerCase().split(':')[0];
   const langKind = kindOf(lang);
@@ -193,21 +213,29 @@ function scan(lines: string[]): Found[] {
   for (let i = 0; i < lines.length; i++) {
     const open = lines[i].match(OPEN);
     if (open && !(open[1][0] === '`' && open[2].includes('`'))) {
-      const j = closing(lines, i, open[1]);
-      const body = lines.slice(i + 1, j);
+      let j = closing(lines, i, open[1]);
+      let body = lines.slice(i + 1, j);
       const f = fileOf(open[2], body, prose);
-      if (f) out.push({ ...f, text: body.join('\n'), from: i, to: Math.min(j + 1, lines.length) });
+      let cut = j === lines.length;
+      if (f && DOC_START.test(body[0] ?? '')) {
+        // A page whose fence never closes but which ends (</html>) is whole: only its closing fence is missing, and
+        // what follows the page is the reply's text again. A page with no </html> is cut off, fence or not.
+        const end = cut ? body.findLastIndex((l) => DOC_END.test(l)) : -1;
+        if (end >= 0) { body = body.slice(0, end + 1); j = i + end + 1; cut = false; }
+        else cut ||= !body.some((l) => DOC_END.test(l));
+      }
+      if (f) out.push({ ...f, text: body.join('\n'), from: i, to: Math.min(j + 1, lines.length), cut });
       prose = undefined; // the line before a block names that block, never the next one
       i = j;
       continue;
     }
     if (DOC_START.test(lines[i])) {
       let j = i;
-      while (j < lines.length && !/<\/html\s*>/i.test(lines[j])) j++;
+      while (j < lines.length && !DOC_END.test(lines[j])) j++;
       const to = Math.min(j + 1, lines.length);
       const strong = pathLine(prose);
       const name = strong ?? pathsIn(prose ?? '').filter((p) => kindOfName(baseOf(p)) === 'html').at(-1);
-      out.push({ kind: 'html', name, text: lines.slice(i, to).join('\n').trim(), from: i, to, short: false, strong: !!strong, weak: false });
+      out.push({ kind: 'html', name, text: lines.slice(i, to).join('\n').trim(), from: i, to, short: false, strong: !!strong, weak: false, cut: j === lines.length });
       i = to - 1;
       prose = undefined;
       continue;
@@ -277,24 +305,98 @@ export function localLinks(html: string, from: string): string[] {
 
 // ---- Placeholders, code left out, install scripts ----
 
-// "[Your email]", "[Insert photo]", "[Company Name]", "[TBD]": a bracketed span that asks the user for a fact. Not a
-// link ("[text](url)"), an index ("tiers[0]"), an image ("![alt]"), a quoted list or Rook's own "[file ...]" marker.
-const BRACKETED = /(?<![\w\])!\\])\[([^\[\]\n"'`]{2,80})\](?![(\[:])/g;
+// "[Your email]", "[Startup name]", "[Feature 1]", "[Photo of simit]", "[Tagline: ...]", "[Price]", "[TBD]": in prose
+// or markup, a bracketed span is a placeholder the user must replace, unless it is something else in brackets. QA found
+// 4 of 28 listed: "[Startup name]" and "[Contact email]" were missed for not capitalising every word, "[Feature 1]"
+// for its digit. Not a placeholder: a link ("[text](url)"), a reference ("[text][ref]", "[1]: url"), an index or a path
+// segment ("tiers[0]", "app/[slug]"), an image ("![alt]"), a wiki link ("[[Page]]"), a quoted list, Rook's own
+// "[file ...]" marker, an editor's note ("[sic]"), or code ("[a, b]", "[A-Z]", "[ -f .env ]", "[...items]").
+const BRACKETED = /(?<![\w\])!\\/[])\[([^\[\]\n"'`]{2,80})\](?![(\[:])/g;
 const ASKS = /^(?:your|my|our|insert|add|replace|enter|put|placeholder|todo|tbd|tbc|e\.g\.)\b/i;
 const MARKS = /\b(?:placeholder|goes here|here|tbd|to be confirmed|lorem)\b/i;
 const FACT = /\b(?:name|e-?mail|phone|address|company|business|city|country|date|year|url|link|price|logo|photo|image|picture|title|number|testimonial|quote|client|customer|role|position|project|brand|product|amount|username|handle|website|location)s?\b/i;
-const capitalised = (s: string) => s.split(/\s+/).every((w) => /^[^\p{L}\p{N}]*[\p{Lu}\p{N}]/u.test(w));
+const NOTE = /^(?:(?:sic|citation needed|emphasis added|info|warn|warning|error|debug|ok)$|(?:sources?|via|see|ref|cf|note)\b)/i;
+// Who the work is for and how to reach them: listed first, so the 8 shown never leave out "[Startup name]".
+const IDENTITY = /\b(?:e-?mail|phone|tel|telephone|address|contact|website|domain|url|handle|username|logo|city|location)s?\b|\b(?:your|my|our|full|first|last|company|business|startup|brand|shop|store|restaurant|caf[eé]|owner|founder)\s+name\b|^(?:name|company|business|startup|brand)$/i;
+const PROSE_KINDS = new Set(['md', 'mdx', 'txt']);
+const MARKUP_KINDS = new Set(['html', 'svg', 'xml', 'vue', 'svelte', 'php']);
+type Context = 'prose' | 'markup' | 'code';
 
-/** The placeholders in a text the user must replace, each once, in order; "lorem ipsum" filler counts too. */
-export function placeholdersIn(text: string): string[] {
-  const out = new Set<string>();
-  for (const m of text.matchAll(BRACKETED)) {
-    const c = m[1].trim();
-    if (/^file\s/i.test(c)) continue;
-    if (ASKS.test(c) || MARKS.test(c) || (FACT.test(c) && capitalised(c))) out.add(`[${c}]`);
+/** Prose without its fenced blocks and inline code: a README's `[ -f .env ]` is shell, not a placeholder. */
+function proseOnly(text: string): string {
+  const out: string[] = [];
+  let fence: string | null = null;
+  for (const line of text.split('\n')) {
+    const m = line.match(OPEN);
+    if (fence) { if (m && m[1][0] === fence[0] && m[1].length >= fence.length && !m[2].trim()) fence = null; continue; }
+    if (m && !(m[1][0] === '`' && m[2].includes('`'))) { fence = m[1]; continue; }
+    out.push(line.replace(/`[^`\n]*`/g, ' '));
   }
-  if (/\blorem ipsum\b/i.test(text)) out.add('lorem ipsum filler text');
-  return [...out];
+  return out.join('\n');
+}
+
+/** Markup without what its <script> and <style> elements hold: a page's script arrays and attribute selectors are code. */
+function markupOnly(text: string): string {
+  const open = /<(script|style)\b/gi;
+  let out = '', at = 0;
+  for (let m; (m = open.exec(text));) {
+    out += text.slice(at, m.index);
+    const close = new RegExp(`</${m[1]}`, 'gi');
+    close.lastIndex = open.lastIndex;
+    const c = close.exec(text);
+    if (!c) return out;
+    at = open.lastIndex = c.index;
+  }
+  return out + text.slice(at);
+}
+
+/**
+ * Whether bracketed `raw` is a placeholder. In code (scripts, styles, configs) only a capitalised phrase, or a fact
+ * word ("[Price]"), counts: `[name]`, `[Item]` and a "[Unit]" section line are code there. `alone`: the span is its line.
+ */
+function placeholder(raw: string, context: Context, alone: boolean): boolean {
+  const c = raw.trim().replace(/^[*_]+|[*_]+$/g, '').trim(); // "[**Your name**]"
+  if (c.length < 2 || /^file\s/i.test(c)) return false;
+  if (ASKS.test(c) || MARKS.test(c)) return true;
+  if (NOTE.test(c) || !/\p{L}/u.test(c)) return false; // "[sic]", "[1]", "[2026-11-10]"
+  if (/[=;{}<>\\|^~*]|\.\.\.|^[-.:/]/.test(c)) return false; // "[a=b]", "[...xs]", "[^\d]", "[ -f x ]"
+  if (/(?:^|[^\p{L}\p{N}])[\p{L}\p{N}]-[\p{L}\p{N}](?![\p{L}\p{N}])/u.test(c)) return false; // a range: "[A-Z]"
+  const multi = /\s/.test(c);
+  const names = c.includes(',') && c.split(',').every((p) => /^\s*[A-Za-z_$][\w$.]*\s*$/.test(p)); // "[a, b]"
+  const word = /^[\p{L}\p{N}][\p{L}\p{N}'’/-]*$/u.test(c); // one plain word: not "[Symbol.iterator]" or "[key:value]"
+  if (context === 'code') {
+    if (alone || names) return false;
+    return multi ? /^\p{Lu}/u.test(c) && !/[()]/.test(c) : word && /^\p{Lu}/u.test(c) && FACT.test(c);
+  }
+  if (names && c.split(',').every((p) => /^\s*[a-z_$]/.test(p))) return false; // "[count, setCount]"
+  return multi || (word && (/^\p{Lu}/u.test(c) || FACT.test(c))); // "[Startup name]", "[Price]", "[email]"
+}
+
+/** The span from `i` to `end` is all its line holds (looked at within 200 characters each way: a long line never is). */
+function aloneOnLine(s: string, i: number, end: number): boolean {
+  const back = s.slice(Math.max(0, i - 200), i), nl = back.lastIndexOf('\n');
+  const head = nl >= 0 ? back.slice(nl + 1) : i <= 200 ? back : 'x';
+  return !head.trim() && /^[ \t]*(?:\r?\n|$)/.test(s.slice(end, end + 200));
+}
+
+/**
+ * The placeholders the user must replace in a text, each once: who it is for and how to reach them first, then the
+ * rest in order; "lorem ipsum" filler counts too. `name`: the file it is (its kind decides what is code); none for a
+ * delivery's own text, read as prose.
+ */
+export function placeholdersIn(text: string, name?: string): string[] {
+  const k = (name === undefined ? undefined : kindOfPath(name)) ?? 'txt';
+  const context: Context = PROSE_KINDS.has(k) ? 'prose' : MARKUP_KINDS.has(k) ? 'markup' : 'code';
+  const read = context === 'prose' ? proseOnly(text) : context === 'markup' ? markupOnly(text) : text;
+  const out = new Set<string>();
+  for (const m of read.matchAll(BRACKETED)) {
+    const c = m[1].trim();
+    if (placeholder(c, context, context === 'code' && aloneOnLine(read, m.index, m.index + m[0].length))) out.add(`[${c}]`);
+  }
+  const found = [...out], who = (p: string) => IDENTITY.test(p.slice(1, -1));
+  const sorted = [...found.filter(who), ...found.filter((p) => !who(p))];
+  if (/\blorem ipsum\b/i.test(text)) sorted.push('lorem ipsum filler text');
+  return sorted;
 }
 
 // Words a model writes where it left code out: a file holding one is not whole.
@@ -349,15 +451,34 @@ const slug = (title: string) => title.toLowerCase().replace(/[^a-z0-9]+/g, '-').
 const lineCount = (text: string) => text.split('\n').length;
 
 /**
+ * The input path a delivered file stands for: the one it names (in any case), else the only one with its base name
+ * ("portfolio/index.html" for index.html). An agent that put the page in a folder left the chat with two index.html
+ * files, and the next edit worked on the old one.
+ */
+export function onInputs(name: string, inputs: string[]): string | undefined {
+  const lc = name.toLowerCase(), base = baseOf(lc);
+  const same = inputs.filter((p) => p.toLowerCase() === lc);
+  if (same.length) return same[0];
+  const by = [...new Set(inputs.filter((p) => baseOf(p).toLowerCase() === base))];
+  return by.length === 1 ? by[0] : undefined;
+}
+
+const CUT_OFF = 'cut off before its end';
+
+/**
  * Takes the code files out of the merged deliveries, in order. A file is named by the path the delivery states next to
  * it (the fence's info string, its first-line comment, or the line before it: the path alone, or a mention of a file
  * of its kind), else from its content when that is plain (package.json), else by the one file a page in the part
- * loads that nothing else is named (styles.css), else from its part's title. Within one part a path written twice is
- * one file: its last whole version is attached and an earlier one gets a note. Paths are unique across the result
- * (index-2.html for a second part's index.html). A file over FILE_MAX_BYTES, or past FILES_MAX_BYTES in all, is left
- * out and listed.
+ * loads that nothing else is named (styles.css), else by the one file of its kind the part edits or is asked for that
+ * the delivery doesn't name (index.html for a page in a bare ```html block), else from its part's title. A file named
+ * like one the part edits but in another folder is that file (onInputs). Within one part a path written twice is one
+ * file: its last whole version is attached and an earlier one gets a note. A file the part edits that a later part
+ * edits again (the runner applies them in order) is that later part's: only its version is attached. Paths are unique
+ * across the result (index-2.html for a second part's index.html). A block cut off before its end (its fence never
+ * closes, or a page has no </html>) is never attached, nor is a file over FILE_MAX_BYTES or past FILES_MAX_BYTES in
+ * all: each is left out and listed. `keepCut`: a cut-off block is attached anyway, for the evaluator to judge and fail.
  */
-export function attachFiles(deliveries: Delivery[]): Attached {
+export function attachFiles(deliveries: Delivery[], { keepCut = false } = {}): Attached {
   const texts = new Map<string, string>();
   const files: DeliveredFile[] = [];
   const unattached: Unattached[] = [];
@@ -378,23 +499,43 @@ export function attachFiles(deliveries: Delivery[]): Attached {
   // the result) and stays in the text as a snippet: "add this line to your index.html:" pushed the page to index-2.html.
   const named = new Map<string, number>();
   for (const f of scanned.flatMap((x) => x.found)) if (f.name) named.set(baseOf(f.name).toLowerCase(), (named.get(baseOf(f.name).toLowerCase()) ?? 0) + 1);
-  for (const { d, lines, found: all } of scanned) {
+  const parts = scanned.map(({ d, lines, found: all }) => {
     let found = all.filter((f) => !(f.weak && named.get(baseOf(f.name!).toLowerCase())! > 1));
     // The same path twice in one part: the last whole version is the file. A short piece of it (a line to add) stays in
     // the text, and an earlier whole version is noted where it was.
     const last = new Map<string, Found>();
     for (const f of found) if (f.name && (!f.short || !last.get(f.name.toLowerCase()) || last.get(f.name.toLowerCase())!.short)) last.set(f.name.toLowerCase(), f);
     found = found.filter((f) => !f.name || last.get(f.name.toLowerCase()) === f || !f.short);
-    const earlier = new Set(found.filter((f) => f.name && last.get(f.name.toLowerCase()) !== f));
+    const earlier = new Map(found.filter((f) => f.name && last.get(f.name.toLowerCase()) !== f).map((f) => [f, last.get(f.name!.toLowerCase())!]));
     for (const f of found) f.name ??= contentName(f.kind, f.text);
-    // A nameless stylesheet or script takes the name of the one file of its kind a page here loads that no block is named.
+    const has = (p: string) => found.some((f) => f.name?.toLowerCase() === p.toLowerCase());
+    // A file the part edits, given back in another folder, is that file; never when the delivery also gives it by name.
+    const inputs = d.inputs ?? [];
+    for (const f of found) {
+      const p = f.name && !f.short && !earlier.has(f) ? onInputs(f.name, inputs) : undefined;
+      if (p && p !== f.name && !has(p)) f.name = p;
+    }
+    // A nameless stylesheet or script takes the name of the one file of its kind a page here loads that no block is
+    // named. Then a nameless file takes the name of the one file of its kind the part edits or is asked for that the
+    // delivery doesn't give (the page's own links first: they are what it needs).
+    const expected = [...new Set([...inputs, ...(d.paths ?? [])])];
     const paths = new Set(found.filter((f) => f.name).map((f) => f.name!));
     const wanted = found.filter((f) => f.kind === 'html').flatMap((f) => localLinks(f.text, f.name ?? '')).filter((p) => !paths.has(p));
-    for (const fam of new Set(found.filter((f) => !f.name).map((f) => family(f.kind)))) {
-      const blocks = found.filter((f) => !f.name && family(f.kind) === fam);
-      const links = [...new Set(wanted.filter((p) => family(kindOfName(baseOf(p)) ?? '') === fam))];
-      if (blocks.length === 1 && links.length === 1) blocks[0].name = links[0];
+    for (const from of [wanted, expected]) {
+      for (const fam of new Set(found.filter((f) => !f.name).map((f) => family(f.kind)))) {
+        const blocks = found.filter((f) => !f.name && family(f.kind) === fam);
+        const open = [...new Set(from.filter((p) => family(kindOfPath(p) ?? '') === fam && !has(p)))];
+        if (blocks.length === 1 && open.length === 1) blocks[0].name = open[0];
+      }
     }
+    return { d, lines, found, earlier };
+  });
+  // A file a part edits that a later part edits again: the later version is the file (it started from this one).
+  const lastEdit = new Map<string, number>();
+  parts.forEach(({ d, found, earlier }, k) => {
+    for (const f of found) if (f.name && !f.cut && !earlier.has(f) && onInputs(f.name, d.inputs ?? []) === f.name) lastEdit.set(f.name.toLowerCase(), k);
+  });
+  parts.forEach(({ d, lines, found, earlier }, k) => {
     const out: string[] = [], inFiles: Placeholders[] = [];
     let at = 0;
     for (const f of found) {
@@ -402,15 +543,23 @@ export function attachFiles(deliveries: Delivery[]): Attached {
       const size = `${n} line${n === 1 ? '' : 's'}`;
       out.push(...lines.slice(at, f.from));
       at = f.to;
-      if (earlier.has(f)) { out.push(`[file ${f.name}, ${size}, not attached: a later version of it in this part is attached]`); continue; }
-      const name = unique(f.name ?? `${slug(d.title) || d.subtask_id}.${f.kind}`);
+      const later = earlier.get(f);
+      if (later) { out.push(`[file ${f.name}, ${size}, not attached: a later version of it in this part ${later.cut ? 'replaces it' : 'is attached'}]`); continue; }
+      if (f.name && (lastEdit.get(f.name.toLowerCase()) ?? k) > k && onInputs(f.name, d.inputs ?? []) === f.name) {
+        out.push(`[file ${f.name}, ${size}, not attached: a later part changes it again, and that version is attached]`);
+        continue;
+      }
+      const want = f.name ?? `${slug(d.title) || d.subtask_id}.${f.kind}`;
+      // Cut off: listed, never attached, and its path stays free for a whole version.
       const bytes = Buffer.byteLength(f.text, 'utf8');
-      const why = bytes > FILE_MAX_BYTES ? 'larger than 1 MB' : total + bytes > FILES_MAX_BYTES ? 'the files together pass 3 MB' : null;
+      const cut = f.cut && !keepCut;
+      const why = cut ? CUT_OFF : bytes > FILE_MAX_BYTES ? 'larger than 1 MB' : total + bytes > FILES_MAX_BYTES ? 'the files together pass 3 MB' : null;
+      const name = cut ? want : unique(want);
       if (why) unattached.push({ name, title: d.title, why });
       else {
         total += bytes;
         files.push({ subtask_id: d.subtask_id, agent_handle: d.agent_handle, name, mime: MIME[kindOfName(baseOf(name)) ?? f.kind] ?? MIME[f.kind] ?? 'text/plain', text: f.text });
-        const p = placeholdersIn(f.text);
+        const p = placeholdersIn(f.text, name);
         if (p.length) inFiles.push({ title: d.title, name, found: p });
       }
       out.push(why ? `[file ${name}, ${size}, not attached: ${why}]` : `[file ${name}, ${size}, attached below the report]`);
@@ -420,7 +569,7 @@ export function attachFiles(deliveries: Delivery[]): Attached {
     texts.set(d.subtask_id, text);
     const p = placeholdersIn(text);
     placeholders.push(...(p.length ? [{ title: d.title, found: p }] : []), ...inFiles);
-  }
+  });
   return { texts, files, unattached, placeholders };
 }
 

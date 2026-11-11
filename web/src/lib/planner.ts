@@ -21,6 +21,8 @@ export function plannerReason(error: string): string {
     if (/NEAR AI 401|invalid api key|unauthorized/i.test(why)) return "NEAR AI rejected Rook's API key, so the planning model could not run.";
     // Calls in flight hold the guard for a moment (services/src/shared/llm.ts): busy, not the daily limit.
     if (/Rook is busy/.test(why)) return 'Rook is busy. Try again in a minute.';
+    // The calls in flight would spend what is left of the day: not reached yet, but waiting a minute doesn't help.
+    if (/LLM cost guard: the day's limit is nearly used/.test(why)) return "Rook's planner has nearly used up its daily spending limit. Try again later.";
     if (/LLM cost guard/.test(why)) return "Rook's planner reached its daily spending limit. Try again later.";
     if (/NEAR AI (429|5\d\d)\b|failed: (fetch failed|terminated)/.test(why)) return 'The planning model is busy or out of reach right now. Try again in a minute.';
     if (/invalid JSON|no JSON object/.test(why)) return "The planning model gave an answer Rook couldn't use. Try again; rewording the task can help.";
@@ -110,15 +112,18 @@ export function selfDoWhy(s: Pick<Subtask, 'self_do_reason' | 'self_do_need_atom
 }
 
 /**
- * The same for a plan that hires no agent at all, from every subtask's reason; `budget`: what would hire them
- * (budgetToHire); `max`: the largest budget Rook takes.
+ * The same for a plan that hires no agent at all, from its subtasks; `budget`: what would hire them (budgetToHire);
+ * `max`: the largest budget Rook takes. A plan of one part says it of that part, in the singular (QA found "these parts"
+ * and "them all" on every one-part plan).
  */
-export function allSelfDoWhy(reasons: SelfDoReason[], budget?: bigint | null, max?: string | null): string {
+export function allSelfDoWhy(parts: Pick<Subtask, 'self_do_reason' | 'self_do_need_atomic'>[], budget?: bigint | null, max?: string | null): string {
+  if (parts.length === 1) return selfDoWhy(parts[0], budget, false, max);
+  const reasons = parts.map((p) => p.self_do_reason);
   const every = (r: SelfDoReason) => reasons.length > 0 && reasons.every((x) => x === r);
   const largest = aboveLargest(budget, max);
   const hire = (whom: string) => largest !== null ? tooSmall(largest, whom)
     : `Draft it again with ${budget ? `a budget of about ${usdc(budget)} USDC` : 'a larger budget'} to hire ${whom}.`;
-  if (every('rook_edit')) return reasons.length === 1 ? ROOK_EDIT : 'Rook makes these changes itself now, with no agent fee.';
+  if (every('rook_edit')) return 'Rook makes these changes itself now, with no agent fee.';
   if (every('no_agent')) return 'No agent on the market fits these parts, so Rook does them all itself with its own model.';
   if (every('over_budget')) {
     return `The agents Rook found for these parts cost more than this budget allows, so Rook does them all itself with its own model. ${hire('them')}`;

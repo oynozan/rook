@@ -48,15 +48,30 @@ const RELATIVE = new RegExp([
   String.raw`\bby\s+(?:${MONEY}|\d+(?:[.,]\d+)?\s*%)`,
 ].join('|'), 'i');
 
+/**
+ * Any language: a number next to a currency word ("1,5 USDC", "2 dolar", "$3", "5 dólares", "1,5 USDC'ye") in a message
+ * that names the budget in a word of its language ("Bütçeyi 1,5 USDC yap.", "bütçe 2 USDC olsun", "presupuesto de 2
+ * USD"). QA: a Turkish budget change was silently ignored, and the report later said it was applied.
+ * ponytail: a list of budget words, not language understanding; a language missing from it still has "make it 1 USDC".
+ */
+// \b sees no edge before a letter outside ASCII (Cyrillic), so the start is "no letter before".
+const BUDGET_WORD = /(?<![\p{L}\d])(?:budget|bütçe|butce|presupuest|orçamento|orcamento|budżet|бюджет|anggaran|ngân sách|bajet)|预算|予算|예산|ميزانية|बजट|งบประมาณ/iu;
+const DIGITS = String.raw`(\d+(?:[.,]\d+)?)(?![.,]?\d)`;
+const CURRENCY_ANY = String.raw`(?:usdc|usd|dollars?|dolar\p{L}*|dólar\p{L}*|dolares|bucks?|долл\p{L}*|ドル|美元|달러)`;
+const MONEY_ANY = new RegExp(String.raw`\$\s*${DIGITS}|(?<![\p{L}\d.,])${DIGITS}\s*${CURRENCY_ANY}(?![\p{L}\d])(?:['’]\p{L}*)?`, 'giu');
+
 /** The totals a message names in a budget phrase ("make it 1 USDC", "budget of $2", "cut it to two dollars"), in atomic USDC. */
 export function budgetAmounts(message: string): bigint[] {
   const out: bigint[] = [];
+  const add = (raw: string) => {
+    const n = (WORD_NUMBERS[raw.toLowerCase()] ?? raw).replace(',', '.');
+    try { const v = parseUsdc(n); if (!out.includes(v)) out.push(v); } catch { /* more than 6 decimals: not a USDC amount */ }
+  };
   for (const m of message.matchAll(NAMED)) {
     const raw = m.slice(1).find((g) => g !== undefined);
-    if (!raw) continue;
-    const n = (WORD_NUMBERS[raw.toLowerCase()] ?? raw).replace(',', '.');
-    try { out.push(parseUsdc(n)); } catch { /* more than 6 decimals: not a USDC amount */ }
+    if (raw) add(raw);
   }
+  if (BUDGET_WORD.test(message)) for (const m of message.matchAll(MONEY_ANY)) add(m[1] ?? m[2]);
   return out;
 }
 
