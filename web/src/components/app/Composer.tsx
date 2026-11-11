@@ -8,6 +8,27 @@ import { useMode } from '@/hooks/mode';
 import type { TaskSummary } from '@/lib/server/orchestrator';
 import { useWallet } from '@/hooks/wallet';
 
+// Tasks that plan well on the live NEAR AI market, each with a budget it fits (1 USDC is the contract's minimum).
+const icon = 'size-5 shrink-0 text-ink/70';
+const EXAMPLES = [
+  {
+    label: 'Write a launch post in three languages', budget: '1.00',
+    prompt: 'Write a product announcement for a budgeting app, translate it into French and Spanish, and draft three short social posts to go with it.',
+    // Two speech marks: one message, more than one language.
+    icon: <svg className={icon} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" aria-hidden="true"><path d="M3 4.5h8.5v6H7L4.5 12.5v-2H3z" /><path d="M11.5 7.5H17v6h-1.5v2L13 13.5H8.5v-3" /></svg>,
+  },
+  {
+    label: "Audit a website's SEO", budget: '1.00',
+    prompt: 'Audit the SEO of https://near.org and list the ten fixes that would help most, in order.',
+    icon: <svg className={icon} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" aria-hidden="true"><circle cx="8.75" cy="8.75" r="5" /><path d="m12.5 12.5 4 4" /></svg>,
+  },
+  {
+    label: "Brief me on this week's NEAR news", budget: '2.00',
+    prompt: "Summarise this week's NEAR ecosystem news into a one-page brief with links to the sources.",
+    icon: <svg className={icon} viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><rect x="3" y="3.5" width="14" height="13" rx="2" /><path d="M6.5 7.5h7M6.5 10.5h7M6.5 13.5h4" /></svg>,
+  },
+];
+
 export type ComposerErrors = { prompt?: string; budget?: string; message?: string };
 
 function reserveLabel(budget: string) {
@@ -55,6 +76,7 @@ export function Composer({ onSend, errors, sending, compact, thread }: {
   const shown = found ?? errors;
   const invalid = !!(shown?.prompt || shown?.budget);
   const form = useRef<HTMLFormElement>(null);
+  const field = useRef<HTMLTextAreaElement>(null);
   const [focused, setFocused] = useState(false);
   // Phones: just a line to type in, until it's being used. The budget comes back as soon as it is.
   const folded = !focused && !prompt && !shown?.budget;
@@ -78,8 +100,27 @@ export function Composer({ onSend, errors, sending, compact, thread }: {
     if (!(await onSend(check.prompt, check.usdc).catch(() => false))) setPrompt((now) => now || sent);
   }
 
+  // Only on the empty screen, until something is typed. A pick fills the task and its budget, ready to edit or send.
+  // Phones: above the input pinned to the bottom. Wider: below it, as a list.
+  const examples = !compact && !thread && (
+    <ul className={`flex flex-col px-2 transition-opacity duration-200 motion-reduce:transition-none max-sm:order-first max-sm:mb-3 sm:mt-6 sm:px-4 ${prompt ? 'pointer-events-none opacity-0' : ''}`} inert={!!prompt}>
+      {EXAMPLES.map((x) => (
+        <li key={x.label}>
+          <button
+            type="button"
+            onClick={() => { setPrompt(x.prompt); setBudget(x.budget); field.current?.focus(); }}
+            className="-mx-2 flex min-h-11 w-[calc(100%+1rem)] cursor-pointer items-center gap-3.5 rounded-xl px-2 text-left text-ink/80 transition-colors duration-200 hover:bg-ink/5 hover:text-ink active:translate-y-px motion-reduce:transition-none sm:text-lg"
+          >
+            {x.icon}
+            {x.label}
+          </button>
+        </li>
+      ))}
+    </ul>
+  );
+
   return (
-    <>
+    <div className="flex flex-col">
       <form
         ref={form}
         noValidate
@@ -89,6 +130,7 @@ export function Composer({ onSend, errors, sending, compact, thread }: {
         className={`relative rounded-[1.75rem] border bg-surface p-2 sm:p-3 shadow-sm shadow-ink/5 transition-[border-color,box-shadow] duration-200 focus-within:ring-4 motion-reduce:transition-none ${invalid ? 'border-alert/50 focus-within:ring-alert/10' : 'border-ink/15 not-focus-within:hover:border-ink/25 focus-within:border-accent/50 focus-within:ring-accent/10'}`}
       >
         <textarea
+          ref={field}
           name="prompt"
           aria-label="What do you want done?"
           aria-invalid={!!shown?.prompt}
@@ -101,7 +143,7 @@ export function Composer({ onSend, errors, sending, compact, thread }: {
             void submit();
           }}
           rows={2}
-          placeholder={thread ? placeholderFor(current, budget, chain) : compact ? 'Start a new task' : 'Due diligence on the NEAR token'}
+          placeholder={thread ? placeholderFor(current, budget, chain) : compact ? 'Start a new task' : 'Describe a task, or pick an example'}
           className={`field-sizing-content block max-h-64 w-full ${compact ? 'min-h-11' : 'min-h-11 sm:min-h-20'} resize-none overflow-y-auto bg-transparent px-3 pt-2.5 pb-2 sm:pt-2 ${compact ? 'text-base sm:text-lg' : 'text-base sm:text-xl md:text-2xl'} ${folded ? 'max-sm:pr-12' : ''} leading-snug outline-none placeholder:text-ink/55`}
         />
 
@@ -143,6 +185,7 @@ export function Composer({ onSend, errors, sending, compact, thread }: {
       {shown?.prompt && <p id="prompt-error" className="mt-2 px-4 text-sm text-alert">{shown.prompt}</p>}
       {shown?.budget && <p id="budget-error" className="mt-2 px-4 text-sm text-alert">{shown.budget}</p>}
       {shown?.message && <p role="alert" className="mt-3 rounded-2xl border border-alert/40 bg-alert/10 p-4 text-alert">{shown.message}</p>}
-    </>
+      {examples}
+    </div>
   );
 }
