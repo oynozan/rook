@@ -128,6 +128,27 @@ test('amounts a message names as its budget, which the wallet check before draft
     'Plan a marketing budget of 10 weeks', 'make it 2.5 pages', 'raise it to 12k', 'make it two sentences']) assert.deepEqual(amountsNamed(m), [], m);
 });
 
+test('a budget named in any language counts, as the services read it (money.ts budgetAmounts)', () => {
+  // The services' cases (services/test/planner-qa2.test.ts and planner.test.ts). QA t_2c4c5357: "Bütçeyi 1,5 USDC yap."
+  assert.deepEqual(amountsNamed('Bütçeyi 1,5 USDC yap.'), [1_500_000n]);
+  assert.deepEqual(amountsNamed('bütçe 2 USDC olsun'), [2_000_000n]);
+  assert.deepEqual(amountsNamed('Bütçe 1 USDC toplamda kalır'), [1_000_000n]);
+  assert.deepEqual(amountsNamed('Bütçeyi 3 dolara düşür'), [3_000_000n]);
+  assert.deepEqual(amountsNamed("Toplam bütçe 2,5 USDC'ye çıksın"), [2_500_000n]);
+  assert.deepEqual(amountsNamed('Haz el presupuesto de 2 USD'), [2_000_000n]);
+  assert.deepEqual(amountsNamed('Pon el presupuesto en 4 dólares'), [4_000_000n]);
+  assert.deepEqual(amountsNamed('Сделай бюджет 2 доллара'), [2_000_000n]);
+  // A number with no currency word, or money in a message that names no budget, is no budget.
+  assert.deepEqual(amountsNamed('Bütçe raporunda ilk 10 cüzdan'), []);
+  assert.deepEqual(amountsNamed('10 USDC fiyatlı ajanlar hangileri?'), []);
+  // English as before; a total named twice counts once.
+  for (const [m, total] of [['make it 1 USDC', 1_000_000n], ['reduce the budget to 1.5', 1_500_000n], ['do it for $2', 2_000_000n], ['make it 2,5', 2_500_000n],
+    ['Due diligence on the NEAR token, budget: 5 USDC', 5_000_000n], ['Same task with a budget of 1.50 USDC.', 1_500_000n]] as const) assert.deepEqual(amountsNamed(m), [total], m);
+  for (const m of ['Compare the 3 biggest DEXs', 'Now translate it to Turkish', 'is it possible to reduce the budget?', 'go ahead', 'Same task, cheaper']) {
+    assert.deepEqual(amountsNamed(m), [], m);
+  }
+});
+
 test('the placeholder says what a message does there', () => {
   const at = (status: TaskStatus) => task('a', 1, { status, budget_atomic: '3000000' });
   assert.equal(placeholderFor(at('planned'), '3.00'), 'Change the plan, or ask a follow-up');

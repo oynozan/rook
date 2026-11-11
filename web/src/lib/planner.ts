@@ -21,6 +21,8 @@ export function plannerReason(error: string): string {
     if (/NEAR AI 401|invalid api key|unauthorized/i.test(why)) return "NEAR AI rejected Rook's API key, so the planning model could not run.";
     // Calls in flight hold the guard for a moment (services/src/shared/llm.ts): busy, not the daily limit.
     if (/Rook is busy/.test(why)) return 'Rook is busy. Try again in a minute.';
+    // The calls in flight would spend what is left of the day: not reached yet, but waiting a minute doesn't help.
+    if (/LLM cost guard: the day's limit is nearly used/.test(why)) return "Rook's planner has nearly used up its daily spending limit. Try again later.";
     if (/LLM cost guard/.test(why)) return "Rook's planner reached its daily spending limit. Try again later.";
     if (/NEAR AI (429|5\d\d)\b|failed: (fetch failed|terminated)/.test(why)) return 'The planning model is busy or out of reach right now. Try again in a minute.';
     if (/invalid JSON|no JSON object/.test(why)) return "The planning model gave an answer Rook couldn't use. Try again; rewording the task can help.";

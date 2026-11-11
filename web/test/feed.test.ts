@@ -135,4 +135,41 @@ test("a part whose files are too large to send says so plainly, never as a probl
   });
   assert.equal(problemLine({ kind: 'inputs_too_large', message: 'too big' })?.text,
     "This part wasn't sent: the files it changes are more than Rook can send with one part. Ask for the change on fewer files.");
+  // QA round 2 reworded it (runner.ts inputsTooLarge): the sizes still show.
+  const now = '"Change the name" changes 308 KB of files, more than the 300 KB Rook can send with one part, so Rook didn\'t send it.';
+  assert.equal(problemLine({ kind: 'inputs_too_large', message: now }, 'Change the name')?.text,
+    '“Change the name” wasn\'t sent: the files it changes come to 308 KB, more than the 300 KB Rook can send with one part. Ask for the change on fewer files.');
+});
+
+test("Rook's own answer cut off at its model's limit reads as written, never as a problem on Rook's side", () => {
+  // runner.ts selfDo: a plain sentence for the user. A retry while Rook tries again; the last one leaves the part out.
+  const again = 'Rook\'s answer for "Rename the site" was cut off before its end (longer than its model writes in one answer), so Rook didn\'t use it, and your files stay as they were. Rook tries again.';
+  assert.deepEqual(problemLine({ kind: 'cut_off', message: again }, 'Rename the site'), { text: again, tone: 'muted', label: 'Retrying' });
+  const last = 'Rook\'s answer for "Rename the site" was cut off before its end (longer than its model writes in one answer), so Rook didn\'t use it.';
+  assert.deepEqual(problemLine({ kind: 'cut_off', message: last }, 'Rename the site'), { text: last, tone: 'alert', label: 'Cut off' });
+});
+
+test("a failed evaluation names the evaluator's file checks in plain words: a cut-off file, an edit that isn't the change asked", () => {
+  const plan: FeedContext = { ...ctx([['s1', 'Rename site'], ['s2', 'Add a card']]), selfDo: new Set(['s2']) };
+  const lines = feedFrom([
+    ev(1, 'evaluation', { agent_handle: 'codex-engineer-01', verdict: 'fail', failed_criteria: ['c1', 'cut_off', 'edit_scope'] }, 's1'),
+    ev(2, 'evaluation', { agent_handle: 'codex-engineer-01', verdict: 'fail', failed_criteria: ['edit_scope'] }, 's1'),
+    ev(3, 'evaluation', { agent_handle: 'rook:self-do', verdict: 'fail', failed_criteria: ['cut_off'] }, 's2'),
+    ev(4, 'evaluation', { agent_handle: 'rook:self-do', verdict: 'fail', failed_criteria: ['edit_scope', 'c2'] }, 's2'),
+    // Any other check, and an injection, read as before.
+    ev(5, 'evaluation', { agent_handle: 'rook:self-do', verdict: 'fail', failed_criteria: ['c2'] }, 's2'),
+    ev(6, 'evaluation', { agent_handle: 'codex-engineer-01', verdict: 'fail', failed_criteria: ['injection', 'cut_off'] }, 's1'),
+  ], plan);
+  assert.deepEqual(lines.map((l) => [l.text, l.now.label]), [
+    ['codex-engineer-01 sent a file for Rename site cut off before its end.', 'Cut off'],
+    ["codex-engineer-01's edit for Rename site didn't make just the change asked for.", 'Failed a check'],
+    ["Rook's own work on Add a card has a file cut off before its end.", 'Cut off'],
+    ["Rook's own work on Add a card didn't make just the change asked for.", 'Failed a check'],
+    ["Rook's own work on Add a card failed a check.", 'Failed a check'],
+    ["codex-engineer-01's delivery for Rename site tried to give Rook instructions. Flagged and rejected.", 'Flagged'],
+  ]);
+  assert.deepEqual(lines.map((l) => l.tone), ['alert', 'alert', 'normal', 'normal', 'normal', 'alert']);
+  // One part: no title, as on every line.
+  assert.equal(feedFrom([ev(1, 'evaluation', { agent_handle: 'quill', verdict: 'fail', failed_criteria: ['cut_off'] }, 's1')], ctx([['s1', 'Site']]))[0].text,
+    'quill sent a file cut off before its end.');
 });

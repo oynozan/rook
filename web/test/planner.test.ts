@@ -23,7 +23,9 @@ test("a planner failure reads in plain words; one with no plainer words says wha
     // Any other 402 is the same story (credits used up): no "try again", which can't help.
     ['planner: planner LLM failed: NEAR AI 402 for plan.draft: {"error":{"type":"insufficient_balance","message":"Credits exhausted"}}', /^NEAR AI has no credits available for Rook, so the planning model could not run\.$/],
     ['planner: planner LLM failed: NEAR AI 401 for plan.draft: {"error":"invalid api key"}', /^NEAR AI rejected Rook's API key/],
-    ['planner: planner LLM failed: LLM cost guard: 1.0200 USD spent in the last 24 h (0.0000 in flight), limit ROOK_LLM_MAX_USD=1 per day', /daily spending limit/],
+    ['planner: planner LLM failed: LLM cost guard: 1.0200 USD spent in the last 24 h (0.0000 in flight), limit ROOK_LLM_MAX_USD=1 per day', /^Rook's planner reached its daily spending limit\. Try again later\.$/],
+    // The calls in flight would spend the rest of the day's limit (services/src/shared/llm.ts): nearly used, not reached.
+    ["planner: planner LLM failed: LLM cost guard: the day's limit is nearly used: 9.1000 USD spent in the last 24 h and 0.9500 USD held by the LLM calls in flight, of the 10 USD a day ROOK_LLM_MAX_USD allows", /^Rook's planner has nearly used up its daily spending limit\. Try again later\.$/],
     ["Rook's services restarted while this task was draft, so it stopped there. It has no contract task on record, so nothing of it is on chain to resume.", /^Rook restarted while it was planning this task.*Send the task again\.$/],
   ];
   for (const [error, want] of plain) {
