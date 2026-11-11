@@ -98,13 +98,22 @@ export function projectOf(files: ProjectFile[]): Project | null {
   const readme = shallowest(files, (b) => /^readme(\.md|\.markdown|\.txt)?$/i.test(b));
   const fromReadme = readme ? readmeSteps(readme.text) : null;
   const commands = pkgFile ? scriptSteps(pkg, files, pkgFile.name) : null;
-  return { kind, words, steps: fromReadme ? { from: 'readme', markdown: fromReadme } : commands ? { from: 'scripts', commands } : null };
+  // A README whose steps never start the project (QA: an Express API's run steps were only "npm install") gives way to
+  // the package.json scripts, which do.
+  const readmeWins = !!fromReadme && (STARTS.test(fromReadme) || !commands);
+  return { kind, words, steps: readmeWins ? { from: 'readme', markdown: fromReadme! } : commands ? { from: 'scripts', commands } : null };
 }
 
 /** A heading that starts the part of a README about running the project. */
 const RUN_HEADING = /\b(getting started|quick ?start|run(ning)?|start(ing)?|set ?up|install(ation|ing)?|usage|develop(ment)?|local(ly)?)\b/i;
+/** A command that starts the project, not only installs it. */
+const STARTS = /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve|preview)\b|\bnode\s+\S|\bnpx\s+\S|\b(?:next|vite)\s+(?:dev|start|preview)\b/;
 
-/** The README's section on running the project, as written (up to its next heading of the same level or above), or null. */
+/**
+ * The README's section on running the project, as written, up to its next heading of the same level or above; a run
+ * section right after it at the same level ("## Install", then "## Start") is part of it, under its own name. Null when
+ * the README has none.
+ */
 export function readmeSteps(markdown: string): string | null {
   const blocks = reportBlocks(markdown);
   let level = 0;
@@ -112,12 +121,30 @@ export function readmeSteps(markdown: string): string | null {
   for (const b of blocks) {
     const h = b.kind === 'line' ? b.text.match(/^ {0,3}(#{1,6})\s+(.*)$/) : null;
     if (level) {
-      if (h && h[1].length <= level) break;
+      if (h && h[1].length <= level) {
+        if (h[1].length === level && RUN_HEADING.test(h[2])) { out.push(`${h[2].replace(/\s+#+\s*$/, '').trim()}:`); continue; }
+        break;
+      }
       out.push(b.kind === 'code' ? `\`\`\`${b.lang}\n${b.text}\n\`\`\`` : b.text);
     } else if (h && RUN_HEADING.test(h[2])) level = h[1].length;
   }
   const text = out.join('\n').trim();
   return text ? text.split('\n').slice(0, 60).join('\n') : null;
+}
+
+/**
+ * The files a report marks as changed by its message (final_result.changed, the paths it delivered new or changed), and
+ * a line that says so. None for a report that doesn't say (older ones), nor for a first build, where every file is new
+ * and there is nothing to tell apart. `edit`: a part of this message edits the chat's files (its plan's inputs).
+ */
+export function changedFiles(names: string[], changed: string[] | undefined, edit: boolean): { marked: Set<string>; line: string | null } {
+  if (changed === undefined) return { marked: new Set(), line: null };
+  const marked = new Set(changed.filter((c) => names.includes(c)));
+  if (!edit && marked.size === names.length) return { marked: new Set(), line: null };
+  if (!marked.size) return { marked, line: "This message didn't change any of these files." };
+  const rest = names.length - marked.size;
+  const others = rest === 0 ? '' : rest === 1 ? '; the other file is as it was' : `; the other ${rest} are as they were`;
+  return { marked, line: `This message changed or added ${marked.size === 1 ? 'one file' : `${marked.size} files`}, marked “Changed”${others}.` };
 }
 
 /**
@@ -209,20 +236,76 @@ function inlineCssUrls(css: string, index: Index, from: string): string {
 }
 
 /**
- * Runs in the preview frame. Links don't navigate it: a link to another delivered page asks the page that holds the
- * frame to show that one ({type: 'rook-preview-nav', path}: the href as written), which accepts it only from this
- * frame; a link to a #section scrolls as usual; forms don't send.
+ * Runs first in the preview frame. Links don't navigate it: a link to another delivered page asks the page that holds
+ * the frame to show that one ({type: 'rook-preview-nav', path}: the href as written), which accepts it only from this
+ * frame; a link to a #section scrolls as usual; forms don't send. Once the page has loaded (its own trusted load event,
+ * once), it says so with `nonce` ({type: 'rook-preview-ready', nonce}): the holder takes a load of the frame with no
+ * such word as the page having gone elsewhere (frameLoad). The script removes itself before the page's own scripts
+ * run, so they can't read the nonce and hand it to the page they go to; it keeps what it needs (parent, the document)
+ * from before they can touch them.
  */
-export const NAV_SCRIPT = `<script>(function(){document.addEventListener('click',function(e){var a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;var h=a.getAttribute('href')||'';if(h.charAt(0)==='#')return;e.preventDefault();parent.postMessage({type:'rook-preview-nav',path:h},'*')},true);document.addEventListener('submit',function(e){e.preventDefault()},true)})();</script>`;
+export function navScript(nonce: string): string {
+  const n = nonce.replace(/[^0-9a-z]/gi, '');
+  return `<script>(function(){var P=parent,D=document,N='${n}',done=false,me=D.currentScript;if(me&&me.parentNode)me.parentNode.removeChild(me);`
+    + `window.addEventListener('load',function(e){if(done||!e.isTrusted||e.target!==D)return;done=true;P.postMessage({type:'rook-preview-ready',nonce:N},'*')});`
+    + `D.addEventListener('click',function(e){var a=e.target&&e.target.closest&&e.target.closest('a[href]');if(!a)return;var h=a.getAttribute('href')||'';if(h.charAt(0)==='#')return;e.preventDefault();P.postMessage({type:'rook-preview-nav',path:h},'*')},true);`
+    + `D.addEventListener('submit',function(e){e.preventDefault()},true)})();</script>`;
+}
+
+/** A fresh nonce for one preview of one page: 128 random bits, in hex. */
+export const previewNonce = () => Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
+
+/** The preview frame's word that its page loaded, for the preview whose nonce is `nonce`. */
+export function previewReady(data: unknown, nonce: string): boolean {
+  const d = data as { type?: unknown; nonce?: unknown } | null;
+  return !!nonce && !!d && typeof d === 'object' && d.type === 'rook-preview-ready' && d.nonce === nonce;
+}
+
+/**
+ * What a load event of the preview frame means, and the watch after it. `seen`: the nonce of the page the frame was
+ * given and how many loads it had; `nonce`: the page it holds now; `ready`: that page said it loaded. A page loads
+ * once: a second load of it is the frame gone elsewhere ('left'). A first load with the page's word is it ('shown');
+ * without it, the holder waits a moment for the word ('wait'), which arrives on its own message: still none, and the
+ * page went elsewhere before its own load (QA's phishing page did both), so that load is another site's ('left').
+ */
+export function frameLoad(seen: { nonce: string; loads: number }, nonce: string, ready: boolean): { seen: { nonce: string; loads: number }; verdict: 'shown' | 'wait' | 'left' } {
+  const loads = seen.nonce === nonce ? seen.loads : 0;
+  const next = { nonce, loads: loads + 1 };
+  return { seen: next, verdict: loads > 0 ? 'left' : ready ? 'shown' : 'wait' };
+}
+
+/**
+ * The preview's own content policy. A srcdoc frame inherits this app's policy (next.config.ts), which the wallet
+ * connector needs loose: any https connection, frames, eval. A policy in the page adds to it, and both must allow a
+ * load, so a delivered page runs only its own inline scripts and styles: it can't connect anywhere, load a script,
+ * stylesheet or frame from another site, eval, post a form or set a <base>. Images and fonts from other sites still
+ * load. QA had a delivered page fetch and eval a remote script and post data out under the app's policy alone.
+ */
+export const PREVIEW_CSP = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data: blob: https:; font-src data: https:; connect-src 'none'; form-action 'none'; frame-src 'none'; base-uri 'none'";
+/** What every preview starts with, before anything of the page: its policy, then the nav script. */
+export const previewHead = (nonce: string) => `<meta http-equiv="Content-Security-Policy" content="${PREVIEW_CSP}">${navScript(nonce)}`;
+
+/**
+ * `html` with previewHead first, before anything of it, so no script of it runs (and nothing loads) before the policy:
+ * a <script> ahead of the <head> tag still runs first. The parser puts both into the head it opens for them; the
+ * page's own <html> tag then only adds its attributes (lang stays), and its <head> tag is dropped. Only a doctype (and
+ * comments) may stay ahead, so the page keeps its rendering mode.
+ */
+export function withPreviewHead(html: string, nonce: string): string {
+  const lead = html.match(/^(?:\s|<!--[\s\S]*?-->)*<!doctype[^>]*>/i);
+  const at = lead ? lead[0].length : 0;
+  return html.slice(0, at) + previewHead(nonce) + html.slice(at);
+}
 
 /**
  * The page `path` of the delivered files, ready for a sandboxed srcdoc frame (which can't load anything by path): its
- * stylesheets, scripts and SVG images that are delivered files go inline, and NAV_SCRIPT goes first in its head. A
- * deferred script moves to the end of the body, where an inline one runs at the same point. Null when no such page was
- * delivered. ponytail: by pattern, not a parser; a reference it can't match loads nothing, as before, and nothing here
- * widens the frame's sandbox. Images other than SVG arrive as no file (deliveries are text).
+ * stylesheets, scripts and SVG images that are delivered files go inline, and previewHead(nonce) goes first
+ * (withPreviewHead). A deferred script moves to the end of the body, where an inline one runs at the same point. A
+ * <meta> refresh is dropped: it would take the frame to another address. Null when no such page was delivered.
+ * ponytail: by pattern, not a parser; a reference it can't match loads nothing, as before, and nothing here widens the
+ * frame's sandbox. Images other than SVG arrive as no file (deliveries are text).
  */
-export function previewDoc(files: ProjectFile[], path: string): string | null {
+export function previewDoc(files: ProjectFile[], path: string, nonce: string): string | null {
   const index = indexOf(files);
   const page = lookup(index, '', path);
   if (!page) return null;
@@ -257,7 +340,6 @@ export function previewDoc(files: ProjectFile[], path: string): string | null {
     const f = lookup(index, from, d ?? s ?? u ?? '');
     return f && isSvg(f) ? `${lead}"${svgUri(f.text)}"` : whole;
   }));
-  // First in the head, after any doctype, so the page keeps its rendering mode.
-  const at = html.match(/<head\b[^>]*>/i) ?? html.match(/<html\b[^>]*>/i) ?? html.match(/<!doctype[^>]*>/i);
-  return at?.index !== undefined ? html.slice(0, at.index + at[0].length) + NAV_SCRIPT + html.slice(at.index + at[0].length) : NAV_SCRIPT + html;
+  html = html.replace(/<meta\b[^>]*\bhttp-equiv\s*=\s*["']?\s*refresh\b[^>]*>/gi, '');
+  return withPreviewHead(html, nonce);
 }

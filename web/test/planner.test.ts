@@ -1,7 +1,7 @@
 // The planner's reports in plain words. Run: npx tsx --test test/*.test.ts
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { PlanView } from '@/lib/server/orchestrator';
+import type { PlanView, SelfDoReason } from '@/lib/server/orchestrator';
 import { allSelfDoWhy, budgetToHire, plannerReason, selfDoWhy } from '@/lib/planner';
 
 test("a planner failure reads in plain words; one with no plainer words says what the planner gave", () => {
@@ -93,27 +93,39 @@ test('the budget that would hire the over-budget parts: what is left after the 2
   assert.equal(budgetToHire(plan([over('s1'), over('s2', '100000')], '0'), 's2'), null);
 });
 
+// The parts of a plan Rook does all by itself, by their reasons.
+const why = (...reasons: SelfDoReason[]) => reasons.map((self_do_reason) => ({ self_do_reason }));
+
 test('a plan Rook does all by itself blames the market or the budget only when that is the reason', () => {
-  assert.match(allSelfDoWhy(['no_agent', 'no_agent']), /^No agent on the market fits these parts/);
-  const over = allSelfDoWhy(['over_budget']);
+  assert.match(allSelfDoWhy(why('no_agent', 'no_agent')), /^No agent on the market fits these parts/);
+  const over = allSelfDoWhy(why('over_budget', 'over_budget'));
   assert.match(over, /cost more than this budget allows/);
   assert.match(over, /larger budget/);
   assert.doesNotMatch(over, /No agent on the market fits/);
   // With what the agents ask, the budget that would hire them is named.
-  assert.match(allSelfDoWhy(['over_budget'], 1_070_000n), /Draft it again with a budget of about 1\.07 USDC to hire them\.$/);
-  assert.match(allSelfDoWhy(['no_agent', 'over_budget'], 2_500_000n), /Draft it again with a budget of about 2\.50 USDC to hire agents for those\.$/);
+  assert.match(allSelfDoWhy(why('over_budget', 'over_budget'), 1_070_000n), /Draft it again with a budget of about 1\.07 USDC to hire them\.$/);
+  assert.match(allSelfDoWhy(why('no_agent', 'over_budget'), 2_500_000n), /Draft it again with a budget of about 2\.50 USDC to hire agents for those\.$/);
   // Above the largest budget Rook takes, no draft can hire them: said so, never "draft it again".
-  assert.match(allSelfDoWhy(['over_budget'], 62_500_000n, '50000000'), /them all itself with its own model\. Even the largest budget Rook takes, 50\.00 USDC, is too small to hire them\.$/);
-  assert.match(allSelfDoWhy(['no_agent', 'over_budget'], 62_500_000n, '50000000'), /Even the largest budget Rook takes, 50\.00 USDC, is too small to hire agents for those\.$/);
-  assert.match(allSelfDoWhy(['over_budget'], 1_070_000n, '50000000'), /Draft it again with a budget of about 1\.07 USDC to hire them\.$/);
+  assert.match(allSelfDoWhy(why('over_budget', 'over_budget'), 62_500_000n, '50000000'), /them all itself with its own model\. Even the largest budget Rook takes, 50\.00 USDC, is too small to hire them\.$/);
+  assert.match(allSelfDoWhy(why('no_agent', 'over_budget'), 62_500_000n, '50000000'), /Even the largest budget Rook takes, 50\.00 USDC, is too small to hire agents for those\.$/);
+  assert.match(allSelfDoWhy(why('over_budget', 'over_budget'), 1_070_000n, '50000000'), /Draft it again with a budget of about 1\.07 USDC to hire them\.$/);
   // Mixed: both, briefly.
-  const mixed = allSelfDoWhy(['no_agent', 'over_budget']);
+  const mixed = allSelfDoWhy(why('no_agent', 'over_budget'));
   assert.match(mixed, /fits some of these parts/);
   assert.match(mixed, /cost more than this budget allows/);
   // Unknown (an older plan): neutral, neither the market nor the budget is blamed.
-  const unknown: Parameters<typeof allSelfDoWhy>[0][] = [[undefined], [undefined, 'no_agent'], []];
+  const unknown: Parameters<typeof allSelfDoWhy>[0][] = [why(undefined as unknown as SelfDoReason), [{}, { self_do_reason: 'no_agent' }], []];
   for (const r of unknown) {
     const s = allSelfDoWhy(r);
     assert.doesNotMatch(s, /fits|budget/, s);
   }
+});
+
+test('a plan of one part Rook does itself says so of that part, never "these parts" or "them all"', () => {
+  // QA: t_2e17e728, one part, read "The agents Rook found for these parts cost more ... so Rook does them all itself".
+  const one = allSelfDoWhy([{ self_do_reason: 'over_budget', self_do_need_atomic: '5000000' }], 6_250_000n);
+  assert.equal(one, 'The cheapest agent found for this part asks 5.00 USDC, more than this budget has left for it after the reserve, so Rook does it with its own model. A budget of about 6.25 USDC would hire one.');
+  assert.equal(allSelfDoWhy(why('no_agent')), 'No agent on the market fits this part, so Rook does it with its own model.');
+  assert.equal(allSelfDoWhy(why('rook_edit')), 'Rook makes this change itself now, with no agent fee.');
+  for (const s of [one, allSelfDoWhy(why('no_agent')), allSelfDoWhy([{}])]) assert.doesNotMatch(s, /these parts|them all|hire them/, s);
 });

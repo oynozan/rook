@@ -43,12 +43,41 @@ export function fileMarker(line: string): string | null {
 
 const MARKER = /\[file (.+?), (\d+) lines?, (?:attached below the report|not attached: ([^\]]+))\]/g;
 
-/** The services' file markers inside a line ("- **next.config.mjs** [file ..., 6 lines, attached ...]"), in plain words. */
+/**
+ * The services' file markers inside a line, in plain words: "See [file a.js, 3 lines, attached ...]" reads "See a.js
+ * (3 lines, under Files)". When the words just before the marker already name the file ("The file is `index.html`
+ * [file index.html, ...]", "- **next.config.mjs** [file ...]"), only the count follows, so the name isn't said twice.
+ */
 export function inlineMarkers(text: string): string {
-  return text.replace(MARKER, (_, name: string, n: string, why?: string) => {
+  return text.replace(MARKER, (_, name: string, n: string, why: string | undefined, at: number, whole: string) => {
     const lines = `${n} line${n === '1' ? '' : 's'}`;
-    return why ? `${name} (${lines}, not attached: ${why})` : `${name} (${lines}), under Files`;
+    const where = why ? `(${lines}, not attached: ${why})` : `(${lines}, under Files)`;
+    return namedBefore(whole.slice(0, at), name) ? where : `${name} ${where}`;
   });
+}
+
+/** `before` ends with the file's path or base name, as a word of its own, past any spaces, marks or quotes. */
+function namedBefore(before: string, name: string): boolean {
+  const tail = before.replace(/[\s`*_"'“”‘’:–—-]+$/, '').toLowerCase();
+  return [name, name.split('/').pop() ?? name].some((n) => {
+    const k = n.toLowerCase();
+    return !!k && tail.endsWith(k) && !/[\w.-]$/.test(tail.slice(0, -k.length));
+  });
+}
+
+/**
+ * A bare http(s) address in report text, as a link: what follows it that ends a sentence (".", ",", ")" with no "(" in
+ * the address) stays text. Null when what is left isn't a web address.
+ */
+function bareUrl(raw: string): string | null {
+  let url = raw;
+  for (;;) {
+    const last = url.at(-1) ?? '';
+    if (/[.,;:!?*'"]/.test(last)) url = url.slice(0, -1);
+    else if (last === ')' && (url.match(/\(/g)?.length ?? 0) < (url.match(/\)/g)?.length ?? 0)) url = url.slice(0, -1);
+    else break;
+  }
+  try { return /^https?:$/.test(new URL(url).protocol) && /^https?:\/\/[^/?#\s]+/i.test(url) ? url : null; } catch { return null; }
 }
 
 export type MdBlock =
@@ -106,17 +135,25 @@ export function markdownBlocks(markdown: string): MdBlock[] {
 export type Inline = { kind: 'text' | 'code' | 'strong' | 'em'; text: string } | { kind: 'link'; text: string; href: string };
 
 /**
- * A line's inline Markdown: `code`, **bold**, _emphasis_ and *emphasis*, and [links](https://...), with file markers in
- * plain words. Only an http(s) link stays a link; any other is its words. Never markup: the page renders these as text.
+ * A line's inline Markdown: `code`, **bold**, _emphasis_ and *emphasis*, [links](https://...) and bare https://
+ * addresses (a report's sources list them so), with file markers in plain words. Only an http(s) link stays a link; any
+ * other is its words. Never markup: the page renders these as text.
  */
 export function inlineParts(text: string): Inline[] {
   const out: Inline[] = [];
-  const re = /(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\[[^\]]+\]\([^)\s]+\)|(?<![\w*])\*[^*\s](?:[^*]*[^*\s])?\*(?![\w*])|\b_[^_]+_\b)/g;
+  const re = /(`[^`]+`|\*\*[^*]+\*\*|__[^_]+__|\[[^\]]+\]\([^)\s]+\)|\bhttps?:\/\/[^\s<>"`[\]]+|(?<![\w*])\*[^*\s](?:[^*]*[^*\s])?\*(?![\w*])|\b_[^_]+_\b)/gi;
   const s = inlineMarkers(text);
   let at = 0;
   for (const m of s.matchAll(re)) {
     if (m.index! > at) out.push({ kind: 'text', text: s.slice(at, m.index) });
     const t = m[0];
+    if (/^https?:/i.test(t)) {
+      const url = bareUrl(t);
+      // What the address ends with that isn't part of it (a full stop, a closing bracket) stays text, read with what follows.
+      out.push(url ? { kind: 'link', text: url, href: url } : { kind: 'text', text: t });
+      at = m.index! + (url ?? t).length;
+      continue;
+    }
     const link = t.match(/^\[([^\]]+)\]\(([^)\s]+)\)$/);
     if (link) out.push(/^https?:\/\//i.test(link[2]) ? { kind: 'link', text: link[1], href: link[2] } : { kind: 'text', text: link[1] });
     else if (t.startsWith('`')) out.push({ kind: 'code', text: t.slice(1, -1) });

@@ -127,6 +127,13 @@ export function problemLine(data: { kind?: string; message?: string; agent_handl
     case 'restart': return problem('Rook restarted during this task, so the run stopped there.');
     case 'planner': return problem(`Rook couldn't draft a plan for this task: ${plannerReason(message)}`);
     case 'no_plan': return problem(message);
+    // A part whose files are past what Rook sends with one part (runner.ts inputsTooLarge): the user's request is too
+    // big, not Rook broken, so never "a problem on its side".
+    case 'inputs_too_large': {
+      const size = message.match(/come to (\d+) KB, more than the (\d+) KB/);
+      const why = size ? `the files it changes come to ${size[1]} KB, more than the ${size[2]} KB Rook can send with one part` : 'the files it changes are more than Rook can send with one part';
+      return { text: `${part ? `“${part}”` : 'This part'} wasn't sent: ${why}. Ask for the change on fewer files.`, tone: 'alert', label: 'Not sent' };
+    }
     default: return problem(`Rook hit a problem on its side${why()}.`);
   }
 }

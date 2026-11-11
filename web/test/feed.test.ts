@@ -125,3 +125,14 @@ test('a send that never reached the agent is one line, cause first, never "Skipp
   assert.equal(sent[0].detail, 'send failed: -32603 internal error'); // the raw reason stays as the tooltip
   assert.equal(sent.at(-1)!.detail, 'contract task e');
 });
+
+test("a part whose files are too large to send says so plainly, never as a problem on Rook's side", () => {
+  // QA: the feed read "Problem: Rook hit a problem on its side (The files "Rename site..." changes come to 325 KB, ...)".
+  const message = 'The files "Rename site to Chess Through Time" changes come to 325 KB, more than the 300 KB Rook can send with one part, so that part isn\'t sent.';
+  assert.deepEqual(problemLine({ kind: 'inputs_too_large', message }, 'Rename site to Chess Through Time'), {
+    text: '“Rename site to Chess Through Time” wasn\'t sent: the files it changes come to 325 KB, more than the 300 KB Rook can send with one part. Ask for the change on fewer files.',
+    tone: 'alert', label: 'Not sent',
+  });
+  assert.equal(problemLine({ kind: 'inputs_too_large', message: 'too big' })?.text,
+    "This part wasn't sent: the files it changes are more than Rook can send with one part. Ask for the change on fewer files.");
+});
