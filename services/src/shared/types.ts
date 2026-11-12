@@ -235,6 +235,8 @@ export type PlanPart = z.infer<typeof PlanPart>;
  * newest report in the conversation, cut to CONVERSATION_REPORT_CHARS. `files`: the conversation's current files, whole
  * (every report's files, later ones replacing earlier ones by path). `questions`: what Rook asked in reply to the newest
  * earlier message, which the prompt answers. `plan`: the parts of the plan being revised, as the user saw them.
+ * `spending`: the spending rules in force in this conversation (the newest plan's Plan.spending): a later message keeps
+ * them unless it changes them.
  */
 export const Conversation = z.object({
   earlier: Earlier, revising: z.boolean(), report: z.string().min(1).max(CONVERSATION_REPORT_CHARS).optional(),
@@ -242,6 +244,7 @@ export const Conversation = z.object({
     .refine((fs) => fs.reduce((n, f) => n + f.text.length, 0) <= CONVERSATION_FILES_CHARS, `files hold more than ${CONVERSATION_FILES_CHARS} characters`).optional(),
   questions: z.array(z.string().min(1)).max(10).optional(),
   plan: z.array(PlanPart).max(10).optional(),
+  spending: SpendingRules.optional(),
 });
 export type Conversation = z.infer<typeof Conversation>;
 export const PlanRequest = z.object({

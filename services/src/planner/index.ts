@@ -14,6 +14,7 @@ import {
 import { BUDGET_HOW, aggregate, draft, select, selfDo } from './prompts.ts';
 import { AggregateIn, agentOf, isMerged } from './canned.ts';
 import { readReferences } from './reference.ts';
+import { describeSpending, readSpending } from './spending.ts';
 
 const gw = () => config.urls.marketGateway;
 
@@ -91,32 +92,52 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
   // The parts of the plan being revised, with their criteria and the rest of each part as the orchestrator sends it.
   const parts = conv?.plan ?? [];
   const refs = await readReferences(conv?.revising && !conv.plan?.length ? [req.prompt, ...[...conv.earlier].reverse()] : [req.prompt]);
-  const { draft: drafted0, notATask, questions, assumptions, notes: draftNotes, budgetAtomic: drafted, action: draftAction } = await llmStep(calls, () => draft(req.prompt, sent, sent - share(sent, req.reserve_share), conv, refs));
-  if (!drafted0.length && !questions?.length) throw new HttpError(422, notATask || 'This does not read as a task Rook can plan: say what you want done.', { llm_calls: calls });
+  const { draft: drafted0, notATask, questions, assumptions, notes: draftNotes, budgetAtomic: drafted, action: draftAction, spending: rawSpending } = await llmStep(calls, () => draft(req.prompt, sent, sent - share(sent, req.reserve_share), conv, refs));
+  // The conversation's spending rules, with the ones this message states on top: every amount from the user's own
+  // messages, never the model's (spending.ts). Every plan carries them, so the next message keeps them.
+  const spendNotes: string[] = [];
+  const { rules: spending, stated } = readSpending(rawSpending, [req.prompt, ...(conv?.earlier ?? [])], conv?.spending, spendNotes);
+  const rules = spending ? { spending } : {};
+  if (!drafted0.length && !questions?.length) {
+    // A message that only states how Rook may spend ("from now on, ask me before every payment") is answered with the
+    // rules, repeated back: nothing is searched, quoted or funded. The orchestrator keeps them for the conversation.
+    // A go-ahead ("yes", not_a_task) with the rules in force echoed back unchanged is still a go-ahead.
+    const changed = !!spending && (Object.keys({ ...spending, ...conv?.spending }) as (keyof typeof spending)[]).some((k) => spending[k] !== conv?.spending?.[k]);
+    if (stated && spending && (changed || !notATask)) {
+      const { questions: _none, ...nothing } = asking([], sent, req.reserve_share, false);
+      return { ...nothing, notes: [...refs.notes, ...spendNotes, ...draftNotes], assumptions: assumptions?.length ? assumptions : [describeSpending(spending)], spending, llm_calls: calls };
+    }
+    const unread = rawSpending != null ? "Rook couldn't keep the spending rules in your message: write each amount in digits, like 'only spend 1000 USDC a month'." : undefined;
+    throw new HttpError(422, notATask || unread || 'This does not read as a task Rook can plan: say what you want done.', { llm_calls: calls });
+  }
   // A total the message names ("make it 1 USDC", in any language) replaces the budget sent with it, within the same
   // limits, refused before the market is searched; the orchestrator checks it again. One the model read into a message
   // that names no such total is its mistake: the plan is made at the budget sent, and the user is told so.
   const named = drafted !== undefined && budgetBacked(req.prompt, drafted) ? drafted : undefined;
+  // A spending limit the model also read as this task's total ("only spend $1000") is said as what it is.
+  const limit = drafted !== undefined && [spending?.budget_usd, spending?.per_task_max_usd].some((u) => u !== undefined && BigInt(Math.round(u * 1_000_000)) === drafted);
   // The budget sent, echoed back by the draft, is no mistake worth a note.
   const ignored = drafted !== undefined && named === undefined && drafted !== sent
-    ? [`Rook kept the budget at ${formatUsdc(sent)} USDC: your message doesn't name a total of ${formatUsdc(drafted)} USDC. ${BUDGET_HOW}`] : [];
+    ? [limit
+      ? `Rook kept this task's budget at ${formatUsdc(sent)} USDC: ${formatUsdc(drafted)} is your spending limit, not what this task may cost. ${BUDGET_HOW}`
+      : `Rook kept the budget at ${formatUsdc(sent)} USDC: your message doesn't name a total of ${formatUsdc(drafted)} USDC. ${BUDGET_HOW}`] : [];
   const problem = named === undefined ? null : namedBudgetProblem(named, BigInt(req.min_budget_atomic ?? '0'), config.maxBudgetAtomic);
   if (problem) throw new HttpError(422, problem, { llm_calls: calls });
   const budget = named ?? sent;
-  const notes = [...refs.notes, ...ignored, ...draftNotes];
+  const notes = [...refs.notes, ...ignored, ...spendNotes, ...draftNotes];
   // An action in the world (book, post, buy, deploy): the web app offers no placeholders for it.
   const acting = draftAction || drafted0.some(isAction) ? { action: true as const } : {};
   // Facts only the user can give are missing: Rook asks, and nothing is searched, quoted or funded. A 200, not a 422:
   // a question is Rook's reply, not a failure. The budget is the one the answer will be planned at.
   if (questions?.length) {
-    return { ...asking(questions, budget, req.reserve_share, named !== undefined), notes, ...(assumptions?.length ? { assumptions } : {}), ...acting, llm_calls: calls };
+    return { ...asking(questions, budget, req.reserve_share, named !== undefined), notes, ...(assumptions?.length ? { assumptions } : {}), ...acting, ...rules, llm_calls: calls };
   }
   // An action whose brief still holds placeholders once the draft was asked again (plan.ts draftProblems) never runs:
   // Rook asks for those facts instead (QA: "Use placeholders" gave a fundable booking under [Your name]).
   const held = placeholderQuestions(drafted0);
   if (held.length) {
     notes.push('an action brief still held placeholders after the draft was asked again: Rook asks for those facts instead of planning');
-    return { ...asking(held, budget, req.reserve_share, named !== undefined), notes, ...(assumptions?.length ? { assumptions } : {}), action: true, llm_calls: calls };
+    return { ...asking(held, budget, req.reserve_share, named !== undefined), notes, ...(assumptions?.length ? { assumptions } : {}), action: true, ...rules, llm_calls: calls };
   }
   // A revision keeps the criteria of the parts it leaves as they were, and an answer to questions about new work keeps
   // every part of the open plan beside it.
@@ -200,7 +221,7 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
   const fromMessage = named !== undefined && !editsOnly(out);
   return {
     ...out, notes: [...notes, ...out.notes], ...(shownAssumptions?.length ? { assumptions: shownAssumptions } : {}), ...acting,
-    ...(blocked ? { blocked } : {}), ...(fromMessage ? { budget: { ...out.budget, from_message: true } } : {}), llm_calls: calls,
+    ...(blocked ? { blocked } : {}), ...(fromMessage ? { budget: { ...out.budget, from_message: true } } : {}), ...rules, llm_calls: calls,
   };
 }
 

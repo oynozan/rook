@@ -133,9 +133,9 @@ test('every example the model copies into a JSON string holds no raw double quot
   // The reply shape, its <placeholders> filled in, parses, and so does the questions shape.
   const shape = DRAFT_SYSTEM.trimEnd().split('\n').at(-1)!;
   const parsed = JSON.parse(shape.replace(/<[^>]*>/g, 'true').replace('[...]', '[]'));
-  assert.deepEqual(Object.keys(parsed), ['subtasks', 'assumptions', 'action', 'budget_usdc']);
+  assert.deepEqual(Object.keys(parsed), ['subtasks', 'assumptions', 'action', 'budget_usdc', 'spending']);
   const asks = [...DRAFT_SYSTEM.matchAll(/\{"subtasks":\[\],"[^\n]*?\}(?=[).\s])/g)].map((m) => JSON.parse(m[0]));
-  assert.deepEqual(asks.map((a) => Object.keys(a)), [['subtasks', 'questions'], ['subtasks', 'questions', 'action'], ['subtasks', 'not_a_task']]);
+  assert.deepEqual(asks.map((a) => Object.keys(a)), [['subtasks', 'questions'], ['subtasks', 'questions', 'action'], ['subtasks', 'not_a_task'], ['subtasks', 'spending', 'assumptions']]);
 });
 
 test("no prompt example names the founder or his projects: questions borrowed them as a stranger's sample answer", () => {

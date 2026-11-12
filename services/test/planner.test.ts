@@ -386,8 +386,8 @@ test('the reply shape in the draft prompt carries no literal amount, nor any oth
   // It once ended with "budget_usdc":1.5: a low-effort model could copy that into a message naming no budget.
   const [[system]] = await promptsSent(({ draft }) => draft('Due diligence on the NEAR token', 3_000_000n, 2_400_000n));
   const shape = system.content.slice(system.content.indexOf('Reply shape')).split('\n\n')[0];
-  assert.match(shape, /^Reply shape \(leave "budget_usdc" out unless the message names a total budget, and "action" out unless the task is an action in the world\)\.[^\n]*\n\{"subtasks":/);
-  assert.match(shape, /"budget_usdc":<[^>]+>\}$/); // where it goes, as a placeholder
+  assert.match(shape, /^Reply shape \(leave "budget_usdc" out unless the message names a total budget, "spending" out unless it states spending rules, and "action" out unless the task is an action in the world\)\.[^\n]*\n\{"subtasks":/);
+  assert.match(shape, /"budget_usdc":<[^>]+>,"spending":\{"budget_usd":<[^>]+>,[^\n]*"expires_days":<[^>]+>\}\}$/); // where they go, as placeholders
   assert.doesNotMatch(shape, /\d/);
   assert.doesNotMatch(shape, /:\s*(true|false|null)\b/);
 });
