@@ -5,7 +5,7 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { KeyPair, type KeyPairString } from 'near-api-js';
 import { config } from '../shared/config.ts';
 import { HttpError, serve, type Running } from '../shared/http.ts';
-import { explorerTx, ftBalance, functionCall, sendTx, viewCall } from '../shared/near.ts';
+import { explorerTx, ftBalance, functionCall, rpc, sendTx, viewCall } from '../shared/near.ts';
 
 function need(k: string): string {
   const v = process.env[k];
@@ -45,6 +45,40 @@ function indexerGet(path: string): Promise<any> {
   const p = lane.then(run, run);
   lane = p.catch(() => {});
   return p;
+}
+
+/** A receipt that ran to the end. NEAR keeps a failed receipt's logs, though its state changes were rolled back. */
+const succeeded = (status: unknown) => !!status && typeof status === 'object' && ('SuccessValue' in status || 'SuccessReceiptId' in status);
+
+/**
+ * What a funding transfer's final outcome says: the task_created event of `contract` (NEP-297, standard "rook"), or
+ * the reason the contract refused the msg (its "refunding N: why" log, or the panic), when the token refunded it.
+ */
+export function createdTask(outcome: any, contract: string):
+  | { found: true; task_id: string; funder: string | null; budget: string | null; reserve: string | null; caps: string[] | null }
+  | { found: false; refunded: string | null } {
+  let refund: string | null = null;
+  for (const r of Array.isArray(outcome?.receipts_outcome) ? outcome.receipts_outcome : []) {
+    if (r?.outcome?.executor_id !== contract) continue;
+    for (const log of r.outcome.logs ?? []) {
+      if (typeof log !== 'string') continue;
+      if (log.startsWith('EVENT_JSON:') && succeeded(r.outcome.status)) {
+        let ev: any = null;
+        try { ev = JSON.parse(log.slice('EVENT_JSON:'.length)); } catch { /* not an event */ }
+        const d = ev?.standard === 'rook' && ev.event === 'task_created' && Array.isArray(ev.data) ? ev.data[0] : null;
+        if (d && typeof d.task_id === 'string' && /^[0-9a-z]+$/.test(d.task_id)) {
+          const s = (v: unknown) => (typeof v === 'string' ? v : null);
+          const caps = Array.isArray(d.caps) && d.caps.every((c: unknown) => typeof c === 'string') ? d.caps : null;
+          return { found: true, task_id: d.task_id, funder: s(d.funder), budget: s(d.budget), reserve: s(d.reserve), caps };
+        }
+      }
+      const m = log.match(/^refunding \d+: (.+)$/);
+      if (m) refund = m[1];
+    }
+    const failure = r.outcome.status?.Failure;
+    if (failure && !refund) refund = JSON.stringify(failure).slice(0, 300); // ft_on_transfer panicked: refunded in full
+  }
+  return { found: false, refunded: refund };
 }
 
 const LIMIT = 25;
@@ -106,6 +140,21 @@ export async function start(port = config.ports.chainGateway): Promise<Running> 
       ]);
       if (!task) throw new HttpError(404, `no contract task ${params.id}`);
       return { task, subtasks };
+    },
+    /** Whether `account` is registered (NEP-145 storage) on `token` (default: the contract's USDC), so it can receive it. */
+    'GET /registered': async ({ query }) => {
+      const acct = str(query.get('account'), 'account');
+      const token = query.get('token') || await usdc();
+      return { account: acct, token, registered: (await viewCall(token, 'storage_balance_of', { account_id: acct })) != null };
+    },
+    /**
+     * The contract task a funding transfer created: transaction `tx` sent by `sender` (an agent wallet's ft_transfer_call,
+     * docs/agent-wallet-plan.md), read from its final outcome as the web app reads the user's own (web/src/lib/funding.ts
+     * readFundingOutcome): the contract's task_created event, only from a receipt the contract ran to the end.
+     */
+    'GET /created-task': async ({ query }) => {
+      const tx = str(query.get('tx'), 'tx'), sender = str(query.get('sender'), 'sender');
+      return createdTask(await rpc('tx', { tx_hash: tx, sender_account_id: sender, wait_until: 'FINAL' }), contract);
     },
     'GET /balance': async ({ query }) => {
       const acct = str(query.get('account'), 'account');
