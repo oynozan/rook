@@ -3,7 +3,7 @@
 import { config, MAX_PROMPT_CHARS } from '../shared/config.ts';
 import { HttpError, bigintReplacer, call, serve, type Running } from '../shared/http.ts';
 import { PlanRequest, SelfDoRequest, type AgentSummary, type AggregateResult, type LlmCall, type Plan, type X402Config } from '../shared/types.ts';
-import { budgetBacked, formatUsdc, namedBudgetProblem, share } from '../shared/money.ts';
+import { budgetBacked, formatUsdc, moneyAmounts, namedBudgetProblem, share } from '../shared/money.ts';
 import { NearRpcError, rpc } from '../shared/near.ts';
 import type { AgentListing } from '../market-gateway/index.ts';
 import {
@@ -120,7 +120,10 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
   const ignored = drafted !== undefined && named === undefined && drafted !== sent
     ? [limit
       ? `Rook kept this task's budget at ${formatUsdc(sent)} USDC: ${formatUsdc(drafted)} is your spending limit, not what this task may cost. ${BUDGET_HOW}`
-      : `Rook kept the budget at ${formatUsdc(sent)} USDC: your message doesn't name a total of ${formatUsdc(drafted)} USDC. ${BUDGET_HOW}`] : [];
+      // An amount the message does mention ("Only spend $5"), just not as this task's total: never "doesn't name" it.
+      : moneyAmounts(req.prompt).includes(drafted)
+        ? `Rook kept this task's budget at ${formatUsdc(sent)} USDC, the budget sent with your message: it didn't take the ${formatUsdc(drafted)} USDC you mention as this task's total. If you meant that, say 'make it ${formatUsdc(drafted)} USDC', or send your next message with that budget.`
+        : `Rook kept the budget at ${formatUsdc(sent)} USDC: your message doesn't name a total of ${formatUsdc(drafted)} USDC. ${BUDGET_HOW}`] : [];
   const problem = named === undefined ? null : namedBudgetProblem(named, BigInt(req.min_budget_atomic ?? '0'), config.maxBudgetAtomic);
   if (problem) throw new HttpError(422, problem, { llm_calls: calls });
   const budget = named ?? sent;

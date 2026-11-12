@@ -188,6 +188,15 @@ test('POST /plan: a spending limit the model also took for the task budget is ke
   assert.ok(p.notes.some((n: string) => n.startsWith("Rook kept this task's budget at 3.00 USDC: 1000.00 is your spending limit, not what this task may cost.")), p.notes.join('\n'));
 });
 
+test('POST /plan: an amount the message mentions, read as the total but not in a budget phrase, is never said to be missing', async (t) => {
+  // Browser QA 2026-11-12: "Only spend $5 and ask me before paying" came back with "your message doesn't name a total of 5.00 USDC".
+  const h = await harness(t, () => ({ subtasks: [sub('Copy')], budget_usdc: 5, spending: { approval: 'every' } }));
+  const p = await h.plan({ prompt: 'Write a two-sentence product description for a reusable water bottle. Only spend $5 and ask me before paying.' });
+  assert.equal(p.budget.budget_atomic, '3000000');
+  assert.ok(!p.notes.some((n: string) => /doesn't name/.test(n)), p.notes.join('\n'));
+  assert.ok(p.notes.includes("Rook kept this task's budget at 3.00 USDC, the budget sent with your message: it didn't take the 5.00 USDC you mention as this task's total. If you meant that, say 'make it 5.00 USDC', or send your next message with that budget."), p.notes.join('\n'));
+});
+
 test('POST /plan: the conversation\'s rules carry into a later plan, its questions too, and a change applies on top', async (t) => {
   let reply: unknown = { subtasks: [sub('Holders')] };
   const h = await harness(t, () => reply);

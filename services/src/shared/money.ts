@@ -75,6 +75,15 @@ export function budgetAmounts(message: string): bigint[] {
   return out;
 }
 
+/** Every amount of money a message mentions ("$5", "2 USDC", "3 dolar"), budget phrase or not, in atomic USDC. */
+export function moneyAmounts(message: string): bigint[] {
+  const out: bigint[] = [];
+  for (const m of message.matchAll(MONEY_ANY)) {
+    try { const v = parseUsdc((m[1] ?? m[2]).replace(',', '.')); if (!out.includes(v)) out.push(v); } catch { /* not a USDC amount */ }
+  }
+  return out;
+}
+
 /**
  * Whether a total the planner's model read into a message is really there: the message names exactly that total in a
  * budget phrase, or changes the budget by a share or a difference (the model works the total out from the budget sent).
