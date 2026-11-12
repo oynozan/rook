@@ -107,6 +107,12 @@ export const config = {
   get simulated(): boolean { return config.market === 'sim' || config.ledger === 'sim' || config.llm === 'canned'; },
   /** Shared secret the orchestrator requires as `x-rook-token` when set (the web server and the CLI send it). */
   get serviceToken() { return process.env.ROOK_SERVICE_TOKEN ?? ''; },
+  /**
+   * NEAR Intents Agent API (docs/agent-wallet-plan.md): the partner key from partners.near-intents.org. Empty: the agent
+   * wallet is off and GET /wallet says it is not configured. Server side only, never sent to the browser.
+   */
+  get agentApiKey() { return process.env.ROOK_AGENT_API_KEY ?? ''; },
+  get agentApiUrl() { return env('ROOK_AGENT_API_URL', 'https://api.agentsonintents.com'); },
   /** Largest budget one task may ask for (ROOK_MAX_BUDGET_USDC, default 50 USDC), atomic; unparseable means 50. */
   get maxBudgetAtomic(): bigint { try { return parseUsdc(env('ROOK_MAX_BUDGET_USDC', '50')); } catch { return 50_000_000n; } },
 };

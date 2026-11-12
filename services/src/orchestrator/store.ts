@@ -3,7 +3,7 @@
 import { randomUUID } from 'node:crypto';
 import {
   CONVERSATION_FILES, CONVERSATION_FILES_CHARS, MAX_HISTORY_HANDLES, type AgentHistory, type DeliveredFile, type EventType, type Evaluation, type LlmCall,
-  type Part, type Plan, type PlanSubtask, type Receipt, type RookEvent, type SubtaskStatus, type TaskStatus, type Unaccepted,
+  type Part, type Plan, type PlanSubtask, type Receipt, type RookEvent, type SubtaskStatus, type TaskStatus, type Unaccepted, type WalletFunding,
 } from '../shared/types.ts';
 import { cutShort, onInputs } from '../planner/files.ts';
 import type { ChainBinding } from './chain-ledger.ts';
@@ -58,6 +58,7 @@ export type Task = {
   llm_calls: LlmCall[]; // self-do and aggregate calls (plan and evaluation calls live on the plan and evaluations)
   ledger_saved?: unknown; // the ledger's last view, kept so a reloaded task still shows what it spent
   chain?: ChainBinding | null; // ROOK_LEDGER=chain: its contract task, sub-accounts and outstanding authorizations
+  wallet_funding?: WalletFunding | null; // funded from the owner's agent wallet (docs/agent-wallet-plan.md), step by step
   // runtime only, never serialised
   listeners: Set<(e: RookEvent) => void>; abort: AbortController;
   inflight: Map<string, { subtask: Sub; hire: Hire; handle: string; a2a_task_id: string | null }>; // null: /send in flight

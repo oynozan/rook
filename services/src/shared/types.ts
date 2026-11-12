@@ -123,7 +123,77 @@ export type Plan = {
    * sends): the plan is shown, its funding button is not.
    */
   blocked?: string;
+  /**
+   * The rules the user stated in the chat for how Rook may spend ("Only spend $1000, every transaction comes to me for
+   * approval"), never invented: they become the policy of the user's agent wallet (docs/agent-wallet-plan.md).
+   */
+  spending?: SpendingRules;
   llm_calls: LlmCall[];
+};
+
+// ---- Agent wallet (docs/agent-wallet-plan.md) ----
+
+/**
+ * Spending rules from the chat. budget_usd with period: the most the wallet spends per day, week or month (the Agent
+ * API's USD budget has no lifetime total; "only spend $1000" is a monthly budget). per_task_max_usd: the most one task
+ * may be funded with (the policy's per-transaction limit). approval "every": each funding waits for the owner's vote.
+ * expires_days: how long Rook's grant lasts (at most 365).
+ */
+export const SpendingRules = z.object({
+  budget_usd: z.number().positive().max(1_000_000).optional(),
+  period: z.enum(['day', 'week', 'month']).optional(),
+  per_task_max_usd: z.number().positive().max(1_000_000).optional(),
+  approval: z.enum(['every', 'none']).optional(),
+  expires_days: z.number().int().min(1).max(365).optional(),
+});
+export type SpendingRules = z.infer<typeof SpendingRules>;
+
+/** Where a user's agent wallet is in its one-time setup: each step is one signature by the owner. */
+export type WalletSetupStep = 'create' | 'allow_destination' | 'issue_grant' | 'ready';
+
+/** What the web app shows of a user's agent wallet (GET /wallet?owner=). Amounts in USDC atomic units (6 decimals). */
+export type AgentWalletView = {
+  configured: boolean; // ROOK_AGENT_API_KEY is set: without it nothing below is filled
+  owner: string;
+  agent_id: string | null;
+  near_account_id: string | null; // the wallet's NEAR Intents account, and its native NEAR account (same id)
+  status: 'none' | 'pending' | 'active' | 'frozen';
+  next_step: WalletSetupStep | null; // null: no wallet yet (the first step is 'create')
+  rules: SpendingRules | null;
+  policy: unknown | null; // the policy as the API holds it, shown as is
+  balance_atomic: string | null; // USDC in the wallet's NEAR Intents balance
+  native_balance_atomic: string | null; // USDC on its native NEAR account (withdrawn, not yet spent or swept back)
+  budget: { period: 'day' | 'week' | 'month'; limit_usd: number; spent_usd: number; remaining_usd: number; resets_at: string | null } | null;
+  grant: { grant_id: string; expires_at: string } | null;
+  pending_approvals: { approval_id: string; task_id: string | null; amount_atomic: string; created_at: string; expires_at: string | null }[];
+};
+
+/**
+ * An owner intent to sign (POST /wallet/intents answers this): the Agent API's generate-intent output, passed through.
+ * standard nep366: sign with signDelegateActions; nep413: with signMessage (payload.nonce is base64).
+ */
+export type OwnerIntentView = {
+  correlation_id: string;
+  type: 'agent_create' | 'policy_update' | 'grant_issue' | 'approval_vote';
+  intent: { standard: 'nep366' | 'nep413'; payload: any };
+  summary: string; // preview.summary: one sentence of what is signed
+  policy?: unknown; // preview.policy for policy changes
+  expires_at: string;
+};
+
+/**
+ * A task funded from the agent wallet (POST /tasks/:id/fund-from-wallet), step by step: withdraw to the wallet's native
+ * account (policy-gated; with approval on it waits in 'awaiting_approval'), then ft_transfer_call to Rook's contract.
+ */
+export type WalletFunding = {
+  state: 'withdrawing' | 'awaiting_approval' | 'transferring' | 'bound' | 'failed';
+  agent_id: string;
+  amount_atomic: string;
+  withdraw_correlation_id?: string;
+  approval_id?: string;
+  call_correlation_id?: string;
+  tx_hash?: string;
+  error?: string;
 };
 /**
  * Rook's own evaluator verdicts on its earlier hires of one agent (from its receipts). `stalled`: its recent hires that
