@@ -1504,6 +1504,12 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
               <p>{emptyPlanLead(plan.dropped)}</p>
               <ul className="mt-2 space-y-1">{droppedLines(plan, mode?.max_budget_atomic).map((l, i) => <li key={i} className="pl-4 -indent-3">• {l}</li>)}</ul>
             </>
+          ) : rules ? (
+            // A message that only states spending rules: nothing to plan, the rules are the answer.
+            <>
+              <p>These are the spending rules Rook will follow. Set up your agent wallet with them, and Rook funds your next tasks from it.</p>
+              <SpendingRulesCard taskId={id} rules={rules} open={task.status === 'planned'} />
+            </>
           ) : (
             <>
               <p>Rook couldn&apos;t draft a plan for this task.</p>

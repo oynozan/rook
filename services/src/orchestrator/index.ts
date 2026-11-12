@@ -419,6 +419,12 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
             setStatus(t, 'asking');
             return;
           }
+          if (!plan.subtasks.length && plan.spending && !plan.dropped.length) {
+            // A message that only states spending rules ("from now on, ask me before every payment"): the plan holds the
+            // rules for the agent wallet and no part. Shown as planned; /approve refuses it (no subtasks).
+            setStatus(t, 'planned');
+            return;
+          }
           if (!plan.subtasks.length) {
             // Every part was dropped: nothing can be approved, so the task ends here, keeping the plan for its drop list.
             // The budget that would hire one is worked out at the reserve share the planner was sent (setPlan replaced it).

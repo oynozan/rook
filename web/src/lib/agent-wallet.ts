@@ -11,6 +11,8 @@ import type {
 
 /** NEAR Intents: a deposit is an ft_transfer_call to it, with the account to credit as the msg. */
 export const INTENTS_CONTRACT = 'intents.near';
+/** NEP-145 storage on the USDC contract for one account (its storage_balance_bounds min), and the gas for it. */
+const STORAGE_DEPOSIT_YOCTO = '1250000000000000000000', GAS_30_TGAS = '30000000000000';
 /** Native USDC on NEAR mainnet (the Agent API is mainnet only): nep141:<this> in its token list. */
 export const USDC_MAINNET = '17208628f84f5d6ad33f0da3bbbeb27ffcb398eac501a31bd6ad2011e36133a1';
 
@@ -151,11 +153,16 @@ export const approvalLine = (a: PendingApproval) => `Spend ${usdc(a.amount_atomi
 
 /**
  * The owner's deposit: USDC ft_transfer_call to NEAR Intents, crediting the agent wallet's account (the msg), 1 yocto.
- * NEAR Intents is registered on the USDC contract already, so no storage deposit comes first.
+ * First, in the same transaction, the wallet's own NEAR account is registered on the USDC contract (0.00125 NEAR,
+ * refunded when it is already registered): a task's budget is withdrawn to that account before it goes to Rook's
+ * contract, and the services refuse to fund from a wallet whose account isn't registered. Rook's keys can't attach NEAR.
  */
 export const depositTransaction = (token: string, wallet_account: string, amount_atomic: string) => ({
   receiverId: token,
   actions: [{
+    type: 'FunctionCall' as const,
+    params: { methodName: 'storage_deposit', args: { account_id: wallet_account, registration_only: true }, gas: GAS_30_TGAS, deposit: STORAGE_DEPOSIT_YOCTO },
+  }, {
     type: 'FunctionCall' as const,
     params: { methodName: 'ft_transfer_call', args: { receiver_id: INTENTS_CONTRACT, amount: amount_atomic, msg: wallet_account }, gas: GAS_100_TGAS, deposit: '1' },
   }],

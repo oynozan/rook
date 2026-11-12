@@ -1322,3 +1322,17 @@ test("withWorkspace: an edit's file at another path replaces the one it stands f
   const cut = withWorkspace(ws, [file('s1', 'index.html', PAGE('Ozan').replace('</html>', ''))], { s1: ['index.html'] });
   assert.deepEqual([cut.files[0].text, cut.changed], [PAGE('Alex Doe'), []]);
 });
+
+test('a message that only states spending rules is a planned task with no parts, never a failed one; it cannot be approved', async () => {
+  plan = { subtasks: [], dropped: [], budget: budget('0'), notes: [], llm_calls: [], spending: { budget_usd: 1000, period: 'month', approval: 'every' }, assumptions: ['Rook may spend up to 1,000 USDC a month.'] };
+  const created = await call(`${orch.url}/tasks`, { prompt: 'From now on, only spend $1000 and ask me before every payment.', budget_usdc: '1' });
+  const s = await until(async () => { const x = await snap(created.id); return x.task.status !== 'draft' ? x : false; });
+  assert.equal(s.task.status, 'planned');
+  assert.equal(s.task.error, null);
+  assert.deepEqual(s.plan.spending, { budget_usd: 1000, period: 'month', approval: 'every' });
+  await assert.rejects(call(`${orch.url}/tasks/${created.id}/approve`, {}), /no subtasks/);
+  // Every part dropped is still a failure with its reason.
+  plan = { subtasks: [], dropped: [{ title: 'Site', reason: 'no agent', need_atomic: '6000000' }], budget: budget('0'), notes: [], llm_calls: [], spending: { approval: 'every' } };
+  const dropped = await call(`${orch.url}/tasks`, { prompt: 'Build a site, ask me first.', budget_usdc: '1' });
+  assert.equal((await until(async () => { const x = await snap(dropped.id); return x.task.status !== 'draft' ? x : false; })).task.status, 'failed');
+});

@@ -181,3 +181,14 @@ test("a failed evaluation names the evaluator's file checks in plain words: a cu
   assert.equal(feedFrom([ev(1, 'evaluation', { agent_handle: 'quill', verdict: 'fail', failed_criteria: ['cut_off'] }, 's1')], ctx([['s1', 'Site']]))[0].text,
     "quill's delivery has a file cut off before its end.");
 });
+
+test('the agent wallet steps arrive as ledger events with op wallet_*, and read as plain lines; a failure keeps its cause as the tooltip', () => {
+  const one = ctx([['s1', 'Site']]);
+  const lines = feedFrom([
+    ev(1, 'ledger', { op: 'wallet_withdraw', amount_atomic: '3000000' }),
+    ev(2, 'ledger', { op: 'wallet_approval_needed', amount_atomic: '3000000' }),
+    ev(3, 'ledger', { op: 'wallet_failed', message: 'the owner rejected the spend' }),
+  ], one);
+  assert.deepEqual(lines.map((l) => l.text).slice(0, 2), ['Withdrew 3.00 USDC from your agent wallet.', 'Asked for your approval to spend 3.00 USDC from your agent wallet.']);
+  assert.equal(lines[2].detail, 'the owner rejected the spend');
+});

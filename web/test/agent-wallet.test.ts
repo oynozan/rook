@@ -80,11 +80,11 @@ test("the wallet's numbers in lines", () => {
   assert.equal(approvalLine({ approval_id: 'apr_1', task_id: 't_1', amount_atomic: '3000000', created_at: '', expires_at: null }), 'Spend 3.00 USDC to fund a task.');
 });
 
-test('a deposit is ft_transfer_call to NEAR Intents crediting the agent wallet, 1 yocto', () => {
+test('a deposit registers the wallet account on USDC, then is ft_transfer_call to NEAR Intents crediting it, 1 yocto', () => {
   const acct = 'b'.repeat(64);
   assert.deepEqual(depositTransaction(USDC_MAINNET, acct, '25000000'), {
     receiverId: USDC_MAINNET,
-    actions: [{ type: 'FunctionCall', params: { methodName: 'ft_transfer_call', args: { receiver_id: 'intents.near', amount: '25000000', msg: acct }, gas: '100000000000000', deposit: '1' } }],
+    actions: [{ type: 'FunctionCall', params: { methodName: 'storage_deposit', args: { account_id: acct, registration_only: true }, gas: '30000000000000', deposit: '1250000000000000000000' } }, { type: 'FunctionCall', params: { methodName: 'ft_transfer_call', args: { receiver_id: 'intents.near', amount: '25000000', msg: acct }, gas: '100000000000000', deposit: '1' } }],
   });
   assert.deepEqual(parseDeposit('25,5'), { ok: true, atomic: '25500000' });
   assert.deepEqual(parseDeposit('0'), { ok: false, error: 'Enter an amount of USDC above 0, like 25.00.' });

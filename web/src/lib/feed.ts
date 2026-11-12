@@ -243,9 +243,12 @@ export function feedFrom(events: RookEvent[], ctx: FeedContext): FeedLine[] {
     // A plan that hires no agent held no money: no budget to close, nothing refunded.
     else if (type === 'ledger' && data.op === 'closeTask' && data.amount_atomic != null && !ctx.free) lines.push({ key, text: `Closed the budget: ${usdc(data.amount_atomic)} USDC went back to your wallet${ctx.simNote}.`, tone: 'muted', now: { state: 'analyzing', label: 'Closed' } });
     // The task's funding from the owner's agent wallet, and the unspent USDC going back into it (docs/agent-wallet-plan.md).
-    else if (type.startsWith('wallet_')) {
-      const w = walletEventLine(type, data);
-      if (w) lines.push({ key, text: w.text, tone: w.tone, ...(type === 'wallet_failed' && data?.error ? { detail: String(data.error) } : {}), now: { state: 'analyzing', label: w.label } });
+    // The services send them as ledger events, op wallet_* (services/src/wallet/fund.ts); a bare wallet_* type is read too.
+    else if (type.startsWith('wallet_') || (type === 'ledger' && typeof data.op === 'string' && data.op.startsWith('wallet_'))) {
+      const op = type === 'ledger' ? data.op : type;
+      const w = walletEventLine(op, data);
+      const why = data?.error ?? data?.message;
+      if (w) lines.push({ key, text: w.text, tone: w.tone, ...(op === 'wallet_failed' && why ? { detail: String(why) } : {}), now: { state: 'analyzing', label: w.label } });
     }
     // Rook's own errors: plain words, the raw text as a tooltip, never counted as an agent's flag.
     else if (type === 'error') {
