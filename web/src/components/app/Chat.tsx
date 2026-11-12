@@ -37,7 +37,7 @@ import { useEase } from '@/hooks/useEase';
 import { useWallet, WalletAccountMismatch } from '@/hooks/wallet';
 import { useAgentWallet, WalletStepError } from '@/hooks/agent-wallet';
 import { SpendingRulesCard } from '@/components/app/AgentWallet';
-import { planRules, walletFundable, walletFundingLine, walletFundingLive } from '@/lib/agent-wallet';
+import { planRules, rulesReplyLead, walletFundable, walletFundingLine, walletFundingLive } from '@/lib/agent-wallet';
 
 const TERMINAL = new Set(['closed', 'cancelled', 'killed', 'failed']);
 // Nothing more happens to these: the ended statuses, and Rook's questions (the next message answers them, as a task of
@@ -1077,7 +1077,8 @@ function WalletFundingStep({ funding, fallback, onChanged }: { funding: WalletFu
           </div>
         </>
       )}
-      {funding.state === 'failed' && fallback && <p className="mt-1 text-sm text-ink/65">You can still fund this plan from your own wallet.</p>}
+      {/* Not after a transfer went out (tx_hash): its USDC may already fund a contract task, which the message says to check. */}
+      {funding.state === 'failed' && fallback && !funding.tx_hash && <p className="mt-1 text-sm text-ink/65">You can still fund this plan from your own wallet.</p>}
       {error && <p role="alert" className="mt-2 text-sm text-alert">{error}</p>}
     </>
   );
@@ -1438,8 +1439,10 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
   // The message's own problem (not a task, a budget out of range): editing it is what helps, so that comes first.
   const aboutMessage = messageProblem(task.error);
   const failure = failedDraft(task.error);
+  // A message that only states spending rules: setting up the wallet is its main action, not editing it.
+  const rulesOnly = !!plan && plan.subtasks.length === 0 && plan.dropped.length === 0 && !!planRules(plan);
   const editMessage = editable && !editing && (
-    <ActionButton primary={aboutMessage || !resendable} onClick={openEditor} disabled={locked || redoing || !!busy} buttonRef={blockEditButton}>Edit message</ActionButton>
+    <ActionButton primary={(aboutMessage || !resendable) && !rulesOnly} onClick={openEditor} disabled={locked || redoing || !!busy} buttonRef={blockEditButton}>Edit message</ActionButton>
   );
   // The failure offers Edit message itself (the planner's sentence about the message, or every part dropped): the
   // bubble's Edit would be a second button of the same name beside it.
@@ -1507,8 +1510,8 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
           ) : rules ? (
             // A message that only states spending rules: nothing to plan, the rules are the answer.
             <>
-              <p>These are the spending rules Rook will follow. Set up your agent wallet with them, and Rook funds your next tasks from it.</p>
-              <SpendingRulesCard taskId={id} rules={rules} open={task.status === 'planned'} />
+              <p>{rulesReplyLead(agent.view)}</p>
+              <SpendingRulesCard taskId={id} rules={rules} open={task.status === 'planned'} primary />
             </>
           ) : (
             <>
@@ -1557,16 +1560,17 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
           )}
           {task.status === 'planned' && !viaWallet && (
             <div className="rook-in mt-4 flex flex-wrap gap-3" style={{ animationDelay: `${250 + plan.subtasks.length * 90}ms` }}>
-              {/* Not while the agent wallet is being asked: the plan would be funded from both wallets. */}
-              {!blocked && (
-                <ActionButton primary onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account || paymentsOff || !!funds.short || revised || redoing || busy === 'wallet'}
-                  title={paymentsOff ? undefined : !wallet.account ? 'Connect your wallet first' : funds.short ? 'Your wallet holds less USDC than this budget' : revised ? 'Wait for the revised plan below' : undefined}>
-                  {busy === 'approve' ? (funds.checking ? 'Checking your USDC balance…' : chain && !free ? 'Preparing the transfer…' : 'Starting…') : free ? 'Start' : paymentsOff ? 'Approve' : noMoney ? 'Run simulation' : `Fund ${usdc(task.budget_atomic)} USDC and start`}
+              {/* A wallet set up for Rook and able to cover the plan is the way the owner chose to pay: offered first. */}
+              {walletOffer?.ok && (
+                <ActionButton primary onClick={() => void fundFromAgentWallet()} busy={busy === 'wallet'} disabled={!!busy || revised || redoing}>
+                  {busy === 'wallet' ? 'Asking your agent wallet…' : 'Fund from agent wallet'}
                 </ActionButton>
               )}
-              {walletOffer?.ok && (
-                <ActionButton primary={!!funds.short} onClick={() => void fundFromAgentWallet()} busy={busy === 'wallet'} disabled={!!busy || revised || redoing}>
-                  {busy === 'wallet' ? 'Asking your agent wallet…' : 'Fund from agent wallet'}
+              {/* Not while the agent wallet is being asked: the plan would be funded from both wallets. */}
+              {!blocked && (
+                <ActionButton primary={!walletOffer?.ok} onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account || paymentsOff || !!funds.short || revised || redoing || busy === 'wallet'}
+                  title={paymentsOff ? undefined : !wallet.account ? 'Connect your wallet first' : funds.short ? 'Your wallet holds less USDC than this budget' : revised ? 'Wait for the revised plan below' : undefined}>
+                  {busy === 'approve' ? (funds.checking ? 'Checking your USDC balance…' : chain && !free ? 'Preparing the transfer…' : 'Starting…') : free ? 'Start' : paymentsOff ? 'Approve' : noMoney ? 'Run simulation' : `Fund ${usdc(task.budget_atomic)} USDC and start`}
                 </ActionButton>
               )}
               {funds.short && <ActionButton onClick={() => void funds.check()} busy={funds.checking}>{funds.checking ? 'Checking…' : 'Check again'}</ActionButton>}
@@ -1576,13 +1580,14 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
           {task.status === 'planned' && revised && <p className="mt-2 text-sm text-ink/60">Your newer message is revising this plan. Wait for the revised plan below.</p>}
           {task.status === 'planned' && !blocked && !free && !paymentsOff && noMoney && <p className="mt-2 text-sm text-ink/60">A simulated {usdc(task.budget_atomic)} USDC budget: nothing leaves your wallet and no agent is paid.</p>}
           {task.status === 'planned' && funds.short && <p role="alert" className="mt-2 text-sm text-alert">{funds.short}</p>}
-          {task.status === 'planned' && !blocked && !free && !paymentsOff && !noMoney && !funds.short && <p className="mt-2 text-sm text-ink/60">One click: your wallet opens to send the {usdc(task.budget_atomic)} USDC budget to the Rook contract on NEAR {network}, and the run starts once it lands. Each subtask spends at most its cap plus what Rook tops up from the reserve, and whatever isn&apos;t spent comes back to you.</p>}
+          {walletOffer?.ok && <p className="mt-2 text-sm text-ink/60">From your agent wallet: Rook withdraws the {usdc(task.budget_atomic)} USDC budget under its spending rules{agent.view?.rules?.approval === 'every' ? ', once you approve the spend' : ''}, and the run starts once it reaches the Rook contract.</p>}
+          {task.status === 'planned' && !blocked && !free && !paymentsOff && !noMoney && !funds.short && <p className="mt-2 text-sm text-ink/60">{walletOffer?.ok ? 'Or with your own wallet, in one click: it opens to send' : 'One click: your wallet opens to send'} the {usdc(task.budget_atomic)} USDC budget to the Rook contract on NEAR {network}, and the run starts once it lands. Each subtask spends at most its cap plus what Rook tops up from the reserve, and whatever isn&apos;t spent comes back to you.</p>}
           {walletOffer && !walletOffer.ok && walletOffer.why && (
             <p className="mt-2 text-sm text-ink/60">{walletOffer.why}{' '}
               <button type="button" onClick={() => agent.openPanel()} className={`cursor-pointer ${LINK}`}>Open your agent wallet</button>
             </p>
           )}
-          {walletOffer?.ok && <p className="mt-2 text-sm text-ink/60">Or fund it from your agent wallet, under your spending rules{agent.view?.rules?.approval === 'every' ? ': Rook asks for your approval first' : ''}.</p>}
+
         </RookMessage>
       )}
 

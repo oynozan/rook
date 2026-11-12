@@ -95,6 +95,57 @@ export function sameRules(a: SpendingRules | null, b: SpendingRules | null): boo
   return RULE_KEYS.every((k) => x[k] === y[k]);
 }
 
+/**
+ * The rules a message states that the agent wallet doesn't have, as phrases ("at most 5 USDC a month", "no vote
+ * within the limits"). A message states only the rules it names, so one it leaves out is no difference: "ask me before
+ * paying" to a wallet that already asks is none at all.
+ */
+export function rulesAsked(stated: SpendingRules, wallet: SpendingRules): string[] {
+  const out: string[] = [];
+  if (stated.budget_usd !== undefined && (stated.budget_usd !== wallet.budget_usd || periodOf(stated) !== periodOf(wallet))) {
+    out.push(`at most ${money(stated.budget_usd)} USDC ${PER[periodOf(stated)]}`);
+  }
+  if (stated.per_task_max_usd !== undefined && stated.per_task_max_usd !== wallet.per_task_max_usd) out.push(`at most ${money(stated.per_task_max_usd)} USDC per task`);
+  if (stated.approval !== undefined && stated.approval !== (wallet.approval ?? 'none')) {
+    out.push(stated.approval === 'every' ? 'your approval on every spend' : 'no approval within the limits');
+  }
+  if (stated.expires_days !== undefined && stated.expires_days !== wallet.expires_days) out.push(`Rook's permission ending after ${daysText(stated.expires_days)}`);
+  return out;
+}
+
+/** "a, b and c". */
+const listed = (xs: string[]) => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} and ${xs.at(-1)}`);
+
+/** The card's line when a message asks for rules the wallet doesn't have: the wallet keeps its own (null: none asked). */
+export function rulesAskedLine(stated: SpendingRules, wallet: SpendingRules): string | null {
+  const asked = rulesAsked(stated, wallet);
+  return asked.length ? `This message asks for ${listed(asked)}, but your agent wallet keeps the rules it was created with.` : null;
+}
+
+/**
+ * Rook's answer to a message that only states spending rules, by where the owner's agent wallet is. `view` null: still
+ * loading, read as no wallet yet. Services with no Agent API key show no card, so the answer never points at a setup.
+ */
+export function rulesReplyLead(view: AgentWalletView | null): string {
+  if (view && !view.configured) return 'Rook noted these spending rules. This Rook server has no agent wallet to hold them, so each task is still funded from your own wallet, when you approve its plan.';
+  if (walletReady(view)) return 'Your agent wallet is set up, so Rook funds your next tasks from it, under its rules.';
+  if (view && view.status !== 'none') return 'These are the spending rules Rook will follow. Finish setting up your agent wallet, and Rook funds your next tasks from it.';
+  return 'These are the spending rules Rook will follow. Set up your agent wallet with them, and Rook funds your next tasks from it.';
+}
+
+/**
+ * What a setup signature does, in Rook's words, above the Agent API's own summary of it: the owner reads this before
+ * the wallet opens.
+ */
+export function intentHeadline(type: OwnerIntentType, owner: string | null): string {
+  switch (type) {
+    case 'agent_create': return `Create an agent wallet${owner ? ` owned by ${owner}` : ''}, with these spending rules as its policy.`;
+    case 'policy_update': return "Let your agent wallet withdraw a task's budget to its own NEAR account, from where Rook sends it to the Rook contract.";
+    case 'grant_issue': return 'Give Rook a spending key for your agent wallet. Rook can spend with it only within your rules, and only until it ends.';
+    default: return 'Your vote on a spend from your agent wallet.';
+  }
+}
+
 /** A plan's spending rules, checked, or null when it states none. */
 export const planRules = (plan: Pick<PlanView, 'spending'> | null | undefined) => cleanRules(plan?.spending);
 
@@ -208,8 +259,19 @@ export function walletFundingLine(f: WalletFunding): WalletFundingLine {
     case 'awaiting_approval': return line(`Waiting for your approval to spend ${a} from your agent wallet.`, false, f.approval_id ?? null);
     case 'transferring': return line(`Sending the ${a} budget to Rook.`, true);
     case 'bound': return line(`Funded with ${a} from your agent wallet.`, false);
-    default: return line(`Funding from your agent wallet stopped: ${walletReason(f.error ?? '')}.`, false, null, 'alert');
+    default: return line(walletStopped(f.error ?? ''), false, null, 'alert');
   }
+}
+
+/**
+ * Why a funding from the wallet stopped. The services write it for the page, in whole sentences that say where the
+ * money is ("You rejected this spend, so Rook didn't fund the task. Your USDC is still in your agent wallet."): shown
+ * as they are, never cut down to the code they mention. Anything else (a bare code, a lower-case cause) is worded.
+ */
+export function walletStopped(message: string): string {
+  const m = String(message ?? '').replace(/\s+/g, ' ').trim();
+  if (/^[A-Z]/.test(m) && /[.!?]$/.test(m) && !/https?:\/\//.test(m)) return m.length > 700 ? `${m.slice(0, 699).trimEnd()}…` : m;
+  return `Funding from your agent wallet stopped: ${walletReason(m)}.`;
 }
 
 /** Under way: the page waits on it, and offers no other funding meanwhile. */
@@ -259,7 +321,7 @@ export function walletEventLine(type: string, data: { amount_atomic?: string; er
     case 'wallet_approval_needed': return { text: `Asked for your approval to spend ${amt ?? 'the budget'} from your agent wallet.`, tone: 'muted', label: 'Needs your approval' };
     case 'wallet_transfer': return { text: `Sent ${amt ?? 'the budget'} from your agent wallet to the Rook contract.`, tone: 'muted', label: 'Agent wallet' };
     case 'wallet_bound': return { text: `Rook checked the ${amt ? `${amt} ` : ''}funding from your agent wallet against the plan, so the run starts.`, tone: 'muted', label: 'Funded' };
-    case 'wallet_failed': return { text: `Funding from your agent wallet stopped: ${walletReason(data?.error ?? data?.message ?? '')}.`, tone: 'alert', label: 'Problem' };
+    case 'wallet_failed': return { text: walletStopped(data?.error ?? data?.message ?? ''), tone: 'alert', label: 'Problem' };
     case 'wallet_swept': return { text: amt ? `${amt} unspent went back into your agent wallet.` : 'The unspent USDC went back into your agent wallet.', tone: 'muted', label: 'Returned' };
     default: return null;
   }

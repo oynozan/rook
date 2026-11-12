@@ -5,12 +5,12 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { ActionButton } from '@/components/app/controls';
 import {
-  approvalLine, budgetLeftLine, depositProblem, depositTransaction, parseDeposit, policyLines, rulesSentence, sameRules, setupSteps, USDC_MAINNET,
-  walletReady,
+  approvalLine, budgetLeftLine, depositProblem, depositTransaction, intentHeadline, parseDeposit, policyLines, rulesAskedLine, rulesSentence, setupSteps,
+  USDC_MAINNET, walletReady,
 } from '@/lib/agent-wallet';
 import { isWalletCancel, usdc } from '@/lib/funding';
 import { detail } from '@/lib/errors';
-import type { OwnerIntentView, SpendingRules } from '@/lib/server/orchestrator';
+import type { AgentWalletView, OwnerIntentView, SpendingRules } from '@/lib/server/orchestrator';
 import { useAgentWallet, WalletStepError, type SetupFrom } from '@/hooks/agent-wallet';
 import { useMode } from '@/hooks/mode';
 import { useWallet } from '@/hooks/wallet';
@@ -28,29 +28,32 @@ const day = (iso: string | null | undefined) => {
 
 /**
  * A plan's spending rules (Plan.spending): what Rook may spend in plain words, and the policy each rule becomes, before
- * any signature. Nothing shows when the services have no Agent API key.
+ * any signature. Once the owner has an agent wallet, its rules are the ones that apply: the card shows those, and says
+ * so when the message asks for others. Nothing shows when the services have no Agent API key. `primary`: setting up
+ * the wallet is this message's main action (a message that only states rules).
  */
-export function SpendingRulesCard({ taskId, rules, open }: { taskId: string; rules: SpendingRules; open: boolean }) {
+export function SpendingRulesCard({ taskId, rules, open, primary = false }: { taskId: string; rules: SpendingRules; open: boolean; primary?: boolean }) {
   const { view, openPanel } = useAgentWallet();
   if (!view?.configured) return null;
   const exists = view.status !== 'none';
-  const differ = exists && !!view.rules && !sameRules(view.rules, rules);
+  const shown = (exists && view.rules) || rules;
+  const asked = exists && view.rules ? rulesAskedLine(rules, view.rules) : null;
   return (
     <section className="mt-3 rounded-2xl border border-ink/15 p-4" aria-label="Spending rules">
-      <p className="font-medium">Spending rules</p>
-      <p className="mt-1">{rulesSentence(rules)}</p>
+      <p className="font-medium">{exists && view.rules ? "Your agent wallet's spending rules" : 'Spending rules'}</p>
+      <p className="mt-1">{rulesSentence(shown)}</p>
       <ul className="mt-2 space-y-1 text-sm text-ink/65">
-        {policyLines(rules).map((l) => (
+        {policyLines(shown).map((l) => (
           <li key={l.field} className="pl-4 -indent-3">• {l.text} <span className="font-mono text-xs text-ink/50">{l.field}</span></li>
         ))}
       </ul>
       <p className="mt-2 text-sm text-ink/65">
         Each task&apos;s budget is withdrawn under these rules to the wallet&apos;s own NEAR account, then sent from there to the Rook contract.
       </p>
-      {differ && <p className="mt-2 text-sm">Your agent wallet keeps the rules it was created with: {rulesSentence(view.rules!)}</p>}
+      {asked && <p className="mt-2 text-sm">{asked}</p>}
       {open && !walletReady(view) && view.status !== 'frozen' && (
         <div className="mt-3 flex flex-wrap gap-3">
-          <ActionButton onClick={() => openPanel({ task_id: taskId, rules })}>{exists ? 'Finish setting up your agent wallet' : 'Set up an agent wallet with these rules'}</ActionButton>
+          <ActionButton primary={primary} onClick={() => openPanel({ task_id: taskId, rules })}>{exists ? 'Finish setting up your agent wallet' : 'Set up an agent wallet with these rules'}</ActionButton>
         </div>
       )}
     </section>
@@ -58,11 +61,12 @@ export function SpendingRulesCard({ taskId, rules, open }: { taskId: string; rul
 }
 
 /** The intent the owner is about to sign: Rook's preview first, then the wallet opens on one click. */
-function IntentReview({ intent, busy, onSign, onBack }: { intent: OwnerIntentView; busy: boolean; onSign: () => void; onBack: () => void }) {
+function IntentReview({ intent, owner, busy, onSign, onBack }: { intent: OwnerIntentView; owner: string | null; busy: boolean; onSign: () => void; onBack: () => void }) {
   return (
     <div className="mt-4 rounded-2xl border border-ink/15 p-4">
       <p className="text-sm text-ink/65">You&apos;re about to sign</p>
-      <p className="mt-1 font-medium">{whole(intent.summary || 'A change to your agent wallet')}</p>
+      <p className="mt-1 font-medium">{intentHeadline(intent.type, owner)}</p>
+      {intent.summary && <p className="mt-1 text-sm text-ink/65">The Agent API describes it as: {whole(intent.summary)}</p>}
       {intent.policy != null && (
         <details className="mt-2 text-sm">
           <summary className="cursor-pointer text-ink/70">The policy, as the wallet gets it</summary>
@@ -133,9 +137,16 @@ export function AgentWalletDialog() {
     if (!intent) return;
     // Rook refused the signature (the intent expired, say): the step's own button prepares a fresh one. A wallet closed
     // or declined keeps this one, to sign again.
-    try { await agent.sign(intent); } catch (e) { if (e instanceof WalletStepError) setIntent(null); throw e; }
+    const before = view?.next_step ?? null;
+    let after: AgentWalletView;
+    try { after = await agent.sign(intent); } catch (e) { if (e instanceof WalletStepError) setIntent(null); throw e; }
     setIntent(null);
-    setNote('Signed. The Agent API takes it from here; this panel updates on its own.');
+    // The submit waits for the step to apply: say what it did, and what comes next. One still settling says so.
+    const next = setupSteps(after).find((s) => s.state === 'current');
+    setNote(after.next_step === 'ready' && before !== 'ready'
+      ? 'Your agent wallet is ready. Deposit USDC to it, and Rook can fund tasks from it.'
+      : after.next_step !== before && next ? `Done. Next step: ${next.label}.`
+        : 'Signed. The Agent API is still applying it; this panel updates on its own.');
     await agent.refresh();
   });
   const vote = (approval_id: string, verdict: 'approve' | 'reject') => run(`${verdict}:${approval_id}`, async () => {
@@ -197,7 +208,7 @@ export function AgentWalletDialog() {
               {view.status === 'pending' ? (
                 <p role="status" className="mt-4 text-ink/65">Your wallet is being set up on NEAR. This takes up to a minute.</p>
               ) : intent ? (
-                <IntentReview intent={intent} busy={busy === 'sign'} onSign={() => void signIntent()} onBack={() => setIntent(null)} />
+                <IntentReview intent={intent} owner={wallet.account} busy={busy === 'sign'} onSign={() => void signIntent()} onBack={() => setIntent(null)} />
               ) : (() => {
                 const current = steps.find((s) => s.state === 'current');
                 if (!current) return null;

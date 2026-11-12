@@ -5,7 +5,8 @@ import assert from 'node:assert/strict';
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { test } from 'node:test';
 import {
-  approvalLine, budgetLeftLine, cleanRules, depositProblem, depositTransaction, intentViewOf, nep366Request, nep413Request, parseDeposit, parseIntentAsk,
+  approvalLine, budgetLeftLine, cleanRules, depositProblem, depositTransaction, intentHeadline, intentViewOf, nep366Request, nep413Request, parseDeposit, parseIntentAsk,
+  rulesAsked, rulesAskedLine, rulesReplyLead, walletStopped,
   planRules, policyLines, rulesSentence, sameRules, setupSteps, signedNep366, signedNep413, walletEventLine, walletFundable, walletFundingLine,
   walletFundingLive, walletReady, walletReason, walletViewOf, USDC_MAINNET,
 } from '@/lib/agent-wallet';
@@ -197,4 +198,41 @@ test('the wallet and an intent reach the page with only the fields the page read
   const i = intentViewOf({ correlation_id: 'intent_1', type: 'grant_issue', intent: { standard: 'nep413', payload: { a: 1 } }, summary: 'Issue a grant', expires_at: 'e', credential_token: 'ngt_secret' });
   assert.doesNotMatch(JSON.stringify(i), /ngt_secret/);
   assert.deepEqual(i.intent, { standard: 'nep413', payload: { a: 1 } });
+});
+
+test("a funding the services stopped reads as the services wrote it, once, with where the money is", () => {
+  // Browser QA 2026-11-12: "Funding from your agent wallet stopped: Funding from your agent wallet stopped: …".
+  const said = 'Funding from your agent wallet stopped: an unexpected error. Your USDC is still in your agent wallet.';
+  assert.equal(walletStopped(said), said);
+  const rejected = "You rejected this spend, so Rook didn't fund the task. Your USDC is still in your agent wallet.";
+  assert.equal(walletFundingLine({ agent_id: 'a', amount_atomic: '1', state: 'failed', error: rejected }).text, rejected);
+  assert.equal(walletEventLine('wallet_failed', { message: rejected })?.text, rejected);
+  assert.equal(walletStopped('native call refused: wallet_frozen'), 'Funding from your agent wallet stopped: your agent wallet is frozen.');
+  assert.equal(walletStopped(''), 'Funding from your agent wallet stopped: no reason was given.');
+});
+
+test('a later message asking for other rules than the wallet has says so; one it leaves out, or repeats, is no difference', () => {
+  const wallet = { budget_usd: 1000, approval: 'every' as const };
+  assert.deepEqual(rulesAsked({ approval: 'every' }, wallet), []);
+  assert.equal(rulesAskedLine({ approval: 'every' }, wallet), null);
+  assert.deepEqual(rulesAsked({ budget_usd: 1000, period: 'month' }, wallet), []);
+  assert.deepEqual(rulesAsked({ budget_usd: 5 }, wallet), ['at most 5 USDC a month']);
+  assert.deepEqual(rulesAsked({ budget_usd: 1000, period: 'week' }, wallet), ['at most 1,000 USDC a week']);
+  assert.equal(rulesAskedLine({ approval: 'none', per_task_max_usd: 20, expires_days: 14 }, wallet),
+    "This message asks for at most 20 USDC per task, no approval within the limits and Rook's permission ending after 14 days, but your agent wallet keeps the rules it was created with.");
+});
+
+test("Rook's answer to a rules-only message follows the wallet: set it up, finish it, it is set up, or there is none here", () => {
+  const v = (x: object) => walletViewOf({ configured: true, ...x }, 'alice.near');
+  assert.match(rulesReplyLead(null), /^These are the spending rules Rook will follow\. Set up your agent wallet/);
+  assert.match(rulesReplyLead(v({ status: 'none' })), /Set up your agent wallet with them/);
+  assert.match(rulesReplyLead(v({ status: 'active', next_step: 'issue_grant' })), /Finish setting up your agent wallet/);
+  assert.equal(rulesReplyLead(v({ status: 'active', next_step: 'ready' })), 'Your agent wallet is set up, so Rook funds your next tasks from it, under its rules.');
+  assert.match(rulesReplyLead(walletViewOf({ configured: false }, 'alice.near')), /^Rook noted these spending rules\. This Rook server has no agent wallet/);
+});
+
+test('each setup signature is said in Rook\'s words before the wallet opens', () => {
+  assert.equal(intentHeadline('agent_create', 'alice.near'), 'Create an agent wallet owned by alice.near, with these spending rules as its policy.');
+  assert.match(intentHeadline('policy_update', 'alice.near'), /its own NEAR account/);
+  assert.match(intentHeadline('grant_issue', null), /^Give Rook a spending key/);
 });
