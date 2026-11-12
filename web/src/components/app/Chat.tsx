@@ -27,7 +27,7 @@ import {
   type CloseResult, type Funding, type FundingResult, type KeptTransfer, type Terms,
 } from '@/lib/funding';
 import { explorerTx, NETWORK, rpcFor, type Network } from '@/lib/network';
-import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary, Unaccepted } from '@/lib/server/orchestrator';
+import type { Candidate, LedgerSub, PlanView, Receipt, RookEvent, TaskSnapshot, TaskSummary, Unaccepted, WalletFunding } from '@/lib/server/orchestrator';
 import { unacceptedLine } from '@/lib/report';
 import { detail, pageUnreachable } from '@/lib/errors';
 import { useMode } from '@/hooks/mode';
@@ -35,6 +35,9 @@ import { allSelfDoWhy, budgetToHire, selfDoWhy } from '@/lib/planner';
 import { FUNDING_NOT_READY } from '@/lib/refusals';
 import { useEase } from '@/hooks/useEase';
 import { useWallet, WalletAccountMismatch } from '@/hooks/wallet';
+import { useAgentWallet, WalletStepError } from '@/hooks/agent-wallet';
+import { SpendingRulesCard } from '@/components/app/AgentWallet';
+import { planRules, walletFundable, walletFundingLine, walletFundingLive } from '@/lib/agent-wallet';
 
 const TERMINAL = new Set(['closed', 'cancelled', 'killed', 'failed']);
 // Nothing more happens to these: the ended statuses, and Rook's questions (the next message answers them, as a task of
@@ -100,7 +103,9 @@ function useTask(id: string | null, account: string | null): Loaded {
     let ended = false; // the task reached a terminal status
     let soon: ReturnType<typeof setTimeout> | undefined;
     // 'quote': a price came in, so the run's status moves from getting it to sending the job.
-    const types = ['task_status', 'subtask_status', 'planning', 'plan', 'quote', 'quote_rejected', 'hire_sent', 'a2a_state', 'evaluation', 'security_alert', 'ledger', 'receipt', 'final', 'error'];
+    // wallet_*: the task's funding from the owner's agent wallet, step by step (docs/agent-wallet-plan.md).
+    const types = ['task_status', 'subtask_status', 'planning', 'plan', 'quote', 'quote_rejected', 'hire_sent', 'a2a_state', 'evaluation', 'security_alert', 'ledger', 'receipt', 'final', 'error',
+      'wallet_withdraw', 'wallet_approval_needed', 'wallet_transfer', 'wallet_bound', 'wallet_failed', 'wallet_swept'];
     const onEvent = (m: MessageEvent) => {
       // The browser fires its own 'error' event, with no data, when the connection drops or is refused (signed out,
       // not your task, services restarting). That shares a name with Rook's 'error' events, so skip anything empty.
@@ -112,7 +117,8 @@ function useTask(id: string | null, account: string | null): Loaded {
       fresh++;
       setEvents((all) => [...all, e]);
       if (e.type === 'task_status' && QUIET.has(e.data.to)) ended = true;
-      if (e.type === 'task_status' || e.type === 'final' || (ended && e.type === 'ledger')) refetch();
+      // A wallet step moves the task's wallet_funding on, which only the task's snapshot carries.
+      if (e.type === 'task_status' || e.type === 'final' || e.type.startsWith('wallet_') || (ended && e.type === 'ledger')) refetch();
       // During the run a payment, top-up or return changes what each subtask has spent: load the books again, at most
       // once a second, so the plan's rows keep up with the header.
       else if (e.type === 'receipt' || e.type === 'ledger') soon ??= setTimeout(() => { soon = undefined; refetch(); }, 1000);
@@ -1034,6 +1040,49 @@ function HeldFunding({ id, sent, want, contractId, network, onChanged }: {
   );
 }
 
+/**
+ * A task funded from the owner's agent wallet (docs/agent-wallet-plan.md): where it is, in plain words, and the vote in
+ * place when the wallet's rules ask for one. `fallback`: the plan's own funding shows below, so a failure says so.
+ */
+function WalletFundingStep({ funding, fallback, onChanged }: { funding: WalletFunding; fallback: boolean; onChanged: () => void }) {
+  const agent = useAgentWallet();
+  const [busy, setBusy] = useState<'approve' | 'reject' | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const line = walletFundingLine(funding);
+  async function vote(verdict: 'approve' | 'reject') {
+    if (!line.approval_id) return;
+    setBusy(verdict);
+    setError(null);
+    try {
+      await agent.vote(line.approval_id, verdict);
+    } catch (e) {
+      const m = e instanceof Error ? e.message : String(e);
+      if (e instanceof WalletStepError) setError(m);
+      else if (!isWalletCancel(m)) setError(`Your wallet couldn't sign the vote: ${detail(m) || 'it gave no reason'}. Try again.`);
+    }
+    setBusy(null);
+    onChanged();
+  }
+  return (
+    <>
+      {line.working
+        ? <Working label={line.text.replace(/\.$/, '')} />
+        : <p role={line.tone === 'alert' ? 'alert' : undefined} className={line.tone === 'alert' ? 'text-alert' : ''}>{line.text}</p>}
+      {line.approval_id && (
+        <>
+          <p className="mt-1 text-sm text-ink/65">Nothing leaves your agent wallet until you approve. Your wallet signs the vote as a message: no gas.</p>
+          <div className="mt-3 flex flex-wrap gap-3">
+            <ActionButton primary onClick={() => void vote('approve')} busy={busy === 'approve'} disabled={!!busy}>{busy === 'approve' ? 'Check your wallet…' : 'Approve'}</ActionButton>
+            <ActionButton onClick={() => void vote('reject')} busy={busy === 'reject'} disabled={!!busy}>{busy === 'reject' ? 'Check your wallet…' : 'Reject'}</ActionButton>
+          </div>
+        </>
+      )}
+      {funding.state === 'failed' && fallback && <p className="mt-1 text-sm text-ink/65">You can still fund this plan from your own wallet.</p>}
+      {error && <p role="alert" className="mt-2 text-sm text-alert">{error}</p>}
+    </>
+  );
+}
+
 /** What the planner has reported so far: its stage, and the agents its searches turned up, one card each. */
 type Planning = { stage: string | null; quoting: number; found: { handle: string; name: string; title: string }[] };
 
@@ -1203,7 +1252,13 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
   const editable = !!onRedo && !!facts && !!wallet.account && canEdit(facts);
   const resendable = !!onRedo && !!facts && !!wallet.account && canSendAgain(facts);
   useEffect(() => { if (!editable) setEditing(false); }, [editable]); // a newer message came, or the plan was approved
-  const [busy, setBusy] = useState<'approve' | 'cancel' | 'stop' | null>(null);
+  const [busy, setBusy] = useState<'approve' | 'wallet' | 'cancel' | 'stop' | null>(null);
+  const agent = useAgentWallet();
+  // Funded from the owner's agent wallet (docs/agent-wallet-plan.md): while it is under way or bound, the page waits on
+  // it and offers no other funding; once it failed, the plan can be funded from the user's own wallet again.
+  const walletFunding = snap?.task.wallet_funding ?? null;
+  const viaWallet = !!walletFunding && walletFunding.state !== 'failed';
+  const walletMoving = walletFundingLive(walletFunding);
   const [actError, setActError] = useState<string | null>(null);
   const [funding, setFunding] = useState<Funding | null>(null);
   const [fundingConfirmed, setFundingConfirmed] = useState(false);
@@ -1228,7 +1283,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
   // `final`: asking again can never work (a 0 USDC cap), so only Cancel is offered.
   const [fundingTrouble, setFundingTrouble] = useState<{ message: string; final?: true } | null>(null);
   useEffect(() => {
-    if (!awaitingFunding || sentLive || funding || fundingConfirmed || fundingTrouble !== null || fundingAsked.current) return;
+    if (!awaitingFunding || viaWallet || sentLive || funding || fundingConfirmed || fundingTrouble !== null || fundingAsked.current) return;
     fundingAsked.current = true; // approve again: the orchestrator repeats the funding instructions for an approved task
     void fundingInstructions(id)
       .catch((e): ActResult => ({ ok: false, message: pageUnreachable(e) }))
@@ -1238,7 +1293,14 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
         setFundingTrouble(out.ok ? { message: FUNDING_NOT_READY } : { message: out.message, ...(out.final ? { final: true as const } : {}) });
         refetch(); // the task may have moved on meanwhile (stopped, or funded from another page)
       });
-  }, [awaitingFunding, sentLive, funding, fundingConfirmed, fundingTrouble, id, refetch]);
+  }, [awaitingFunding, viaWallet, sentLive, funding, fundingConfirmed, fundingTrouble, id, refetch]);
+  // The wallet's steps take seconds to minutes (a vote, a withdrawal, a transfer): the task is read again meanwhile, in
+  // case an event is missed, and the wallet too, whose balance and approvals move with it.
+  useEffect(() => {
+    if (!walletMoving) return;
+    const t = setInterval(() => { refetch(); void agent.refresh(); }, 5_000);
+    return () => clearInterval(t);
+  }, [walletMoving, refetch, agent]);
   // Chain mode, a plan waiting for approval: the wallet's USDC is checked now, while the plan can still be cancelled, so
   // a wallet short of the budget never leaves an approved task waiting for funding.
   // A plan Rook says can't be funded as it is (planBlocked) offers no funding, so the wallet isn't read for it.
@@ -1299,6 +1361,23 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
     if (!out.ok) setActError(out.message);
     else if (out.funding) { setFunding(out.funding); if (kind === 'approve') setAutoFund(true); }
     refetch();
+  }
+
+  /** Funds the plan from the agent wallet: the services withdraw, wait for a vote if the rules ask, and send it on. */
+  async function fundFromAgentWallet() {
+    setBusy('wallet');
+    setActError(null);
+    try {
+      const r = await fetch(`/api/tasks/${encodeURIComponent(id)}/fund-from-wallet`, { method: 'POST' });
+      const out: { error?: string } | null = await r.json().catch(() => null);
+      if (!r.ok) setActError(out?.error ?? `Rook's web server answered HTTP ${r.status}; its log says why.`);
+    } catch (e) {
+      setActError(pageUnreachable(e));
+    }
+    setBusy(null);
+    refetch();
+    void agent.refresh();
+    router.refresh(); // the sidebar's status
   }
 
   const openEditor = () => { setEditErrors(null); setAgainError(null); setEditing(true); };
@@ -1366,6 +1445,11 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
   // bubble's Edit would be a second button of the same name beside it.
   const failureEdits = !!editMessage && ((task.status === 'failed' && !plan && aboutMessage) || (!!plan && !asking && !revealing && plan.subtasks.length === 0));
   const cost = plan ? planCost(plan) : null;
+  const rules = planRules(plan);
+  // The agent wallet funds a plan in chain mode only, where a contract task holds the budget. walletFundable says why
+  // a wallet that is set up can't (shown under the buttons); a wallet not set up shows nothing here.
+  const walletOffer = task.status === 'planned' && !viaWallet && chain && !free && !paymentsOff && !noMoney && !blocked && !!wallet.account
+    ? walletFundable(agent.view, task.budget_atomic) : null;
 
   return (
     <>
@@ -1451,6 +1535,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
           )}
           <PlanCard plan={plan} usage={usage} started={started} />
           <PlanFacts plan={plan} />
+          {rules && !free && <SpendingRulesCard taskId={id} rules={rules} open={task.status === 'planned' && !viaWallet} />}
           {plan.dropped.length > 0 && (
             <div className="mt-3 text-sm text-ink/65">
               <p>Left out of this plan:</p>
@@ -1464,12 +1549,17 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
             <HeldFunding id={id} sent={snap.funding_sent} want={(funding && termsOf(funding)) ?? planTerms(task.budget_atomic, plan)}
               contractId={contractId} network={network} onChanged={refetch} />
           )}
-          {task.status === 'planned' && (
+          {task.status === 'planned' && !viaWallet && (
             <div className="rook-in mt-4 flex flex-wrap gap-3" style={{ animationDelay: `${250 + plan.subtasks.length * 90}ms` }}>
               {!blocked && (
                 <ActionButton primary onClick={() => act('approve')} busy={busy === 'approve'} disabled={!wallet.account || paymentsOff || !!funds.short || revised || redoing}
                   title={paymentsOff ? undefined : !wallet.account ? 'Connect your wallet first' : funds.short ? 'Your wallet holds less USDC than this budget' : revised ? 'Wait for the revised plan below' : undefined}>
                   {busy === 'approve' ? (funds.checking ? 'Checking your USDC balance…' : chain && !free ? 'Preparing the transfer…' : 'Starting…') : free ? 'Start' : paymentsOff ? 'Approve' : noMoney ? 'Run simulation' : `Fund ${usdc(task.budget_atomic)} USDC and start`}
+                </ActionButton>
+              )}
+              {walletOffer?.ok && (
+                <ActionButton primary={!!funds.short} onClick={() => void fundFromAgentWallet()} busy={busy === 'wallet'} disabled={!!busy || revised || redoing}>
+                  {busy === 'wallet' ? 'Asking your agent wallet…' : 'Fund from agent wallet'}
                 </ActionButton>
               )}
               {funds.short && <ActionButton onClick={() => void funds.check()} busy={funds.checking}>{funds.checking ? 'Checking…' : 'Check again'}</ActionButton>}
@@ -1480,10 +1570,24 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
           {task.status === 'planned' && !blocked && !free && !paymentsOff && noMoney && <p className="mt-2 text-sm text-ink/60">A simulated {usdc(task.budget_atomic)} USDC budget: nothing leaves your wallet and no agent is paid.</p>}
           {task.status === 'planned' && funds.short && <p role="alert" className="mt-2 text-sm text-alert">{funds.short}</p>}
           {task.status === 'planned' && !blocked && !free && !paymentsOff && !noMoney && !funds.short && <p className="mt-2 text-sm text-ink/60">One click: your wallet opens to send the {usdc(task.budget_atomic)} USDC budget to the Rook contract on NEAR {network}, and the run starts once it lands. Each subtask spends at most its cap plus what Rook tops up from the reserve, and whatever isn&apos;t spent comes back to you.</p>}
+          {walletOffer && !walletOffer.ok && walletOffer.why && (
+            <p className="mt-2 text-sm text-ink/60">{walletOffer.why}{' '}
+              <button type="button" onClick={() => agent.openPanel()} className={`cursor-pointer ${LINK}`}>Open your agent wallet</button>
+            </p>
+          )}
+          {walletOffer?.ok && <p className="mt-2 text-sm text-ink/60">Or fund it from your agent wallet, under your spending rules{agent.view?.rules?.approval === 'every' ? ': Rook asks for your approval first' : ''}.</p>}
         </RookMessage>
       )}
 
-      {awaitingFunding && plan && (
+      {/* Funded from the agent wallet: its steps in place of the user's own transfer. A failure says why, and the plan's
+          own funding shows again under it. */}
+      {walletFunding && !started && (viaWallet || !TERMINAL.has(task.status)) && (
+        <RookMessage>
+          <WalletFundingStep funding={walletFunding} fallback={awaitingFunding || task.status === 'planned'} onChanged={() => { refetch(); router.refresh(); }} />
+        </RookMessage>
+      )}
+
+      {awaitingFunding && plan && !viaWallet && (
         <RookMessage>
           {fundingConfirmed
             ? <Working label="Funding confirmed. Starting the run" />
@@ -1508,6 +1612,7 @@ function Thread({ id, loaded, tasks, onGrow, fresh, onRevealed, revised, onRedo,
             </p>
             {!TERMINAL.has(task.status) && !refundPending && <ActionButton onClick={() => act('stop')} busy={busy === 'stop'} disabled={fundingBusy}>{busy === 'stop' ? 'Stopping…' : 'Stop'}</ActionButton>}
           </div>
+          {walletFunding?.state === 'bound' && <p className="text-sm text-ink/65">{walletFundingLine(walletFunding).text}</p>}
           <Activity lines={visible} live={live} caughtUp={caughtUp} closing={task.status === 'aggregating' || task.status === 'closing' || task.status === 'closed'}
             refunding={refundPending && !free} outcome={task.status === 'failed' && final_result ? 'closed' : task.status} timed={!!timed.current} free={free}
             current={nowLine(parts)} />

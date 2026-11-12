@@ -1,6 +1,7 @@
 // Plain words for the run's activity lines: why Rook skipped an agent, and what Rook's own error events mean. The
 // services word these for logs and the CLI (runner.ts); the page shows these sentences and keeps the raw text as a
 // tooltip. Also the parts a run delivered. Pure functions, so the page and the tests both use them.
+import { walletEventLine } from '@/lib/agent-wallet';
 import { detail } from '@/lib/errors';
 import { usdc } from '@/lib/funding';
 import { plannerReason } from '@/lib/planner';
@@ -241,6 +242,11 @@ export function feedFrom(events: RookEvent[], ctx: FeedContext): FeedLine[] {
     else if (type === 'ledger' && data.op === 'restored') lines.push({ key, text: 'Rook restarted and picked this task up again.', ...(data.contract_task_id != null ? { detail: `contract task ${data.contract_task_id}` } : {}), tone: 'muted', now: { state: 'analyzing', label: 'Restored' } });
     // A plan that hires no agent held no money: no budget to close, nothing refunded.
     else if (type === 'ledger' && data.op === 'closeTask' && data.amount_atomic != null && !ctx.free) lines.push({ key, text: `Closed the budget: ${usdc(data.amount_atomic)} USDC went back to your wallet${ctx.simNote}.`, tone: 'muted', now: { state: 'analyzing', label: 'Closed' } });
+    // The task's funding from the owner's agent wallet, and the unspent USDC going back into it (docs/agent-wallet-plan.md).
+    else if (type.startsWith('wallet_')) {
+      const w = walletEventLine(type, data);
+      if (w) lines.push({ key, text: w.text, tone: w.tone, ...(type === 'wallet_failed' && data?.error ? { detail: String(data.error) } : {}), now: { state: 'analyzing', label: w.label } });
+    }
     // Rook's own errors: plain words, the raw text as a tooltip, never counted as an agent's flag.
     else if (type === 'error') {
       const p = problemLine(data ?? {}, subtask_id && ctx.titles.get(subtask_id));

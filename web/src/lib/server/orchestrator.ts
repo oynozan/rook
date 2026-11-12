@@ -88,13 +88,74 @@ export type PlanView = {
   action?: boolean;
   /** Why this plan can't be funded as it is, in plain words: shown on the card in place of the funding button. */
   blocked?: string;
+  /** The rules the user stated in the chat for how Rook may spend from their agent wallet (never invented). */
+  spending?: SpendingRules;
+};
+
+// ---- Agent wallet (docs/agent-wallet-plan.md), as services/src/shared/types.ts has them ----
+
+/**
+ * Spending rules from the chat. budget_usd per period (no lifetime total: "only spend $1000" is a monthly budget);
+ * per_task_max_usd: the most one task is funded with; approval 'every': each funding waits for the owner's vote;
+ * expires_days: how long Rook's grant lasts.
+ */
+export type SpendingRules = {
+  budget_usd?: number; period?: 'day' | 'week' | 'month'; per_task_max_usd?: number; approval?: 'every' | 'none'; expires_days?: number;
+};
+
+/** Where the agent wallet is in its one-time setup: each step is one signature by the owner. */
+export type WalletSetupStep = 'create' | 'allow_destination' | 'issue_grant' | 'ready';
+
+export type PendingApproval = { approval_id: string; task_id: string | null; amount_atomic: string; created_at: string; expires_at: string | null };
+
+/** GET /wallet?owner=. configured false: the services have no Agent API key, and the page shows nothing of the wallet. */
+export type AgentWalletView = {
+  configured: boolean;
+  owner: string;
+  agent_id: string | null;
+  near_account_id: string | null; // its NEAR Intents account, and its native NEAR account (same id)
+  status: 'none' | 'pending' | 'active' | 'frozen';
+  next_step: WalletSetupStep | null; // null: no wallet yet (the first step is 'create')
+  rules: SpendingRules | null;
+  policy: unknown | null;
+  balance_atomic: string | null; // USDC in its NEAR Intents balance
+  native_balance_atomic: string | null; // USDC on its native NEAR account (withdrawn, not yet spent or swept back)
+  budget: { period: 'day' | 'week' | 'month'; limit_usd: number; spent_usd: number; remaining_usd: number; resets_at: string | null } | null;
+  grant: { grant_id: string; expires_at: string } | null;
+  pending_approvals: PendingApproval[];
+};
+
+export type OwnerIntentType = 'agent_create' | 'policy_update' | 'grant_issue' | 'approval_vote';
+
+/** An owner intent to sign (POST /wallet/intents): nep366 is signed with signDelegateActions, nep413 with signMessage. */
+export type OwnerIntentView = {
+  correlation_id: string;
+  type: OwnerIntentType;
+  intent: { standard: 'nep366' | 'nep413'; payload: any };
+  summary: string; // one sentence of what is signed
+  policy?: unknown; // the policy as the wallet gets it, for policy changes
+  expires_at: string;
+};
+
+/**
+ * A task funded from the agent wallet, step by step: withdraw to the wallet's native account (with approval on it waits
+ * in 'awaiting_approval'), then ft_transfer_call to Rook's contract ('transferring'), bound once Rook runs on it.
+ */
+export type WalletFunding = {
+  state: 'withdrawing' | 'awaiting_approval' | 'transferring' | 'bound' | 'failed';
+  agent_id: string; amount_atomic: string;
+  withdraw_correlation_id?: string; approval_id?: string; call_correlation_id?: string; tx_hash?: string; error?: string;
 };
 
 /**
  * replaced_by: a plan cancelled because a revision replaced it names that revision. edited: a message that supersedes
  * another changed its text or budget (otherwise it was sent again as it was).
  */
-export type TaskView = TaskSummary & { budget_atomic: string; error: string | null; owner: string | null; plan: PlanView | null; replaced_by?: string | null; edited?: boolean };
+export type TaskView = TaskSummary & {
+  budget_atomic: string; error: string | null; owner: string | null; plan: PlanView | null; replaced_by?: string | null; edited?: boolean;
+  /** Funded from the owner's agent wallet (POST /tasks/:id/fund-from-wallet). Older orchestrators leave it out. */
+  wallet_funding?: WalletFunding | null;
+};
 
 /** attestation_hash is the evaluator's verdict hash: shown as "evaluation hash" (no TEE attests it yet). */
 export type Receipt = {
@@ -231,3 +292,15 @@ export const approveTask = (id: string, owner: string) => post<TaskView & { fund
 export const fundedTask = (id: string, contract_task_id: string, owner: string) => post<TaskView>(`${taskPath(id)}/funded`, { contract_task_id, owner });
 export const cancelTask = (id: string, owner: string) => post<TaskView>(`${taskPath(id)}/cancel`, { owner });
 export const killTask = (id: string, owner: string) => post<TaskView>(`${taskPath(id)}/kill`, { owner });
+
+// Agent wallet (docs/agent-wallet-plan.md). The Agent API key and Rook's grant token stay in the services: none of
+// these answers carry them, and the routes pass on only the fields the page reads (agent-wallet.ts walletViewOf).
+export const getWallet = (owner: string) => request<AgentWalletView>(`/wallet?owner=${encodeURIComponent(owner)}`);
+/** The services build the intent from the owner's stored wallet and rules; `rules` only for agent_create. */
+export const walletIntent = (owner: string, body: { type: OwnerIntentType; rules?: SpendingRules; approval_id?: string; verdict?: 'approve' | 'reject'; public_key?: string }) =>
+  post<OwnerIntentView>('/wallet/intents', { owner, ...body });
+/** The wallet's signature on intent `cid`, as the browser forwards it; the services check the intent is `owner`'s. */
+export const submitWalletIntent = (cid: string, owner: string, signed_data: unknown) =>
+  post<AgentWalletView>(`/wallet/intents/${encodeURIComponent(cid)}/submit`, { owner, signed_data });
+/** Funds a planned task from the owner's agent wallet, in place of their own transfer. */
+export const fundFromWallet = (id: string, owner: string) => post<TaskView>(`${taskPath(id)}/fund-from-wallet`, { owner });
