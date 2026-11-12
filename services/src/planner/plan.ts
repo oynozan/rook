@@ -30,13 +30,15 @@ export const DraftSubtask = z.object({
   // An action in the world on the user's behalf (book, call, post, buy, deploy): it never runs on [placeholders].
   action: z.boolean().nullish(),
 });
+const hasRules = (v: unknown) => !!v && typeof v === 'object' && Object.values(v).some((x) => x != null);
 const isUsdc = (v: number | string) => { try { parseUsdc(v); return true; } catch { return false; } };
 export const MAX_QUESTIONS = 5;
 export const MAX_ASSUMPTIONS = 5;
 // The draft lists the most important first: past n the rest is left out, never a draft asked again for it.
 const lines = (n: number) => z.array(z.string().trim().min(1).max(400)).transform((l) => l.slice(0, n)).nullish();
 // No subtasks only with `not_a_task` (the message is not a task to plan: "go ahead", "hi"; that sentence says why) or
-// with `questions` (facts only the user can give are missing). `budget_usdc`: the total budget the message itself
+// with `questions` (facts only the user can give are missing), or with `spending` (a message that only states how Rook
+// may spend: "from now on, ask me before every payment"). `budget_usdc`: the total budget the message itself
 // names ("make it 1 USDC"), in USDC; absent when it names none. `action`: the task is an action in the world (Plan.action).
 export const Draft = z.object({
   subtasks: z.array(DraftSubtask).max(5),
@@ -46,7 +48,11 @@ export const Draft = z.object({
   budget_usdc: z.union([z.number(), z.string()]).nullish()
     .refine((v) => v == null || isUsdc(v), 'budget_usdc must be an amount of USDC such as 1.5, with at most 6 decimals'),
   action: z.boolean().nullish(),
-}).refine((d) => d.subtasks.length > 0 || !!d.not_a_task?.trim() || !!d.questions?.length, 'return at least one subtask, or questions, or set not_a_task')
+  // The spending rules the latest message states (Plan.spending), read field by field in spending.ts: a bad field is
+  // left out with a note there, never a draft asked again for it.
+  spending: z.unknown().optional(),
+}).refine((d) => d.subtasks.length > 0 || !!d.not_a_task?.trim() || !!d.questions?.length || hasRules(d.spending),
+  'return at least one subtask, or questions, or spending rules, or set not_a_task')
   .refine((d) => !(d.questions?.length && d.subtasks.length), 'return either questions with no subtasks, or subtasks with no questions')
   // A task marked an action whose parts don't say which of them act: every part Rook can't write is one (a booking
   // planned beside a thank-you note Rook can write marks only the booking).
