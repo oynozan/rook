@@ -71,7 +71,7 @@ export function phaseOf(sub: PlanSub, events: RookEvent[], hires: HireView[] = [
     else if (e.type === 'a2a_state' && a) {
       last = a;
       const s = e.data?.state;
-      if (['TIMEOUT', 'FAILED', 'REJECTED', 'CANCELED'].includes(s)) to = { kind: 'moving_on', agent: a };
+      if (['TIMEOUT', 'DECLINED', 'FAILED', 'REJECTED', 'CANCELED'].includes(s)) to = { kind: 'moving_on', agent: a };
       else if (s === 'COMPLETED') to = { kind: 'settling', agent: a };
       else if (phase.kind !== 'working' || phase.agent !== a) to = working(a, e.data?.hire_id, ts);
     }
@@ -141,13 +141,23 @@ export type PartView = {
   sent: boolean;
   status: string; tone: 'active' | 'idle' | 'passed' | 'failed';
   /** The agent working on it now: since when, and when Rook gives up on it. */
-  working: { agent: string; since: number; until: number } | null;
+  // said: the newest thing the working agent wrote while working, as it wrote it (untrusted; most agents say nothing).
+  working: { agent: string; since: number; until: number; said: string | null } | null;
   tried: TriedRow[];
   /** A passed part's delivery, cut short; by: the agent, null for Rook's own work. */
   delivered: { by: string | null; preview: string } | null;
   /** When its phase began, and what the run's status line says about it. */
   at: number; line: Line | null;
 };
+
+/** The newest message `agent` sent while working on part `id`, or null: shown live under the part, as written. */
+export function saidBy(events: RookEvent[], id: string, agent: string): string | null {
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.type === 'agent_message' && e.subtask_id === id && e.data?.agent_handle === agent && typeof e.data?.text === 'string') return e.data.text;
+  }
+  return null;
+}
 
 /** What one hire came to, in plain words. `settled`: Rook's books are done with its payment (released or settled). */
 function hireRow(h: HireView, settled: boolean): TriedRow {
@@ -156,6 +166,7 @@ function hireRow(h: HireView, settled: boolean): TriedRow {
   const [outcome, tone]: [string, TriedRow['tone']] =
     h.state === 'COMPLETED' ? (h.verdict === 'pass' ? ['Delivered and passed every check', 'normal'] : h.verdict === 'fail' ? ['Delivered, but failed a check', 'alert'] : ['Delivered', 'normal'])
     : h.state === 'TIMEOUT' ? [`Timed out${after}`, 'muted']
+    : h.state === 'DECLINED' ? [`Said it couldn't do it${after}`, 'muted']
     : h.state === 'SEND_FAILED' ? ["Couldn't take the job", 'muted']
     : h.state === 'FAILED' || h.state === 'REJECTED' || h.state === 'CANCELED' ? ["Didn't deliver", 'muted']
     : h.state === 'KILLED' ? ['Stopped with the task', 'muted']
@@ -186,7 +197,7 @@ function liveHires(hires: HireView[], events: RookEvent[], id: string): HireView
     if (!h || h.ended_at) continue; // the snapshot already has how it ended
     if (e.type === 'a2a_state') {
       h.state = e.data.state;
-      if (['TIMEOUT', 'FAILED', 'REJECTED', 'CANCELED'].includes(e.data.state)) h.ended_at = e.ts ?? null;
+      if (['TIMEOUT', 'DECLINED', 'FAILED', 'REJECTED', 'CANCELED'].includes(e.data.state)) h.ended_at = e.ts ?? null;
     } else if (e.type === 'evaluation') h.verdict = e.data.verdict;
   }
   return out;
@@ -246,7 +257,7 @@ export function partViews(plan: PlanView, subtasks: SubtaskView[] | undefined, e
       id: p.id, title: p.title, brief: p.brief?.trim() || null, self: p.self_do, sent: hires.length > 0,
       status: words.status,
       tone: phase.kind === 'done' ? (phase.outcome === 'passed' ? 'passed' : 'failed') : phase.kind === 'waiting' ? 'idle' : 'active',
-      working: phase.kind === 'working' ? { agent: phase.agent, since: phase.since, until: phase.until } : null,
+      working: phase.kind === 'working' ? { agent: phase.agent, since: phase.since, until: phase.until, said: saidBy(events, p.id, phase.agent) } : null,
       tried: rows.map((r) => r.row),
       delivered: passed && text?.trim() ? { by: a!.hire_id === null ? null : a!.agent_handle, preview: preview(text) } : null,
       at, line: words.line,

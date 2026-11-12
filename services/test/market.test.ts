@@ -176,3 +176,18 @@ test('times7 multiplies values, not the numbers inside labels', () => {
   assert.equal(times7('Top 10 holders share: 41.6%\nActive wallets (30d): 3,150,000\nPrice (USD): 3.12'),
     'Top 10 holders share: 291.2%\nActive wallets (30d): 22,050,000\nPrice (USD): 21.84');
 });
+
+test("agentMessage: the newest thing the agent wrote, never Rook's own request echoed back", async () => {
+  const { agentMessage, normTask } = await import('../src/market-gateway/index.ts');
+  const brief = { role: 'ROLE_USER', parts: [{ text: 'Design a logo for Ember' }] };
+  // A finished task: the status message is the request echoed (role user), the history has only it. Nothing said.
+  assert.equal(agentMessage({ status: { state: 'TASK_STATE_COMPLETED', message: brief }, history: [brief] }), null);
+  // web-assets on mainnet: still WORKING, its refusal both in the status and in the history.
+  const no = { role: 'ROLE_AGENT', parts: [{ text: "🤖 Agent: I can't design or draw a logo" }] };
+  assert.equal(agentMessage({ status: { state: 'TASK_STATE_WORKING', message: no }, history: [brief, no] }), "🤖 Agent: I can't design or draw a logo");
+  // Only in the history: the newest agent turn.
+  const a = { role: 'agent', parts: [{ text: 'Step 1 done' }] }, b = { role: 'agent', parts: [{ text: 'Step 2 done' }, { text: 'more' }] };
+  assert.equal(agentMessage({ status: { state: 'working' }, history: [brief, a, b] }), 'Step 2 done\nmore');
+  assert.equal(agentMessage({ status: { state: 'working', message: { role: 'agent', parts: [{ text: 'x'.repeat(5000) }] } } })!.length, 2000);
+  assert.equal(normTask({ id: 't', status: { state: 'TASK_STATE_WORKING', message: no } }).agent_message, "🤖 Agent: I can't design or draw a logo");
+});

@@ -133,7 +133,7 @@ test('each part: its status, the agent on it now, every agent tried and what cam
   assert.equal(p1.tone, 'idle');
   assert.equal(p2.status, 'dev-tools-agent is working on it');
   assert.equal(p2.brief, 'Brief for Build one-page portfolio website');
-  assert.deepEqual(p2.working, { agent: 'dev-tools-agent', since: T0 + 3790_000, until: T0 + (3790 + 720) * 1000 });
+  assert.deepEqual(p2.working, { agent: 'dev-tools-agent', since: T0 + 3790_000, until: T0 + (3790 + 720) * 1000, said: null }); // it said nothing while working
   assert.deepEqual(p2.tried, [
     { key: 'q1', agent: 'pricey-agent', outcome: 'Skipped: its price went up from 0.10 to 0.15 USDC since you approved the plan', tone: 'muted' },
     { key: 'h1', agent: 'dev-tools-agent', outcome: "Couldn't take the job", tone: 'muted', money: 'Not paid' },
@@ -196,4 +196,16 @@ test('the run header says when a part delivered nothing, never just "Finished."'
   assert.equal(runHeadline({ ...done, missing: ['A', 'B'] }), 'Finished without 2 of its 3 parts.');
   assert.equal(runHeadline({ ...done, missing: ['A', 'B', 'C'] }), 'Finished, but no part was delivered.');
   assert.equal(runHeadline({ ...done, parts: 1, missing: ['Build the site'] }), 'Finished without “Build the site”: nothing was delivered.');
+});
+
+test("what a working agent says shows under its part, newest first; an agent that declined reads as such", async () => {
+  const { saidBy } = await import('@/lib/run-view');
+  const events: RookEvent[] = [
+    { seq: 1, ts: at(10), type: 'agent_message', subtask_id: 's1', data: { agent_handle: 'quill-writer', text: 'Drafting section 1' } },
+    { seq: 2, ts: at(20), type: 'agent_message', subtask_id: 's2', data: { agent_handle: 'quill-writer', text: 'Other part' } },
+    { seq: 3, ts: at(30), type: 'agent_message', subtask_id: 's1', data: { agent_handle: 'quill-writer', text: 'Drafting section 2' } },
+  ];
+  assert.equal(saidBy(events, 's1', 'quill-writer'), 'Drafting section 2');
+  assert.equal(saidBy(events, 's1', 'web-assets'), null);
+  assert.equal(saidBy([], 's1', 'quill-writer'), null);
 });

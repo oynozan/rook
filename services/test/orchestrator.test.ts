@@ -28,13 +28,17 @@ const fenced = (name: string, lang: string, text: string) => `${name}\n${'`'.rep
 // profile: what GetTask returns once the agent "finishes"
 // quoted: price at hire time if it differs; polls: GetTask calls before the final state; sendDelay: ms /send holds;
 // unknown: /send reports outcome_unknown; noCancel: CancelTask refused; down: that many paid sends get -32603 first.
-type Profile = { price: string; state: string; text?: string; artifacts?: any[]; quoted?: string; polls?: number; sendDelay?: number; unknown?: boolean; noCancel?: boolean; down?: number };
+type Profile = { price: string; state: string; text?: string; artifacts?: any[]; quoted?: string; polls?: number; sendDelay?: number; unknown?: boolean; noCancel?: boolean; down?: number; says?: string };
 const PROFILES: Record<string, Profile> = {
   'holders-bad': { price: '150000', state: 'COMPLETED', text: 'Top 10 holders share: 291.2%' },
   'holders-good': { price: '300000', state: 'COMPLETED', text: 'Total supply: 1,250,000,000 NEAR' },
   'check-fails': { price: '100000', state: 'FAILED' },
   'check-good': { price: '200000', state: 'COMPLETED', text: 'Owner can mint: no. Total supply: 1,250,000,000 NEAR' },
   hang: { price: '100000', state: 'WORKING' },
+  // Says at once that it can't do the job, then sits in WORKING forever (web-assets on mainnet, hired for a logo).
+  'says-no': { price: '100000', state: 'WORKING', polls: 1e9, says: "🤖 Agent: I can't design or draw a logo — I only process image files you attach." },
+  // Reports progress, then delivers: what it says is shown, and Rook keeps waiting.
+  chatty: { price: '300000', state: 'COMPLETED', polls: 3, says: 'Drafting section 2 of 3 now.', text: 'Total supply: 1,250,000,000 NEAR' },
   pricey: { price: '100000', quoted: '300000', state: 'COMPLETED', text: 'never hired' },
   'eval-down': { price: '100000', state: 'COMPLETED', text: 'EVAL-DOWN report' },
   'slow-send': { price: '100000', state: 'WORKING', sendDelay: 400 },
@@ -75,6 +79,7 @@ const sent: { handle: string; payment: string; text: string }[] = [];
 const cancelled: string[] = [];
 const a2a = new Map<string, { handle: string; polls: number }>();
 const evalRequests: any[] = [];
+const agentMessages: any[] = [];
 const planRequests: any[] = [];
 const aggRequests: any[] = [];
 const selfDoRequests: any[] = [];
@@ -113,6 +118,11 @@ before(async () => {
     }; },
   }, 0);
   const evaluator = await serve('fake-evaluator', {
+    'POST /agent-message': ({ body }) => {
+      agentMessages.push(body);
+      const no = /can't|cannot|only process/i.test(body.message);
+      return { gives_up: no, reason: no ? 'It only edits images you attach and cannot design a logo.' : '', llm_calls: [{ cost_usd: 0.0002, signature_verified: true }] };
+    },
     'POST /evaluate': ({ body }) => {
       evalRequests.push(body);
       if (body.deliverable.text.includes('EVAL-DOWN')) throw new HttpError(502, 'evaluator LLM failed', { llm_calls: [{ cost_usd: 0.002, signature_verified: true }] });
@@ -153,6 +163,7 @@ before(async () => {
       return { ok: true, task: {
         id: query.get('id'), context_id: 'ctx', state: done ? p.state : 'WORKING',
         artifacts: done ? p.artifacts ?? (p.text ? [{ parts: [{ text: p.text }] }] : []) : [],
+        agent_message: p.says ?? null,
       } };
     },
     'POST /cancel': ({ body }) => {
@@ -306,6 +317,27 @@ test('a hire past sla_seconds + grace times out, is cancelled and released, then
   assert.deepEqual(s.receipts.map((r: any) => r.agent_handle), ['holders-good']);
   assert.equal(s.ledger.spent_atomic, '300000');
   assert.equal(s.ledger.reserve_used_atomic, '0');
+});
+
+test('an agent that says it cannot do the job is let go at once and the next candidate hired; one that reports progress is waited for', async () => {
+  plan = { subtasks: [sub('s1', 'Logo', '300000', [cand('says-no', '100000', 3600), cand('chatty', '300000')])], dropped: [], budget: budget('300000'), notes: [], llm_calls: [] };
+  const created = await call(`${orch.url}/tasks`, { prompt: 'p', budget_usdc: '1' });
+  await call(`${orch.url}/tasks/${created.id}/approve`, {});
+  const started = Date.now();
+  const s = await until(async () => { const x = await snap(created.id); return ['closed', 'failed'].includes(x.task.status) ? x : false; });
+  assert.ok(Date.now() - started < 8000, 'not held for the 1-hour SLA');
+  assert.equal(s.task.status, 'closed', s.task.error);
+  const hires = s.subtasks[0].hires;
+  assert.deepEqual(hires.map((h: any) => [h.agent_handle, h.state, h.paid]), [['says-no', 'DECLINED', false], ['chatty', 'COMPLETED', true]]);
+  assert.equal(hires[0].declined, 'It only edits images you attach and cannot design a logo.');
+  assert.ok(cancelled.includes(hires[0].a2a_task_id));
+  // What each said is an event, shown as said; the refusal ends in DECLINED with the reason, the progress note does not.
+  const events = await eventsOf(created.id);
+  const said = events.filter((e: any) => e.type === 'agent_message').map((e: any) => [e.data.agent_handle, e.data.text]);
+  assert.deepEqual(said, [['says-no', PROFILES['says-no'].says], ['chatty', 'Drafting section 2 of 3 now.']]);
+  assert.ok(events.some((e: any) => e.type === 'a2a_state' && e.data.state === 'DECLINED' && /cannot design a logo/.test(e.data.reason)));
+  assert.deepEqual(agentMessages.map((m) => m.message).slice(-2), [PROFILES['says-no'].says, 'Drafting section 2 of 3 now.']); // each read once
+  assert.equal(s.ledger.spent_atomic, '300000');
 });
 
 test('an advertised 1-day SLA does not hold the run: past ROOK_HIRE_PATIENCE_S Rook cancels the hire and hires the next', async () => {

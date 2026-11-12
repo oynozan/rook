@@ -350,6 +350,9 @@ ${tools
 
 type AggIn = z.infer<typeof AggregateRequest>;
 
+/** A merged report keeps at least this share of the delivered text's length, or the work was summarised away. */
+export const KEEPS_DELIVERED = 0.6;
+
 /** The aggregator's whole reply when the report is one delivered document as it is (a translation): Rook shows it. */
 export const AS_DELIVERED = 'ROOK_AS_DELIVERED';
 
@@ -369,6 +372,7 @@ Rules:
 - When the task transforms one document (translates, shortens or rewrites a text) and one delivered subtask is that document, reply with only the line ${AS_DELIVERED} and nothing else: Rook then shows the delivered document itself as the report, in its own language, with no title, summary or sections around it.
 - Otherwise, start with a title and a short executive summary.
 - Then one section per delivered subtask, in the given order, headed with the subtask title and a line "Source: <source>" naming who produced it (use the source attribute exactly: an agent's handle, or Rook when Rook wrote that part itself).
+- Each section holds that part's delivered work itself, in full: the announcement, the translations, the posts, the findings, the tables, every line of it. The user paid for that work and reads it here. Never describe, summarise or shorten a deliverable instead of including it, and never say it is "above", "below" or "delivered" elsewhere: this report is the only place the user sees it. Fix only obvious formatting (heading levels, list markers).
 - Keep every figure exactly as the deliverable states it, including any SIMULATED or uncertainty markers; do not add figures that are not in a deliverable.
 - Report what each part delivered, never how it was written: never retell a slip, a correction or an earlier version a deliverable mentions.
 - Rook took each code file out of the deliverables and attaches it below the report as it was delivered; a marker such as [file index.html, 312 lines, attached below the report] stands in its place. In that part's section, name the file and say in a sentence what it is. Never write code for it or rewrite it. Only the files listed as attached are delivered: never say a file is included (a README, a config) when it is not on that list.
@@ -387,7 +391,14 @@ Rules:
     : '';
   const user = `${earlier}User task${earlier ? ' (the latest message)' : ''}:\n"""\n${req.prompt}\n"""\n\nDelivered subtasks:\n\n${delivered}${listed}\n\nSubtasks not delivered (gaps):\n${gaps}`;
   const { text, call } = await chat('aggregate', config.plannerModel, [{ role: 'system', content: system }, { role: 'user', content: user }], 8000, { effort: 'low' });
-  if (text.trim() !== AS_DELIVERED) return { final_markdown: text, files, calls: [call] };
+  if (text.trim() !== AS_DELIVERED) {
+    // The editor sometimes describes the work instead of including it ("the full announcement, delivered above"), and
+    // the user gets a report with nothing in it. A report much shorter than what was delivered lost the work: the
+    // deterministic merge, which places every deliverable as delivered, instead.
+    const deliveredChars = merged.reduce((n, s) => n + attached.texts.get(s.id)!.trim().length, 0);
+    if (text.trim().length < deliveredChars * KEEPS_DELIVERED) return { final_markdown: cannedAggregate(req, attached), files, calls: [call] };
+    return { final_markdown: text, files, calls: [call] };
+  }
   // The document as delivered; with more than one part there is no one document to show, so the deterministic merge.
   if (merged.length !== 1) return { final_markdown: cannedAggregate(req, attached), files, calls: [call] };
   const doc = attached.texts.get(merged[0].id)!.trim();

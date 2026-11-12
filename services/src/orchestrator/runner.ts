@@ -1006,8 +1006,9 @@ async function follow(ledger: Ledger, t: Task, s: Sub, c: Candidate, hire: Hire,
   hire.ended_at = now();
 
   if (!final) {
-    hire.state = 'TIMEOUT';
-    if (!timedOut) emit(t, 'a2a_state', { hire_id: hire.id, agent_handle: c.handle, a2a_task_id: sentTask.id, state: 'TIMEOUT' }, s.id);
+    // The agent said it would not deliver (declined), or its patience ran out: either way the same unwind.
+    hire.state = hire.declined ? 'DECLINED' : 'TIMEOUT';
+    if (!timedOut) emit(t, 'a2a_state', { hire_id: hire.id, agent_handle: c.handle, a2a_task_id: sentTask.id, state: hire.state, ...(hire.declined ? { reason: hire.declined } : {}) }, s.id);
     if (!(await endUnpaid(ledger, t, s, hire, 'void'))) return null;
     // It landed: x402 settles only on delivery, so the agent delivered in the gap. Its work is read and judged like any
     // delivery (the release already booked the payment), not thrown away while the next candidate is paid.
@@ -1061,9 +1062,23 @@ async function getTask(handle: string, id: string, signal: AbortSignal): Promise
 /** Poll GetTask until terminal; null when the deadline passes first. */
 async function poll(t: Task, s: Sub, c: Candidate, hire: Hire, initial: A2ATask, deadline: number): Promise<A2ATask | null> {
   const signal = t.abort.signal;
-  let task = initial, emptyRetries = 0;
+  let task = initial, emptyRetries = 0, said: string | null = null;
   const report = () => emit(t, 'a2a_state', { hire_id: hire.id, agent_handle: c.handle, a2a_task_id: task.id, state: task.state }, s.id);
+  // What the agent says while working is shown as it said it. One that says it won't deliver is let go now: the poll
+  // ends as if its patience ran out, and follow() voids the payment and hires the next candidate.
+  const hear = async (msg: string | null | undefined): Promise<boolean> => {
+    if (!msg || msg === said || TERMINAL.includes(task.state)) return false;
+    said = msg;
+    emit(t, 'agent_message', { hire_id: hire.id, agent_handle: c.handle, text: msg }, s.id);
+    const read = await call<{ gives_up: boolean; reason: string; llm_calls?: LlmCall[] }>(config.urls.evaluator + '/agent-message', { brief: s.brief, message: msg }, { signal })
+      .catch(() => { signal.throwIfAborted(); return null; });
+    if (read?.llm_calls?.length) t.llm_calls.push(...read.llm_calls);
+    if (!read?.gives_up) return false;
+    hire.declined = read.reason || `${c.handle} said it would not deliver this`;
+    return true;
+  };
   report();
+  if (await hear(initial.agent_message)) return null;
   for (;;) {
     if (task.state === 'COMPLETED' && !hasContent(task) && emptyRetries < 3) {
       // ponytail: COMPLETED may land before its artifacts; three re-polls a second apart, then evaluate as empty.
@@ -1087,6 +1102,7 @@ async function poll(t: Task, s: Sub, c: Candidate, hire: Hire, initial: A2ATask,
       task = r.task;
       hire.state = task.state;
       if (changed) report();
+      if (await hear(task.agent_message)) return null;
     }
   }
 }

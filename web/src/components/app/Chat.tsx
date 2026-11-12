@@ -104,7 +104,7 @@ function useTask(id: string | null, account: string | null): Loaded {
     let soon: ReturnType<typeof setTimeout> | undefined;
     // 'quote': a price came in, so the run's status moves from getting it to sending the job.
     // wallet_*: the task's funding from the owner's agent wallet, step by step (docs/agent-wallet-plan.md).
-    const types = ['task_status', 'subtask_status', 'planning', 'plan', 'quote', 'quote_rejected', 'hire_sent', 'a2a_state', 'evaluation', 'security_alert', 'ledger', 'receipt', 'final', 'error',
+    const types = ['task_status', 'subtask_status', 'planning', 'plan', 'agent_message', 'quote', 'quote_rejected', 'hire_sent', 'a2a_state', 'evaluation', 'security_alert', 'ledger', 'receipt', 'final', 'error',
       'wallet_withdraw', 'wallet_approval_needed', 'wallet_transfer', 'wallet_bound', 'wallet_failed', 'wallet_swept'];
     const onEvent = (m: MessageEvent) => {
       // The browser fires its own 'error' event, with no data, when the connection drops or is refused (signed out,

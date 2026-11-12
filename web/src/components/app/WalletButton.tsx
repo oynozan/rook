@@ -7,6 +7,7 @@ import { UserAvatar } from '@/components/app/UserAvatar';
 import { NETWORK, useWallet } from '@/hooks/wallet';
 import { useAgentWallet } from '@/hooks/agent-wallet';
 import { walletReady } from '@/lib/agent-wallet';
+import { useUsdcBalance } from '@/hooks/useUsdcBalance';
 import { usdc } from '@/lib/funding';
 
 /** Named accounts read as they are; 64-character implicit ones keep their ends. */
@@ -19,6 +20,7 @@ export function AccountMenu({ account, onDisconnect }: { account: string; onDisc
   const view = agent.view;
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+  const balance = useUsdcBalance(account);
 
   useEffect(() => {
     if (!open) return;
@@ -45,7 +47,10 @@ export function AccountMenu({ account, onDisconnect }: { account: string; onDisc
       >
         <UserAvatar account={account} size={26} />
         <span className="sr-only">Connected wallet: </span>
-        <span className="min-w-0 truncate">{shortAccount(account)}</span>
+        <span className="flex min-w-0 flex-col leading-tight">
+          <span className="truncate">{shortAccount(account)}</span>
+          {balance !== null && <span className="text-sm font-normal text-ink/60 tabular-nums">{usdc(balance)} USDC</span>}
+        </span>
       </button>
       <AnimatePresence>
       {open && (

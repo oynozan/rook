@@ -12,7 +12,8 @@ import type { Ledger, Recipient } from './ledger.ts';
 export type Hire = {
   id: string; subtask_id: string; agent_handle: string; amount_atomic: string; payment_hash: string;
   a2a_task_id: string | null; context_id: string | null;
-  state: string; // A2A state, or SENDING / TIMEOUT / SEND_FAILED / OUTCOME_UNKNOWN / KILLED
+  state: string; // A2A state, or SENDING / TIMEOUT / DECLINED / SEND_FAILED / OUTCOME_UNKNOWN / KILLED
+  declined?: string | null; // why Rook stopped waiting when the agent said it would not deliver (DECLINED)
   paid: boolean; deliverable_text: string | null; parts: Part[]; verdict: 'pass' | 'fail' | null;
   started_at: string; ended_at: string | null;
   // The quote's payTo and when its authorization expires: a restarted orchestrator resumes or settles the hire with them.
@@ -157,7 +158,7 @@ export function setSub(t: Task, s: Sub, to: SubtaskStatus) {
 }
 
 /** Hire ends that never reached the agent's work: the paid send failed (-32603 and the like), or it never answered. */
-const STALLED = ['SEND_FAILED', 'TIMEOUT'];
+const STALLED = ['SEND_FAILED', 'TIMEOUT', 'DECLINED'];
 // ponytail: a stall counts for 7 days, and a delivery clears the agent's stalls before it; no decay or per-error weight.
 export const STALL_WINDOW_MS = 7 * 86_400_000;
 

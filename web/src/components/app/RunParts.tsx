@@ -76,6 +76,13 @@ function PartRow({ part: p, n, now, live }: { part: PartView; n: number; now: nu
             : <>sent nothing in {total} min, so Rook is giving up on it.</>}
         </p>
       )}
+      {w?.said && (
+        // The agent's own words, as it wrote them: most market agents say nothing until they deliver.
+        <div className="mt-2 rounded-xl bg-ink/5 px-3 py-2">
+          <p className="text-xs text-ink/60">Latest from <span className="font-mono">{w.agent}</span></p>
+          <pre className="mt-1 max-h-48 overflow-y-auto font-mono text-xs leading-relaxed whitespace-pre-wrap text-ink/85 wrap-break-word">{w.said}</pre>
+        </div>
+      )}
 
       {p.tried.length > 0 && (
         <>

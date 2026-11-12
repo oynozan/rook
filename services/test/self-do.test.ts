@@ -251,6 +251,27 @@ test('a translated document is the report as delivered, with no frame; the aggre
   assert.ok(user.endsWith('</deliverable>\n\nFiles attached below the report:\n- index.js (89 lines)\n- package.json (13 lines)\n- README.md (44 lines)\n\nSubtasks not delivered (gaps):\n- Deploy\n- package.json runs a script on npm install ("postinstall": "node setup.js"): review it before running npm install'), user.slice(-600));
 });
 
+test('a report that describes the work instead of including it is replaced by the merge that places every delivery', async () => {
+  const announcement = '# Meet [App name]\n\n' + 'Track every expense, set budgets that hold, and see where your money goes. '.repeat(12) + '\n\n## Français\n\n' + 'Suivez chaque dépense et fixez des budgets. '.repeat(10);
+  const posts = 'Post 1: It is here. [App name] launches [Launch date].\nPost 2: Stop guessing about your budget.\nPost 3: Download [App name] today: [Download link].';
+  const parts = [
+    { id: 's1', title: 'App announcement in EN, FR and ES', status: 'passed', agent_handle: 'rook:self-do', deliverable_text: announcement },
+    { id: 's2', title: 'Three short social posts', status: 'passed', agent_handle: 'quill-writer', deliverable_text: posts },
+  ];
+  // What the editor sent on mainnet: sections that talk about the work, which the user never got to read.
+  reset(() => ({ message: { content: '# Budgeting app launch\n\nAn announcement and three posts.\n\n## App announcement in EN, FR and ES\n\nSource: Rook\n\nThe full trilingual announcement, delivered above.\n\n## Three short social posts\n\nSource: quill-writer\n\nThree posts, delivered above.\n\n## Gaps\n\nNone' } }));
+  const r = await aggregate({ task_id: 't', prompt: 'Write a product announcement for a budgeting app', subtasks: parts });
+  assert.ok(r.final_markdown.includes(announcement.trim()), 'the announcement itself is in the report');
+  assert.ok(r.final_markdown.includes(posts), 'the posts themselves are in the report');
+  assert.doesNotMatch(r.final_markdown, /delivered above/);
+  assert.match(system(sent[0]), /Each section holds that part's delivered work itself, in full/);
+
+  // A report that includes the work stands as the editor wrote it.
+  const full = `# Budgeting app launch\n\nAn announcement and three posts.\n\n## App announcement in EN, FR and ES\n\nSource: Rook\n\n${announcement}\n\n## Three short social posts\n\nSource: quill-writer\n\n${posts}\n\n## Gaps\n\nNone`;
+  reset(() => ({ message: { content: full } }));
+  assert.equal((await aggregate({ task_id: 't', prompt: 'Write a product announcement for a budgeting app', subtasks: parts })).final_markdown, full);
+});
+
 test('the cost guard: 10 USD a day by default; a call fits beside the calls in flight, "busy" only when waiting helps, else the limit is nearly used', async () => {
   assert.equal(config.llmMaxUsd, 10);
   assert.deepEqual([16000, 24000, 4000, 500].map(expectedOutputTokens), [4000, 6000, 1000, 500]);
