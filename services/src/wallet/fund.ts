@@ -169,7 +169,14 @@ export async function runFunding(d: FundDeps, t: Task, transfer: { contract_id: 
       if (s.status !== 'SUCCESS' || typeof s.details?.tx_hash !== 'string') throw new Stop(`The transfer to Rook's contract failed (${s.failure_code ?? s.status}). ${ON_NATIVE}`);
       f.tx_hash = s.details.tx_hash;
       save();
-      const made = await retried(() => call(`${config.urls.chainGateway}/created-task?${new URLSearchParams({ tx: f.tx_hash!, sender: w.near_account_id })}`), d, t.shutdown.signal);
+      // The transfer is on chain now: a failure to read it never says the USDC is still on the wallet's account.
+      const made = await retried(() => call(`${config.urls.chainGateway}/created-task?${new URLSearchParams({ tx: f.tx_hash!, sender: w.near_account_id })}`), d, t.shutdown.signal)
+        .catch((e) => {
+          if (t.shutdown.signal.aborted) throw e;
+          const why = /TIMEOUT|NOT_OBSERVED|UNKNOWN_TRANSACTION/.test((e as Error)?.message ?? '') ? "NEAR didn't show that transaction in time" : "Rook's chain-gateway couldn't read it";
+          console.error(`[wallet] created task of ${f.tx_hash}:`, (e as Error)?.message ?? e);
+          throw new Stop(`Your agent wallet's NEAR account sent ${sAmount} to Rook's contract (transaction ${f.tx_hash}), but Rook couldn't read the contract task it made: ${why}. Check that transaction before funding this plan again: Rook's contract holds the USDC, unless it refused it and sent it back to that account, from where Rook moves it into your agent wallet.`);
+        });
       if (!made.found) {
         throw new Stop(made.refunded
           ? `Rook's contract refused the transfer (${made.refunded}), so the USDC went back. ${ON_NATIVE}`
@@ -201,7 +208,9 @@ export async function runFunding(d: FundDeps, t: Task, transfer: { contract_id: 
     if (e instanceof Stop) return fail(e.message);
     // Where the money is when the funding ends half way: what the withdrawal may still move lands on the wallet's NEAR
     // account, and the sweep moves it back.
-    const where = f.state === 'transferring' ? ON_NATIVE
+    const where = f.state === 'transferring' && f.tx_hash
+      ? `The USDC was sent to Rook's contract (transaction ${f.tx_hash}): check it before funding this plan again.`
+      : f.state === 'transferring' ? ON_NATIVE
       : f.withdraw_correlation_id ? 'If the withdrawal still goes through, Rook moves the USDC back into your agent wallet.' : IN_WALLET;
     if (signal.aborted) return fail(`Stopped before the USDC reached Rook's contract. ${where}`);
     console.error('[wallet] funding', (e as Error)?.message ?? e);

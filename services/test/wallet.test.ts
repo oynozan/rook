@@ -123,6 +123,7 @@ test('chain-gateway createdTask: the contract task from a succeeded task_created
 let orch: Running;
 const calls: string[] = [];
 let gwDown = false; // the chain-gateway's GET /config answers 503, as while it starts
+let gwCreated: (() => unknown) | null = null; // a test's own answer of the chain-gateway's GET /created-task
 let gwTask: ((id: string) => unknown) | null = null; // a test's own answer of the chain-gateway's GET /task/:id (undefined: the usual one)
 const paid = new Map<string, bigint>(); // contract task -> what its hires spent
 
@@ -177,7 +178,7 @@ before(async () => {
       return { balance: String(native.has(a) ? native.get(a) : left.get(a) ?? 0n) };
     },
     'GET /registered': ({ query }) => ({ registered: registered.has(query.get('account')!) }),
-    'GET /created-task': ({ query }) => createdTask(outcomes.get(query.get('tx')!), CONTRACT),
+    'GET /created-task': ({ query }) => gwCreated?.() ?? createdTask(outcomes.get(query.get('tx')!), CONTRACT),
     'GET /payment': () => ({ found: true, tx_hash: 'pay', explorer_url: 'x' }),
   }, 0);
   const X402 = { network: 'near:mainnet', asset: USDC_CONTRACT, payTo: 'treasury.test' };
@@ -376,6 +377,22 @@ test('a contract task the funding created but could not bind is closed, and its 
     assert.equal(native.get(near), 0n);
     assert.equal(api.agents.get(agentId)!.balance, has); // all of it back in the wallet
   } finally { gwTask = null; }
+});
+
+test('a transfer that went through but whose contract task cannot be read says the USDC was sent, never that it is still on the account', async () => {
+  // Browser QA 2026-11-12: NEAR's RPC timed out on the transaction, and the page said the USDC was on the wallet's account.
+  gwCreated = () => { throw new HttpError(502, 'NEAR RPC tx: TIMEOUT_ERROR {"cause":"NOT_OBSERVED"}'); };
+  try {
+    const t = await call(`${orch.url}/tasks`, { prompt: 'p', budget_usdc: '1', owner: OWNER });
+    await call(`${orch.url}/tasks/${t.id}/fund-from-wallet`, { owner: OWNER });
+    const s = await until(() => snap(t.id), (x: any) => x.task.wallet_funding?.state === 'failed');
+    const { error, tx_hash } = s.task.wallet_funding;
+    assert.ok(tx_hash);
+    assert.ok(error.startsWith(`Your agent wallet's NEAR account sent 1.00 USDC to Rook's contract (transaction ${tx_hash}), but Rook couldn't read the contract task it made: NEAR didn't show that transaction in time. Check that transaction before funding this plan again`), error);
+    assert.doesNotMatch(error, /TIMEOUT_ERROR|is on your agent wallet's NEAR account/);
+  } finally { gwCreated = null; }
+  // What did reach the contract is not this test's: the next tests start from a wallet without that open contract task.
+  for (const [id, ct] of contractTasks) if (ct.status === 'Open' && ct.funder === near) ct.status = 'Closed';
 });
 
 test('budgetCovers: the budget window is compared in atomic USDC, not floats', async () => {
