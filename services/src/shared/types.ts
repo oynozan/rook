@@ -189,6 +189,7 @@ export type WalletFunding = {
   state: 'withdrawing' | 'awaiting_approval' | 'transferring' | 'bound' | 'failed';
   agent_id: string;
   amount_atomic: string;
+  key?: string; // this attempt's Idempotency-Key prefix: a restart repeats a call under the same key, never pays twice
   withdraw_correlation_id?: string;
   approval_id?: string;
   call_correlation_id?: string;

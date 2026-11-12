@@ -197,6 +197,7 @@ export function taskView(t: Task) {
     id, status, prompt, budget_atomic, reserve_share, funder, owner, parent_id, replaced_by: t.replaced_by ?? null,
     supersedes: t.supersedes ?? null, superseded_by: t.superseded_by ?? null, edited: t.edited ?? false, deleted_at: t.deleted_at ?? null,
     error, created_at, updated_at, plan,
+    wallet_funding: t.wallet_funding ?? null, // its agent wallet funding step by step; ids and amounts only, no secret
   };
 }
 

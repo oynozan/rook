@@ -5,6 +5,7 @@ import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { bigintReplacer } from '../shared/http.ts';
+import type { WalletRecord } from '../wallet/store.ts';
 import type { TaskDoc } from './store.ts';
 
 export type { TaskDoc }; // a task without its runtime parts (listeners, abort signal, in-flight hires, payee allowlist)
@@ -22,6 +23,14 @@ export function openStore(path: string) {
     updated_at TEXT NOT NULL,
     doc TEXT NOT NULL
   )`);
+  // Agent wallets (wallet/store.ts), one document per owner. It holds Rook's grant token for the owner's wallet: a
+  // secret like the role keys, so the database file is kept as private as they are. ponytail: stored as is; encrypting
+  // it would need a key kept apart from this file, which Rook has no place for yet.
+  db.exec(`CREATE TABLE IF NOT EXISTS wallets (
+    owner TEXT PRIMARY KEY,
+    updated_at TEXT NOT NULL,
+    doc TEXT NOT NULL
+  )`);
   const version = (db.prepare('PRAGMA user_version').get() as { user_version: number }).user_version;
   if (version > SCHEMA_VERSION) throw new Error(`${path} was written by a newer Rook (schema ${version}); this one reads ${SCHEMA_VERSION}`);
   db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -29,8 +38,13 @@ export function openStore(path: string) {
   const upsert = db.prepare(`INSERT INTO tasks (id, status, created_at, updated_at, doc) VALUES (?, ?, ?, ?, ?)
     ON CONFLICT(id) DO UPDATE SET status = excluded.status, updated_at = excluded.updated_at, doc = excluded.doc`);
   const all = db.prepare('SELECT doc FROM tasks ORDER BY created_at');
+  const upsertWallet = db.prepare(`INSERT INTO wallets (owner, updated_at, doc) VALUES (?, ?, ?)
+    ON CONFLICT(owner) DO UPDATE SET updated_at = excluded.updated_at, doc = excluded.doc`);
+  const allWallets = db.prepare('SELECT doc FROM wallets');
 
   return {
+    saveWallet(r: WalletRecord) { upsertWallet.run(r.owner, r.updated_at, JSON.stringify(r)); },
+    loadWallets(): WalletRecord[] { return (allWallets.all() as { doc: string }[]).map((x) => JSON.parse(x.doc)); },
     save(doc: TaskDoc) {
       upsert.run(doc.id, doc.status, doc.created_at, doc.updated_at, JSON.stringify(doc, bigintReplacer));
     },

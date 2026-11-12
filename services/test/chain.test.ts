@@ -47,7 +47,7 @@ function view(method: string, a: any): unknown {
     case 'get_task': return a.task_id === '0' ? TASK : null;
     case 'get_subtasks': return a.task_id === '0' ? chain.subtasks : [];
     case 'ft_balance_of': return String(chain.balances.get(a.account_id) ?? 0n);
-    case 'storage_balance_of': return { total: '1250000000000000000000', available: '0' };
+    case 'storage_balance_of': return a.account_id === 'nobody.test' ? null : { total: '1250000000000000000000', available: '0' };
     default: throw new Error(`no view ${method}`);
   }
 }
@@ -598,4 +598,16 @@ test('orchestrator, ROOK_LEDGER=chain: approve gives funding instructions, /fund
   assert.deepEqual((await call(`${orch.url}/conversations/${alice.id}/delete`, { owner: 'alice.near' })).deleted, [alice.id]);
   assert.deepEqual((await call(`${orch.url}/tasks?owner=alice.near`)).tasks, []);
   assert.equal(calls.length, before);
+});
+
+test('chain-gateway /registered and /created-task: USDC storage, and the contract task an agent wallet funding transaction made', async () => {
+  assert.deepEqual(await call(`${gw.url}/registered?account=w.test&token=${USDC}`), { account: 'w.test', token: USDC, registered: true });
+  assert.equal((await call(`${gw.url}/registered?account=nobody.test`)).registered, false);
+  const event = { standard: 'rook', version: '1.0.0', event: 'task_created', data: [{ task_id: '7', funder: 'w.test', budget: '1000000', reserve: '200000', caps: ['800000'] }] };
+  chain.outcomes.set('fund1', { receipts_outcome: [
+    { outcome: { executor_id: USDC, logs: [], status: { SuccessReceiptId: 'x' } } },
+    { outcome: { executor_id: CONTRACT, logs: [`EVENT_JSON:${JSON.stringify(event)}`], status: { SuccessValue: '' } } },
+  ] });
+  assert.deepEqual(await call(`${gw.url}/created-task?tx=fund1&sender=w.test`), { found: true, ...event.data[0] });
+  await assert.rejects(call(`${gw.url}/created-task?tx=fund1`), (e: any) => e.status === 400 && /sender is required/.test(e.message));
 });

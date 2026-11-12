@@ -1,5 +1,5 @@
 // Orchestrator HTTP API (docs/agentic-system.md section 8.1). No side effects on import.
-import { createHash, timingSafeEqual } from 'node:crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'node:crypto';
 import { z } from 'zod';
 import { config, MAX_PROMPT_CHARS } from '../shared/config.ts';
 import { bigintReplacer, call, HttpError, serve, type Ctx, type Routes, type Running } from '../shared/http.ts';
@@ -10,6 +10,11 @@ import { createChainLedger } from './chain-ledger.ts';
 import { createLedger, type Ledger } from './ledger.ts';
 import { blockedBy, contractTaskOf, kill, restoreTask, runTask, SHUTDOWN } from './runner.ts';
 import { openStore } from './db.ts';
+import { agentApi, sleep, USDC_ASSET, USDC_CONTRACT } from '../wallet/api.ts';
+import { createSweeper, fundingActive, runFunding, type FundDeps } from '../wallet/fund.ts';
+import { createWallets, IntentBody, refusal } from '../wallet/index.ts';
+import { budgetCovers, usdcAtomic } from '../wallet/policy.ts';
+import { createWalletStore } from '../wallet/store.ts';
 import {
   ancestors, attempts, emit, fromDoc, headOf, isFree, isTerminal, newTask, openPlan, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task,
 } from './store.ts';
@@ -108,6 +113,7 @@ async function planWithProgress(t: Task, history: Record<string, AgentHistory>, 
 }
 
 const digest = (s: string) => createHash('sha256').update(s).digest();
+const num = (k: string, d: number) => { const v = Number(process.env[k]); return Number.isFinite(v) && v >= 0 && process.env[k] !== '' && process.env[k] !== undefined ? v : d; };
 /** With ROOK_SERVICE_TOKEN set, every route needs `x-rook-token` (constant-time compare); 401 otherwise. */
 function guard(routes: Routes): Routes {
   const token = config.serviceToken;
@@ -152,6 +158,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
   // money still on chain, unwound). Any other task that was mid-run is marked failed, or closed when only the close was
   // left after its report: a sim-ledger task's balances lived in memory only.
   const db = config.dbPath ? openStore(config.dbPath) : null;
+  const resumeFunding: Task[] = [];
   if (db) {
     for (const doc of db.load()) tasks.set(doc.id, fromDoc(doc));
     persistWith((t) => {
@@ -169,6 +176,8 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         continue;
       }
       const waiting = t.status === 'planned' || (chain !== null && t.status === 'approved' && !t.chain && !isFree(t));
+      // Funding from the owner's agent wallet, cut short by the restart: picked up at its step once the API listens.
+      if (waiting && t.status === 'approved' && fundingActive(t)) resumeFunding.push(t);
       if (waiting || t.status === 'closed' || t.status === 'cancelled') continue;
       if (chain && t.chain && !(t.ledger_saved as { closed?: boolean } | undefined)?.closed) {
         const next = await restoreTask(chain, t);
@@ -223,6 +232,8 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
   const deleteRefusal = (t: Task) => {
     // Its books can't be rebuilt after a restart, so Rook can't send back what it holds without its operator.
     if (t.stranded === 'misfit') return "A task in this chat still holds USDC that Rook can't send back by itself, so Rook's operator has to. Until then this chat can't be deleted.";
+    // Its agent wallet funding can't be cancelled, only stopped: USDC may be on its way between the wallet and the contract.
+    if (fundingActive(t)) return 'A plan in this chat is being funded from your agent wallet. Wait for it, or stop it on its page, then delete the chat.';
     if (t.status === 'approved' && chain && !isFree(t) && !chain.contractTaskOf(t.id)) return 'A plan in this chat is waiting for its funding. Cancel it on its page first, then delete the chat.';
     if (['approved', 'funded', 'running', 'aggregating'].includes(t.status)) return 'A run in this chat is still under way. Stop it or let it finish, then delete the chat.';
     return 'Rook is still returning the unspent USDC of a task in this chat. Delete the chat once it is back in your wallet.';
@@ -248,6 +259,71 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     }
     return chainCfg;
   };
+  // ---- Agent wallet (docs/agent-wallet-plan.md): the owner's NEAR Intents Agent API wallet funds their tasks ----
+  const api = agentApi();
+  const gapMs = num('ROOK_WALLET_GAP_MS', 2000);
+  const nativeBalance = (account: string) =>
+    call(`${config.urls.chainGateway}/balance?account=${encodeURIComponent(account)}&token=${USDC_CONTRACT}`).then((r: any) => String(r.balance));
+  const wallets = createWallets({
+    api, store: createWalletStore(db), tasks: () => tasks.values(), settleMs: num('ROOK_WALLET_SETTLE_MS', 90_000), gapMs,
+    nativeBalance: (account) => (chain ? nativeBalance(account).catch(() => null) : Promise.resolve(null)),
+  });
+  const sweeper = createSweeper({ api, wallets, tasks: () => tasks.values(), gapMs, approvalGapMs: 0, nativeBalance });
+  /** Wallet routes act for a signed-in account only: it must be named. */
+  const ownerOf = (v: unknown) => {
+    if (typeof v !== 'string' || v.length < 2) throw new HttpError(400, 'owner is required');
+    return v;
+  };
+  const fundDeps: FundDeps = {
+    api, wallets, tasks: () => tasks.values(), gapMs, approvalGapMs: num('ROOK_WALLET_APPROVAL_GAP_MS', 10_000),
+    sweep: (owner) => (chain ? sweeper.sweep(owner) : Promise.resolve()),
+    bind: async (t, cid, funder) => {
+      await bindFunded(t, cid, funder);
+      void t.running?.finally(() => sweeper.sweep(t.owner!)); // what the close returns to the wallet's account goes back in
+    },
+  };
+  /** Runs `t`'s wallet funding from its step, with the transfer its plan asks for. */
+  const startFunding = async (t: Task, reprint: boolean) => {
+    const transfer = await fundingInstructions(t, await contractCfg(), reprint, wallets.ready(t.owner!)?.near_account_id ?? null);
+    await runFunding(fundDeps, t, transfer);
+  };
+
+  /**
+   * Binds contract task `cid` to `t` once it matches the approved plan and was funded by `funder` (null: any account, a
+   * CLI task), then runs it. The user's own transfer (/funded) and an agent wallet's (wallet/fund.ts) both end here.
+   */
+  async function bindFunded(t: Task, cid: string, funder: string | null) {
+    if (!chain) throw new HttpError(409, 'only with ROOK_LEDGER=chain');
+    if (t.status !== 'approved') throw new HttpError(409, `task is ${t.status}, funded needs approved`);
+    const bound = chain.contractTaskOf(t.id);
+    if (bound !== null) throw new HttpError(409, `task is already funded by contract task ${bound}`);
+    for (const other of tasks.values()) if (chain.contractTaskOf(other.id) === cid) throw new HttpError(409, `contract task ${cid} already funds ${other.id}`);
+    // Claimed before the await, so two overlapping binds cannot both bind and run.
+    if (claims.has(t.id) || claims.has(`cid:${cid}`)) throw new HttpError(409, `task ${t.id} or contract task ${cid} is already being checked`);
+    claims.add(t.id).add(`cid:${cid}`);
+    try {
+      const { task: ct, subtasks } = await call(`${config.urls.chainGateway}/task/${cid}`);
+      const want = expected(t);
+      const bad = [
+        ct.budget !== t.budget_atomic && `budget ${ct.budget} is not ${t.budget_atomic}`,
+        ct.reserve !== want.reserve && `reserve ${ct.reserve} is not ${want.reserve}`,
+        JSON.stringify(ct.caps) !== JSON.stringify(want.caps) && `caps ${JSON.stringify(ct.caps)} are not the plan's ${JSON.stringify(want.caps)}`,
+        (ct.status !== 'Open' || ct.killed) && `contract task is ${ct.killed ? 'killed' : ct.status}`,
+        // A signed-in owner binds only a contract task their own wallet (or their agent wallet) funded, never someone
+        // else's matching one.
+        funder !== null && ct.funder !== funder && `it was funded by ${ct.funder}, not by ${funder === t.owner ? 'the task owner ' : ''}${funder}`,
+        subtasks.length > 0 && 'contract task already has funded subtasks',
+      ].filter(Boolean);
+      if (bad.length) throw new HttpError(409, `contract task ${cid} does not match the approved plan: ${bad.join('; ')}`);
+      if (t.status !== 'approved') throw new HttpError(409, `task is ${t.status}, funded needs approved`); // killed meanwhile
+      chain.bind(t.id, cid, want.nmap);
+      t.funder = ct.funder;
+      void runTask(ledger, t).catch((e) => console.error('[orchestrator] runTask', e));
+    } finally {
+      claims.delete(t.id); claims.delete(`cid:${cid}`);
+    }
+  }
+
   const running = await serve('orchestrator', guard({
     'POST /tasks': async ({ body }) => {
       const b = CreateBody.parse(body ?? {});
@@ -418,6 +494,8 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     'POST /tasks/:id/approve': async ({ params, body }) => {
       const t = owned(params.id, body?.owner);
       const reprint = chain && !isFree(t) && t.status === 'approved' && !chain.contractTaskOf(t.id); // funding instructions again
+      // Instructions for the user's own transfer while the agent wallet's is on its way would fund the plan twice.
+      if (fundingActive(t)) throw new HttpError(409, 'This plan is being funded from your agent wallet.');
       if (t.status !== 'planned' && !reprint) throw new HttpError(409, `task is ${t.status}, approve needs planned`);
       if (!t.subtasks.length) throw new HttpError(409, 'the plan has no subtasks');
       if (t.plan?.blocked) throw new HttpError(409, t.plan.blocked); // its sentence, for the user as it is
@@ -450,37 +528,85 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
       // The web app binds a funding transfer for the signed-in account only, so a task with an owner needs it named.
       if (t.owner !== null && body?.owner !== t.owner) throw new HttpError(403, `task ${t.id} belongs to a signed-in account: /funded must name it as owner`);
       if (!chain) throw new HttpError(409, 'only with ROOK_LEDGER=chain');
+      // The agent wallet's transfer is bound by Rook itself once it lands; a second funding would strand one of them.
+      if (fundingActive(t)) throw new HttpError(409, 'This plan is being funded from your agent wallet.');
       if (t.status !== 'approved') throw new HttpError(409, `task is ${t.status}, funded needs approved`);
       const cid = typeof body?.contract_task_id === 'string' ? body.contract_task_id : '';
       if (!/^[0-9a-z]+$/.test(cid)) throw new HttpError(400, 'contract_task_id is required');
-      const bound = chain.contractTaskOf(t.id);
-      if (bound !== null) throw new HttpError(409, `task is already funded by contract task ${bound}`);
-      for (const other of tasks.values()) if (chain.contractTaskOf(other.id) === cid) throw new HttpError(409, `contract task ${cid} already funds ${other.id}`);
-      // Claimed before the await, so two overlapping /funded calls cannot both bind and run.
-      if (claims.has(t.id) || claims.has(`cid:${cid}`)) throw new HttpError(409, `task ${t.id} or contract task ${cid} is already being checked`);
-      claims.add(t.id).add(`cid:${cid}`);
+      await bindFunded(t, cid, t.owner);
+      return { ...taskView(t), contract_task_id: cid };
+    },
+
+    /**
+     * Chain mode: funds a planned task from the owner's agent wallet instead of their own wallet (docs/agent-wallet-plan.md).
+     * Checked here: the plan can be funded, the wallet is set up, the budget fits the per-task limit, the wallet holds
+     * it and its budget has room. Then the task is approved and the steps run in the background (wallet/fund.ts), each
+     * an event; the run starts once the contract task is bound. A failure leaves the plan to be funded again.
+     */
+    'POST /tasks/:id/fund-from-wallet': async ({ params, body }) => {
+      const owner = ownerOf(body?.owner);
+      const t = owned(params.id, owner);
+      if (!chain) throw new HttpError(409, 'only with ROOK_LEDGER=chain');
+      if (!wallets.configured()) throw new HttpError(409, "Rook's agent wallet isn't set up on this server.");
+      if (fundingActive(t)) throw new HttpError(409, 'This plan is being funded from your agent wallet already.');
+      if (t.status !== 'planned') throw new HttpError(409, `task is ${t.status}, funding needs planned`);
+      if (!t.subtasks.length) throw new HttpError(409, 'the plan has no subtasks');
+      if (t.plan?.blocked) throw new HttpError(409, t.plan.blocked);
+      if (isFree(t)) throw new HttpError(409, 'This plan hires no agent, so it needs no funding: approve it to start.');
+      if (beingRevised(t)) throw new HttpError(409, 'Wait for the revised plan below.');
+      const w = wallets.ready(owner);
+      if (!w) throw new HttpError(409, 'Finish setting up your agent wallet first.');
+      const amount = BigInt(t.budget_atomic);
+      const max = w.rules?.per_task_max_usd;
+      if (max !== undefined && amount > usdcAtomic(max)) {
+        throw new HttpError(409, `This task's budget is ${formatUsdc(amount)} USDC, above your limit of ${formatUsdc(usdcAtomic(max))} USDC per task.`);
+      }
+      if (claims.has(t.id)) throw new HttpError(409, `task ${t.id} is already being checked`);
+      claims.add(t.id);
       try {
-        const { task: ct, subtasks } = await call(`${config.urls.chainGateway}/task/${cid}`);
-        const want = expected(t);
-        const bad = [
-          ct.budget !== t.budget_atomic && `budget ${ct.budget} is not ${t.budget_atomic}`,
-          ct.reserve !== want.reserve && `reserve ${ct.reserve} is not ${want.reserve}`,
-          JSON.stringify(ct.caps) !== JSON.stringify(want.caps) && `caps ${JSON.stringify(ct.caps)} are not the plan's ${JSON.stringify(want.caps)}`,
-          (ct.status !== 'Open' || ct.killed) && `contract task is ${ct.killed ? 'killed' : ct.status}`,
-          // A signed-in owner binds only a contract task their own wallet funded, never someone else's matching one.
-          t.owner !== null && ct.funder !== t.owner && `it was funded by ${ct.funder}, not by the task owner ${t.owner}`,
-          subtasks.length > 0 && 'contract task already has funded subtasks',
-        ].filter(Boolean);
-        if (bad.length) throw new HttpError(409, `contract task ${cid} does not match the approved plan: ${bad.join('; ')}`);
-        if (t.status !== 'approved') throw new HttpError(409, `task is ${t.status}, funded needs approved`); // killed meanwhile
-        chain.bind(t.id, cid, want.nmap);
-        t.funder = ct.funder;
-        void runTask(ledger, t).catch((e) => console.error('[orchestrator] runTask', e));
-        return { ...taskView(t), contract_task_id: cid };
+        const c = await contractCfg();
+        // The wallet's policy allows calls on mainnet USDC only (the Agent API is mainnet only).
+        if (c?.usdc !== USDC_CONTRACT) throw new HttpError(409, "The agent wallet pays in NEAR's mainnet USDC, which this Rook's contract doesn't take.");
+        const transfer = await fundingInstructions(t, c, false, w.near_account_id);
+        const [registered, balances, policy] = await Promise.all([
+          call(`${config.urls.chainGateway}/registered?account=${encodeURIComponent(w.near_account_id)}&token=${USDC_CONTRACT}`).then((r: any) => r.registered === true),
+          api.balances(w.agent_id, USDC_ASSET), api.policy(w.agent_id),
+        ]).catch((e) => { throw refusal(e); });
+        // A withdrawal to an account not registered on USDC is refused (executions.md). The user's deposit registers it
+        // (storage_deposit in the same transaction): Rook's own keys are function-call keys, which attach no NEAR.
+        if (!registered) throw new HttpError(409, "Your agent wallet's NEAR account can't receive USDC yet. Make a deposit from your wallet panel first: it registers the account.");
+        if (policy.status !== 'APPLIED' || !policy.provider_policy_synced) throw new HttpError(409, "Your agent wallet's rules are still being applied. Try again in a minute.");
+        const has = BigInt(balances.balances.find((b) => b.asset_id === USDC_ASSET)?.available_raw ?? '0');
+        if (has < amount) throw new HttpError(409, `Your agent wallet holds ${formatUsdc(has)} USDC and this task needs ${formatUsdc(amount)} USDC. Deposit more first.`);
+        const period = w.rules?.budget_usd !== undefined ? w.rules.period ?? 'month' : null;
+        const window = period ? ({ day: 'daily', week: 'weekly', month: 'monthly' } as const)[period] : null;
+        const left = window ? policy.usage.budget[window].remaining_usd : null;
+        if (!budgetCovers(left, amount)) {
+          throw new HttpError(409, `This task needs ${formatUsdc(amount)} USDC and your agent wallet's ${window} budget has ${left} USD left.`);
+        }
+        // The plan moved on while this was read (a revision replaced it, or it was cancelled or approved).
+        if (t.status !== 'planned' || beingRevised(t)) throw new HttpError(409, `task is ${t.status}, funding needs planned`);
+        t.wallet_funding = { state: 'withdrawing', agent_id: w.agent_id, amount_atomic: t.budget_atomic, key: `rook:${t.id}:${randomUUID().slice(0, 8)}` };
+        setStatus(t, 'approved');
+        void runFunding(fundDeps, t, transfer).catch((e) => console.error('[orchestrator] wallet funding', e));
+        return { ...taskView(t), wallet_funding: t.wallet_funding };
       } finally {
-        claims.delete(t.id); claims.delete(`cid:${cid}`);
+        claims.delete(t.id);
       }
     },
+
+    /** The signed-in owner's agent wallet (AgentWalletView); configured false without ROOK_AGENT_API_KEY. */
+    'GET /wallet': ({ query }) => wallets.view(ownerOf(query.get('owner'))),
+
+    /**
+     * One owner intent to sign (OwnerIntentView): agent_create (with the rules and the owner's full-access public key),
+     * policy_update (the wallet's own account as a destination; or new rules), grant_issue (Rook's grant; Rook keeps
+     * the token), approval_vote (approval_id and verdict).
+     */
+    'POST /wallet/intents': async ({ body }) => wallets.generate(IntentBody.parse(body ?? {})),
+
+    /** The wallet's output for an intent Rook issued to this owner: submitted, followed, then the wallet as it is now. */
+    'POST /wallet/intents/:cid/submit': async ({ params, body }) => wallets.submit(ownerOf(body?.owner), params.cid, body?.signed_data),
 
     'POST /tasks/:id/cancel': ({ params, body }) => {
       const t = owned(params.id, body?.owner);
@@ -541,9 +667,26 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     },
   }), port);
 
+  // The chain-gateway may start after this service: until it answers, the funding's transfer can't be read, and a
+  // funding left waiting would hold its USDC on the wallet's account with nothing to move it on.
+  const resume = async (t: Task) => {
+    for (let i = 0; ; i++) {
+      try { return await startFunding(t, true); } catch (e) {
+        if (t.shutdown.signal.aborted || !(e instanceof TypeError || (e instanceof HttpError && e.status >= 500))) throw e;
+        await sleep(Math.min(60_000, gapMs * 2 ** i), t.shutdown.signal);
+      }
+    }
+  };
+  for (const t of resumeFunding) void resume(t).catch((e) => t.shutdown.signal.aborted || console.error('[orchestrator] wallet funding resume', e));
+  // What runs leave on agent wallets' NEAR accounts (refunds at close, a funding that stopped half way) goes back into
+  // their NEAR Intents balances. ponytail: one balance read per set-up wallet per pass, no index of which wallets moved.
+  const sweeps = chain && wallets.configured() ? setInterval(() => void sweeper.pass(), num('ROOK_WALLET_SWEEP_MS', 120_000)) : null;
+  sweeps?.unref();
+
   return {
     ...running,
     close: async () => {
+      if (sweeps) clearInterval(sweeps);
       for (const t of tasks.values()) {
         t.shutdown.abort(); // an unwind stops retrying; the next start resumes it
         if (!isTerminal(t.status)) t.abort.abort(new Error(SHUTDOWN)); // restore depends on it
@@ -601,11 +744,12 @@ type ChainCfg = { contract_id: string | null; usdc: string | null; owner: string
 
 /**
  * What the funder sends: USDC ft_transfer_call to the contract with the plan's caps in msg. Any account funds its own
- * task; `funder` is the signed-in owner who must send it (null for a CLI task: whoever sends it becomes the funder).
+ * task; `funder` is the signed-in owner who must send it (null for a CLI task: whoever sends it becomes the funder), or
+ * the owner's agent wallet account when it funds the task.
  * `reprint`: the task was approved before, so the funder's transfer may already have been sent and count toward the
  * open-task limit; the instructions must still come back (the web app asks again after a reload).
  */
-async function fundingInstructions(t: Task, c: ChainCfg | null, reprint = false) {
+async function fundingInstructions(t: Task, c: ChainCfg | null, reprint = false, funder = t.owner) {
   const want = expected(t);
   if (!want.caps.length) throw new HttpError(409, 'every subtask is self_do: nothing to fund on chain');
   // The contract refuses a cap of 0 and refunds the transfer. Plans drafted before 0 USDC quotes were dropped can carry
@@ -618,10 +762,10 @@ async function fundingInstructions(t: Task, c: ChainCfg | null, reprint = false)
     throw new HttpError(409, `budget ${formatUsdc(BigInt(t.budget_atomic))} USDC is below the contract's minimum of ${formatUsdc(c.min_budget)} USDC`);
   }
   const cfg = await call(`${config.urls.chainGateway}/config`);
-  if (t.owner && c?.max_open_tasks && !reprint) {
+  if (funder && c?.max_open_tasks && !reprint) {
     // The contract refunds a transfer over the limit: say so before the wallet opens.
-    const open = await call<{ open: number }>(`${config.urls.chainGateway}/open-tasks?account=${encodeURIComponent(t.owner)}`).then((r) => r.open, () => 0);
-    if (open >= c.max_open_tasks) throw new HttpError(409, `${t.owner} already has ${open} open tasks on the contract (the limit is ${c.max_open_tasks}); wait for one to close`);
+    const open = await call<{ open: number }>(`${config.urls.chainGateway}/open-tasks?account=${encodeURIComponent(funder)}`).then((r) => r.open, () => 0);
+    if (open >= c.max_open_tasks) throw new HttpError(409, `${funder} already has ${open} open tasks on the contract (the limit is ${c.max_open_tasks}); wait for one to close`);
   }
   return {
     network: cfg.network, contract_id: cfg.contract_id, usdc: cfg.usdc, funder: t.owner, contract_owner: cfg.owner ?? null,
