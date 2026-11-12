@@ -42,13 +42,15 @@ type Op = {
  * `onNearCall`: what NEAR does with a native function call from `account` (Rook's tests move mock-chain balances
  * there); answers the transaction hash, or null for a finalized failure. `onWithdraw`: a withdrawal on chain `near`
  * landing at `recipient`. `registered`: whether a NEAR account can receive the token (a withdrawal to one that can't is
- * refused with 409 invalid_address, as the API does).
+ * refused with 409 invalid_address, as the API does). `port`: where it listens (default any free port; a fixed one for
+ * running it standalone against the web app, services/.ops).
  */
 export async function startAgentApiMock(hooks: {
   key: string;
   onNearCall: (account: string, body: any) => string | null;
   onWithdraw: (recipient: string, amount: bigint) => void;
   registered: (account: string) => boolean;
+  port?: number;
 }) {
   const agents = new Map<string, Agent>();
   const intents = new Map<string, { type: string; body: any; agent_id: string; intent: any; signer: Agent['owner']; done: boolean }>();
@@ -256,7 +258,7 @@ export async function startAgentApiMock(hooks: {
       res.writeHead(out.status, { 'content-type': 'application/json', 'x-request-id': 'req-1' }).end(JSON.stringify(out.body));
     });
   });
-  await new Promise<void>((ok) => server.listen(0, '127.0.0.1', ok));
+  await new Promise<void>((ok) => server.listen(hooks.port ?? 0, '127.0.0.1', ok));
   return {
     url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
     close: () => new Promise<void>((done) => { server.closeAllConnections(); server.close(() => done()); }),
