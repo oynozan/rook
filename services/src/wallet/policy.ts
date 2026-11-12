@@ -14,6 +14,16 @@ export function usdString(n: number): string {
 export const usdcAtomic = (usd: number) => BigInt(Math.round(usd * 1_000_000));
 
 /**
+ * Whether a budget window's `remaining_usd` (the API's decimal string; null: no window) covers `amount` atomic USDC.
+ * Compared in atomic units: as a float, "1.15" times 1e6 is 1149999.99... and refused a 1.15 USDC task.
+ */
+export function budgetCovers(remainingUsd: string | null, amount: bigint): boolean {
+  const m = remainingUsd?.match(/^(\d+)(?:\.(\d{1,6}))?$/);
+  if (!m) return true; // no window, or a shape Rook can't read: the API's own budget check still applies
+  return BigInt(m[1]) * 1_000_000n + BigInt((m[2] ?? '').padEnd(6, '0')) >= amount;
+}
+
+/**
  * The wallet's policy for `rules`. `nearAccountId`: the wallet's own account, once `agent_create` made it known; until
  * then no withdrawal destination exists for it.
  *

@@ -62,16 +62,20 @@ const moving = (s: StatusResponse) => ['PROCESSING', 'QUEUED', 'UNCERTAIN'].incl
 
 /**
  * A money-moving call under one Idempotency-Key: repeated with the same key while the API says it may be retried (or
- * did not answer), as its docs require; a plain refusal is final.
+ * did not answer), as its docs require; a plain refusal is final. A retryable failure "may have taken effect"
+ * (errors.md, retry rules), and only the same key can tell, so it is repeated as long as a status is followed, not
+ * a few seconds.
  */
 async function sent(fn: () => Promise<StatusResponse>, d: FundDeps, signal: AbortSignal): Promise<StatusResponse> {
   for (let i = 0; ; i++) {
     try { return await fn(); } catch (e) {
-      if (!(e instanceof AgentApiError) || !e.retryable || i >= 4) throw e;
-      await sleep(d.gapMs * 2 ** i, signal);
+      if (!(e instanceof AgentApiError) || !e.retryable || i >= 30) throw e;
+      await sleep(Math.min(30_000, d.gapMs * 2 ** i), signal);
     }
   }
 }
+/** A call that failed this way may still have gone through: Rook can't say where the money is. */
+const unknown = (e: unknown) => e instanceof AgentApiError && e.retryable;
 
 /**
  * Runs `t`'s wallet funding from its current step. `transfer`: Rook's contract, its USDC token and the plan's
@@ -105,6 +109,7 @@ export async function runFunding(d: FundDeps, t: Task, transfer: { contract_id: 
           s = await sent(() => d.api.withdraw(w.agent_id, w.grant.token, `${f.key}:withdraw`, body), d, signal);
         } catch (e) {
           if (signal.aborted) throw e;
+          if (unknown(e)) throw new Stop(`Rook couldn't learn whether your agent wallet sent ${sAmount} (${(e as AgentApiError).code}). If it did, the USDC lands on your agent wallet's NEAR account and Rook moves it back into your agent wallet.`);
           throw new Stop(`Your agent wallet refused to send ${sAmount}: ${refusal(e).message} ${IN_WALLET}`);
         }
         f.withdraw_correlation_id = s.correlation_id;
@@ -147,6 +152,7 @@ export async function runFunding(d: FundDeps, t: Task, transfer: { contract_id: 
         try {
           s = await sent(() => d.api.nearCall(w.agent_id, w.grant.token, `${f.key}:transfer`, body), d, signal);
         } catch (e) {
+          if (unknown(e)) throw new Stop(`Rook couldn't learn whether the USDC went from your agent wallet's NEAR account to its contract (${(e as AgentApiError).code}). Check that account before funding again: if it holds the USDC, Rook moves it back into your agent wallet; if not, Rook's contract holds it.`);
           throw new Stop(`Rook couldn't send the USDC from your agent wallet's NEAR account to its contract: ${refusal(e).message} ${ON_NATIVE}`);
         }
         f.call_correlation_id = s.correlation_id;
@@ -170,9 +176,21 @@ export async function runFunding(d: FundDeps, t: Task, transfer: { contract_id: 
           : `Rook couldn't find the contract task transaction ${f.tx_hash} made. Nothing runs until that is checked.`);
       }
       try {
-        await d.bind(t, made.task_id, w.near_account_id);
+        // A chain-gateway blip here must not end the funding: the USDC is already in the contract task.
+        await retried(() => d.bind(t, made.task_id, w.near_account_id), d, t.shutdown.signal);
       } catch (e) {
-        throw new Stop(`Rook's contract holds the USDC as task ${made.task_id}, funded by your agent wallet's NEAR account, but the run could not start: ${(e as Error).message}`);
+        if (t.shutdown.signal.aborted) throw e;
+        // No run will ever close this contract task, and the wallet's NEAR account may only call USDC, so it can't close
+        // it either: Rook closes it (the orchestrator may), and the contract refunds the whole budget to that account,
+        // where the sweep picks it up. One try: a close that failed on chain is not one to repeat blindly.
+        const why = isTerminal(t.status) ? 'the task was stopped' : (e as Error).message;
+        const closed = await call(`${config.urls.chainGateway}/close`, { task_id: made.task_id }).then(() => true, (x) => {
+          console.error(`[wallet] close of unbound contract task ${made.task_id}:`, (x as Error)?.message ?? x);
+          return false;
+        });
+        throw new Stop(closed
+          ? `The USDC reached Rook's contract as task ${made.task_id}, but the run could not start: ${why}. Rook closed that contract task, which sent the USDC back to your agent wallet's NEAR account; Rook moves it back into your agent wallet.`
+          : `Rook's contract holds the USDC as task ${made.task_id}, funded by your agent wallet's NEAR account, but the run could not start: ${why}. Rook's operator can close that contract task to send it back.`);
       }
       f.state = 'bound';
       save();

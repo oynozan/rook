@@ -10,10 +10,10 @@ import { createChainLedger } from './chain-ledger.ts';
 import { createLedger, type Ledger } from './ledger.ts';
 import { blockedBy, contractTaskOf, kill, restoreTask, runTask, SHUTDOWN } from './runner.ts';
 import { openStore } from './db.ts';
-import { agentApi, USDC_ASSET, USDC_CONTRACT } from '../wallet/api.ts';
+import { agentApi, sleep, USDC_ASSET, USDC_CONTRACT } from '../wallet/api.ts';
 import { createSweeper, fundingActive, runFunding, type FundDeps } from '../wallet/fund.ts';
 import { createWallets, IntentBody, refusal } from '../wallet/index.ts';
-import { usdcAtomic } from '../wallet/policy.ts';
+import { budgetCovers, usdcAtomic } from '../wallet/policy.ts';
 import { createWalletStore } from '../wallet/store.ts';
 import {
   ancestors, attempts, emit, fromDoc, headOf, isFree, isTerminal, newTask, openPlan, persistWith, saveTask, setPlan, setStatus, snapshot, taskView, toDoc, verdictHistory, type Task,
@@ -581,7 +581,7 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
         const period = w.rules?.budget_usd !== undefined ? w.rules.period ?? 'month' : null;
         const window = period ? ({ day: 'daily', week: 'weekly', month: 'monthly' } as const)[period] : null;
         const left = window ? policy.usage.budget[window].remaining_usd : null;
-        if (left != null && Number(left) * 1_000_000 < Number(amount)) {
+        if (!budgetCovers(left, amount)) {
           throw new HttpError(409, `This task needs ${formatUsdc(amount)} USDC and your agent wallet's ${window} budget has ${left} USD left.`);
         }
         // The plan moved on while this was read (a revision replaced it, or it was cancelled or approved).
@@ -667,7 +667,17 @@ export async function start(port = config.ports.orchestrator): Promise<Running> 
     },
   }), port);
 
-  for (const t of resumeFunding) void startFunding(t, true).catch((e) => console.error('[orchestrator] wallet funding resume', e));
+  // The chain-gateway may start after this service: until it answers, the funding's transfer can't be read, and a
+  // funding left waiting would hold its USDC on the wallet's account with nothing to move it on.
+  const resume = async (t: Task) => {
+    for (let i = 0; ; i++) {
+      try { return await startFunding(t, true); } catch (e) {
+        if (t.shutdown.signal.aborted || !(e instanceof TypeError || (e instanceof HttpError && e.status >= 500))) throw e;
+        await sleep(Math.min(60_000, gapMs * 2 ** i), t.shutdown.signal);
+      }
+    }
+  };
+  for (const t of resumeFunding) void resume(t).catch((e) => t.shutdown.signal.aborted || console.error('[orchestrator] wallet funding resume', e));
   // What runs leave on agent wallets' NEAR accounts (refunds at close, a funding that stopped half way) goes back into
   // their NEAR Intents balances. ponytail: one balance read per set-up wallet per pass, no index of which wallets moved.
   const sweeps = chain && wallets.configured() ? setInterval(() => void sweeper.pass(), num('ROOK_WALLET_SWEEP_MS', 120_000)) : null;

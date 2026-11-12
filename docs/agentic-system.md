@@ -431,7 +431,10 @@ under the policy) → `awaiting_approval` (with `approval_id`, only with `owner_
 `create_task` msg, as the user's own funding sends) → `bound` (the contract task the transaction created, read from its
 `task_created` event by the chain-gateway's `GET /created-task`, is bound as `/funded` binds one, with the wallet's
 account as funder; the run starts). `failed` has `error` saying where the money is; the task goes back to `planned`
-(or stays `killed`) and can be funded again. A restart resumes a funding at its step under the same Idempotency-Keys.
+(or stays `killed`) and can be funded again. A contract task the transfer created but Rook could not bind (the task
+was stopped meanwhile, or it doesn't match the plan) is closed by Rook through the chain-gateway's `POST /close`, so the
+contract refunds it to the wallet's native account and the sweep moves it back. A restart resumes a funding at its
+step under the same Idempotency-Keys, once the chain-gateway answers.
 While a funding is on its way, `/approve`, `/funded` and deleting the chat are refused.
 
 Each step is a `ledger` event: `wallet_withdraw`, `wallet_approval_needed`, `wallet_transfer`, `wallet_bound`,

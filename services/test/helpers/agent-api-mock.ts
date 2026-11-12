@@ -199,8 +199,12 @@ export async function startAgentApiMock(hooks: {
     });
   }
 
+  const busy = new Map<string, number>(); // path suffix -> POSTs still to answer 503 database_busy
   function route(method: string, path: string, q: URLSearchParams, headers: Record<string, string | undefined>, body: any): { status: number; body: unknown } {
     if (headers.key !== hooks.key) throw new ApiErr(401, 'api_key_invalid', 'auth');
+    for (const [suffix, n] of busy) {
+      if (method === 'POST' && path.endsWith(suffix) && n > 0) { busy.set(suffix, n - 1); throw new ApiErr(503, 'database_busy', 'api', { retryable: true }); }
+    }
     if (method === 'GET' && path === '/v1/whoami') return { status: 200, body: { api_key_id: 'k1', tenant_id: 't1' } };
     if (method === 'POST' && path === '/v1/generate-intent') return generate(body);
     if (method === 'POST' && path === '/v1/submit-intent') return submit(body);
@@ -257,6 +261,8 @@ export async function startAgentApiMock(hooks: {
     url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
     close: () => new Promise<void>((done) => { server.closeAllConnections(); server.close(() => done()); }),
     agents, approvals, requests, intents,
+    /** The next `n` POSTs to a path ending in `suffix` answer 503 database_busy (retryable), taking no effect. */
+    busy(suffix: string, n: number) { busy.set(suffix, n); },
     /** USDC that reached the wallet's NEAR Intents balance (a deposit). */
     deposit(agentId: string, amount: bigint) { agents.get(agentId)!.balance += amount; },
     /** The approval's deadline passed: it settles FAILED (expired), and its budget charge is released. */

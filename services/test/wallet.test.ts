@@ -122,6 +122,8 @@ test('chain-gateway createdTask: the contract task from a succeeded task_created
 
 let orch: Running;
 const calls: string[] = [];
+let gwDown = false; // the chain-gateway's GET /config answers 503, as while it starts
+let gwTask: ((id: string) => unknown) | null = null; // a test's own answer of the chain-gateway's GET /task/:id (undefined: the usual one)
 const paid = new Map<string, bigint>(); // contract task -> what its hires spent
 
 before(async () => {
@@ -147,8 +149,11 @@ before(async () => {
     'POST /reclaim': () => ({ deleted: true }),
   }, 0);
   const mockGw = await serve('mock-chain-gateway', {
-    'GET /config': () => ({ network: 'mainnet', contract_id: CONTRACT, owner: 'owner.test', usdc: USDC_CONTRACT }),
-    'GET /task/:id': ({ params }) => ({ task: contractTasks.get(params.id), subtasks: subs.get(params.id) ?? [] }),
+    'GET /config': () => {
+      if (gwDown) throw new HttpError(503, 'chain-gateway is starting');
+      return { network: 'mainnet', contract_id: CONTRACT, owner: 'owner.test', usdc: USDC_CONTRACT };
+    },
+    'GET /task/:id': ({ params }) => gwTask?.(params.id) ?? { task: contractTasks.get(params.id), subtasks: subs.get(params.id) ?? [] },
     'POST /fund': ({ body }) => {
       const account_id = `t${body.task_id}-${body.n}.${CONTRACT}`, cap = contractTasks.get(body.task_id).caps[body.n - 1];
       (subs.get(body.task_id) ?? subs.set(body.task_id, []).get(body.task_id)!).push({ n: body.n, account_id, cap, status: 'Funded' });
@@ -335,6 +340,52 @@ test('fund from the wallet: refused over the per-task limit, unregistered, or sh
   assert.deepEqual([v.balance_atomic, v.native_balance_atomic, v.budget.spent_usd], ['4550000', '0', 1]);
 });
 
+test('a send the API answers retryable is repeated under the same key until it lands; a chain-gateway blip at the bind is retried', async () => {
+  api.busy('/withdraw', 6); // "may have taken effect": only the same key can tell, so Rook keeps asking with it
+  let blips = 2;
+  gwTask = (id) => {
+    if (blips-- > 0) throw new HttpError(503, 'chain-gateway busy');
+    return undefined;
+  };
+  try {
+    const before = api.requests.length;
+    const t = await call(`${orch.url}/tasks`, { prompt: 'p', budget_usdc: '1', owner: OWNER });
+    await call(`${orch.url}/tasks/${t.id}/fund-from-wallet`, { owner: OWNER });
+    const s = await until(() => snap(t.id), (x: any) => ['closed', 'failed', 'planned'].includes(x.task.status));
+    assert.equal(s.task.status, 'closed', JSON.stringify(s.task.wallet_funding));
+    const keys = api.requests.slice(before).filter((r) => r.path.endsWith('/withdraw')).map((r) => r.idem);
+    assert.equal(keys.length, 7);
+    assert.equal(new Set(keys).size, 1);
+    assert.ok(blips < 0);
+    await until(() => walletOps(t.id), (x) => x.some((e: any) => e.op === 'wallet_swept'));
+  } finally { gwTask = null; }
+});
+
+test('a contract task the funding created but could not bind is closed, and its USDC swept back into the wallet', async () => {
+  const has = api.agents.get(agentId)!.balance;
+  gwTask = (id) => ({ task: { ...contractTasks.get(id), killed: true }, subtasks: [] }); // it can never match the plan
+  try {
+    const t = await call(`${orch.url}/tasks`, { prompt: 'p', budget_usdc: '1', owner: OWNER });
+    await call(`${orch.url}/tasks/${t.id}/fund-from-wallet`, { owner: OWNER });
+    const s = await until(() => snap(t.id), (x: any) => x.task.wallet_funding?.state === 'failed');
+    assert.equal(s.task.status, 'planned');
+    const cid = String(nextTask - 1);
+    assert.equal(contractTasks.get(cid).status, 'Closed'); // Rook closed it: the contract refunded the wallet's account
+    assert.match(s.task.wallet_funding.error, new RegExp(`^The USDC reached Rook's contract as task ${cid}, but the run could not start: .*Rook closed that contract task`));
+    await until(() => walletOps(t.id), (x) => x.some((e: any) => e.op === 'wallet_swept'));
+    assert.equal(native.get(near), 0n);
+    assert.equal(api.agents.get(agentId)!.balance, has); // all of it back in the wallet
+  } finally { gwTask = null; }
+});
+
+test('budgetCovers: the budget window is compared in atomic USDC, not floats', async () => {
+  const { budgetCovers } = await import('../src/wallet/policy.ts');
+  assert.equal(budgetCovers('1.15', 1_150_000n), true); // 1.15 * 1e6 is 1149999.99... as a float
+  assert.equal(budgetCovers('1.149999', 1_150_000n), false);
+  assert.equal(budgetCovers('0', 1n), false);
+  assert.equal(budgetCovers(null, 10n ** 12n), true);
+});
+
 test('owner approval: the withdrawal waits for the vote; approve runs it, reject or expiry leave the plan to fund again', async () => {
   let v = await sign('policy_update', { rules: { budget_usd: 100, per_task_max_usd: 2, approval: 'every' } });
   assert.equal(api.agents.get(agentId)!.policy.owner_approval, true);
@@ -407,7 +458,9 @@ test('a restart picks the wallet funding up where it was: the wallet and its gra
     const waiting = await until(() => snap(t.id, o.url, CAROL), (x: any) => x.task.wallet_funding?.state === 'awaiting_approval');
     const approval_id = waiting.task.wallet_funding.approval_id;
     await o.close(); // a shutdown is not a failure: the funding stays where it was
+    gwDown = true; // and the chain-gateway comes up after Rook: the resume waits for it
     o = await start();
+    setTimeout(() => { gwDown = false; }, 100);
     const back = await wallet(o.url, CAROL);
     assert.deepEqual([back.next_step, back.agent_id, back.pending_approvals.map((x: any) => [x.approval_id, x.task_id])], ['ready', v.agent_id, [[approval_id, t.id]]]);
     assert.deepEqual([(await snap(t.id, o.url, CAROL)).task.status, (await snap(t.id, o.url, CAROL)).task.wallet_funding.state], ['approved', 'awaiting_approval']);
