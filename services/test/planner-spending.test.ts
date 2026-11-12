@@ -35,6 +35,8 @@ test('numbers and durations are read from the user\'s words every way they can b
     assert.ok(daysSaid(text).includes(d), `${text}: ${daysSaid(text)}`);
   }
   assert.deepEqual(daysSaid('Top 10 holders, 3 pages'), []);
+  // A decimal mark is never read as a thousands mark: "2.5" backing a limit of 25 would loosen it tenfold.
+  for (const [text, n] of [['at most 2.5 USDC', 2.5], ['no task over 1,5 dolar', 1.5]] as const) assert.deepEqual(numbersSaid(text), [n], text);
 });
 
 test('rules the user stated are kept; an amount or a duration no message of theirs states is left out with a note', () => {
@@ -157,6 +159,17 @@ test('POST /plan: a message that only states spending rules gets them back as a 
   // Rules the message does not back are no reply at all: Rook says how to write them.
   reply = { subtasks: [], spending: { budget_usd: 750 } };
   await assert.rejects(h.plan({ prompt: 'Keep my spending low' }), (e: any) => e.status === 422 && /couldn't keep the spending rules in your message: write each amount in digits/.test(e.message));
+});
+
+test('POST /plan: a go-ahead that echoes the rules in force unchanged is still a go-ahead, not a rules reply', async (t) => {
+  const { GO_AHEAD } = await import('../src/planner/prompts.ts');
+  const conversation = { earlier: ['Research the NEAR token holders. Ask me before every payment'], revising: true, spending: { approval: 'every' } };
+  let reply: unknown = { subtasks: [], not_a_task: GO_AHEAD, spending: { approval: 'every' } };
+  const h = await harness(t, () => reply);
+  await assert.rejects(h.plan({ prompt: 'yes', conversation }), (e: any) => e.status === 422 && e.message === GO_AHEAD);
+  // A rule the message does change is the reply, whatever else the draft set.
+  reply = { subtasks: [], not_a_task: GO_AHEAD, spending: { approval: 'none' } };
+  assert.deepEqual((await h.plan({ prompt: "yes, and you don't need to ask me any more", conversation })).spending, { approval: 'none' });
 });
 
 test('POST /plan: a task budget and a spending limit in one message: each where it belongs', async (t) => {

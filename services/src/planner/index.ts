@@ -101,7 +101,9 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
   if (!drafted0.length && !questions?.length) {
     // A message that only states how Rook may spend ("from now on, ask me before every payment") is answered with the
     // rules, repeated back: nothing is searched, quoted or funded. The orchestrator keeps them for the conversation.
-    if (stated && spending) {
+    // A go-ahead ("yes", not_a_task) with the rules in force echoed back unchanged is still a go-ahead.
+    const changed = !!spending && (Object.keys({ ...spending, ...conv?.spending }) as (keyof typeof spending)[]).some((k) => spending[k] !== conv?.spending?.[k]);
+    if (stated && spending && (changed || !notATask)) {
       const { questions: _none, ...nothing } = asking([], sent, req.reserve_share, false);
       return { ...nothing, notes: [...refs.notes, ...spendNotes, ...draftNotes], assumptions: assumptions?.length ? assumptions : [describeSpending(spending)], spending, llm_calls: calls };
     }

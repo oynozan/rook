@@ -30,10 +30,11 @@ export function numbersSaid(text: string): number[] {
   const out = new Set<number>();
   for (const m of text.matchAll(/(\d+(?:[.,']\d+)*)(\s*(?:k|bin|thousand)(?![\p{L}\d]))?/giu)) {
     const raw = m[1].replace(/'/g, '');
-    for (const [dec, other] of [['.', ','], [',', '.']]) {
-      let s = raw.split(other).join('');
-      if (s.split(dec).length > 2) s = s.split(dec).join(''); // "1.000.000": every mark groups thousands
-      const n = Number(s.replace(dec, '.'));
+    // A mark groups thousands only before groups of exactly 3 digits: "2.5" is 2.5, never 25 (a limit loosened tenfold).
+    for (const [group, dec] of [[',', '.'], ['.', ',']]) {
+      const g = `\\${group}`, d = `\\${dec}`;
+      if (!new RegExp(`^(?:\\d{1,3}(?:${g}\\d{3})+|\\d+)(?:${d}\\d+)?$`).test(raw)) continue;
+      const n = Number(raw.split(group).join('').replace(dec, '.'));
       if (Number.isFinite(n)) out.add(m[2] ? n * 1000 : n);
     }
   }
