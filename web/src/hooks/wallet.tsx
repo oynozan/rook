@@ -1,6 +1,6 @@
 'use client';
 
-import type { ConnectorAction, NearConnector, SignedMessage, SignMessageParams } from '@hot-labs/near-connect';
+import type { ConnectorAction, NearConnector, NearWalletBase, SignedMessage, SignMessageParams } from '@hot-labs/near-connect';
 import { useRouter } from 'next/navigation';
 import { createContext, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { detail } from '@/lib/errors';
@@ -17,6 +17,12 @@ export type Wallet = {
   disconnect: () => Promise<void>;
   /** Signs and sends one transaction as the signed-in account, and returns the wallet's outcome (some wallets return none). */
   sendTransaction: (tx: { receiverId: string; actions: ConnectorAction[] }) => Promise<unknown>;
+  /** Signs a NEP-413 message as the signed-in account (an agent wallet's off-chain step or vote): no gas, nothing sent. */
+  signMessage: (params: { message: string; recipient: string; nonce: Uint8Array }) => Promise<SignedMessage>;
+  /** Signs NEP-366 delegate actions as the signed-in account, for someone else to relay (the Agent API's sponsor pays). */
+  signDelegateActions: (delegateActions: { receiverId: string; actions: ConnectorAction[] }[]) => Promise<{ signedDelegateActions: string[] }>;
+  /** The public key the wallet signs with, when it tells; null when it doesn't (signMessage's answer names it then). */
+  publicKey: () => Promise<string | null>;
 };
 
 /** The wallet is connected as a different account than the one signed in to Rook. */
@@ -113,6 +119,25 @@ export function WalletProvider({ account: signedIn, children }: { account: strin
     }
   }
 
+  /**
+   * The wallet, connected as the signed-in account. Signed in on an earlier visit, it may not be connected in this
+   * browser any more: it connects first. A wallet on another account is refused, so nothing is signed as it.
+   */
+  async function connectedAs(signedInAs: string | null): Promise<{ wallet: NearWalletBase; account: string; key: string | null }> {
+    if (!signedInAs) throw new Error('Sign in with your NEAR wallet first.');
+    const c = await getConnector();
+    let connected = await c.getConnectedWallet().catch(() => null);
+    if (!connected?.accounts[0]) {
+      await c.connect();
+      connected = await c.getConnectedWallet();
+    }
+    const signer = connected.accounts[0];
+    if (signer?.accountId !== signedInAs) {
+      throw new WalletAccountMismatch(`Your wallet is connected as ${signer?.accountId ?? 'no account'}, but you're signed in to Rook as ${signedInAs}. Switch to ${signedInAs} in your wallet and try again.`);
+    }
+    return { wallet: connected.wallet, account: signedInAs, key: signer.publicKey ?? null };
+  }
+
   const value = useMemo<Wallet>(() => ({
     account, connecting, error,
     async connect() {
@@ -145,19 +170,20 @@ export function WalletProvider({ account: signedIn, children }: { account: strin
       await walletSignOut;
     },
     async sendTransaction(tx) {
-      if (!account) throw new Error('Sign in with your NEAR wallet first.');
-      const c = await getConnector();
-      // Signed in on an earlier visit, the wallet may not be connected in this browser any more: connect it first.
-      let connected = await c.getConnectedWallet().catch(() => null);
-      if (!connected?.accounts[0]) {
-        await c.connect();
-        connected = await c.getConnectedWallet();
-      }
-      const signer = connected.accounts[0]?.accountId;
-      if (signer !== account) {
-        throw new WalletAccountMismatch(`Your wallet is connected as ${signer ?? 'no account'}, but you're signed in to Rook as ${account}. Switch to ${account} in your wallet and try again.`);
-      }
-      return connected.wallet.signAndSendTransaction({ ...tx, network: NETWORK, signerId: account });
+      const { wallet, account: signerId } = await connectedAs(account);
+      return wallet.signAndSendTransaction({ ...tx, network: NETWORK, signerId });
+    },
+    async signMessage(params) {
+      const { wallet, account: signerId } = await connectedAs(account);
+      return wallet.signMessage({ ...params, network: NETWORK, signerId });
+    },
+    async signDelegateActions(delegateActions) {
+      const { wallet, account: signerId } = await connectedAs(account);
+      return wallet.signDelegateActions({ delegateActions, network: NETWORK, signerId });
+    },
+    async publicKey() {
+      const { key } = await connectedAs(account);
+      return key;
     },
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }), [account, connecting, error]);

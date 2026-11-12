@@ -5,6 +5,9 @@ import { useEffect, useRef, useState } from 'react';
 import { useEase } from '@/hooks/useEase';
 import { UserAvatar } from '@/components/app/UserAvatar';
 import { NETWORK, useWallet } from '@/hooks/wallet';
+import { useAgentWallet } from '@/hooks/agent-wallet';
+import { walletReady } from '@/lib/agent-wallet';
+import { usdc } from '@/lib/funding';
 
 /** Named accounts read as they are; 64-character implicit ones keep their ends. */
 const shortAccount = (id: string) => (id.length > 20 ? `${id.slice(0, 6)}…${id.slice(-6)}` : id);
@@ -12,6 +15,8 @@ const shortAccount = (id: string) => (id.length > 20 ? `${id.slice(0, 6)}…${id
 export function AccountMenu({ account, onDisconnect }: { account: string; onDisconnect: () => void }) {
   const [open, setOpen] = useState(false);
   const ease = useEase();
+  const agent = useAgentWallet();
+  const view = agent.view;
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
 
@@ -52,10 +57,23 @@ export function AccountMenu({ account, onDisconnect }: { account: string; onDisc
           className="absolute inset-x-0 bottom-full z-10 mb-2 rounded-2xl border border-ink/15 bg-surface p-4 shadow-lg shadow-ink/10">
           <p className="text-sm text-ink/65">Connected on NEAR {NETWORK}</p>
           <p className="mt-1 font-mono text-sm break-all">{account}</p>
+          {/* Only when the services have an Agent API key: otherwise there is no agent wallet to open. */}
+          {view?.configured && (
+            <button
+              type="button"
+              onClick={() => { setOpen(false); agent.openPanel(); }}
+              className="mt-3 flex min-h-10 w-full cursor-pointer items-center justify-between gap-2 rounded-full border border-ink/25 px-4 font-medium transition-colors hover:border-ink hover:bg-ink/5 focus-visible:border-ink active:translate-y-px motion-reduce:transition-none"
+            >
+              <span>Agent wallet</span>
+              <span className="text-sm font-normal text-ink/65 tabular-nums">
+                {view.pending_approvals.length ? `${view.pending_approvals.length} to approve` : walletReady(view) ? `${usdc(view.balance_atomic ?? '0')} USDC` : view.status === 'none' ? 'Not set up' : 'Setting up'}
+              </span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => { setOpen(false); onDisconnect(); }}
-            className="mt-3 min-h-10 w-full cursor-pointer rounded-full border border-ink/25 px-4 font-medium transition-colors hover:border-ink hover:bg-ink/5 focus-visible:border-ink active:translate-y-px motion-reduce:transition-none"
+            className={`${view?.configured ? 'mt-2' : 'mt-3'} min-h-10 w-full cursor-pointer rounded-full border border-ink/25 px-4 font-medium transition-colors hover:border-ink hover:bg-ink/5 focus-visible:border-ink active:translate-y-px motion-reduce:transition-none`}
           >
             Disconnect
           </button>

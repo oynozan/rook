@@ -10,6 +10,7 @@ import { ThemeToggle } from '@/components/ui/theme-toggle';
 import { conversationIds, shownTasks } from '@/lib/chat-actions';
 import { chatDates, conversations } from '@/lib/conversations';
 import { DeleteChatDialog, TrashIcon, type ChatRef } from '@/components/app/DeleteChat';
+import { AgentWalletDialog } from '@/components/app/AgentWallet';
 import { useMode } from '@/hooks/mode';
 import type { TaskSummary } from '@/lib/server/orchestrator';
 import { useEase } from '@/hooks/useEase';
@@ -361,6 +362,7 @@ export function AppShell({ tasks, children }: { tasks: TaskSummary[] | null; chi
 
       <DeleteChatDialog key={deleting?.id ?? ''} chat={deleting} onClose={closeDelete} onDeleted={onDeleted}
         onOpenTask={(task) => { setDeleting(null); setDrawer(false); go(`/app/${task}`); }} />
+      <AgentWalletDialog />
 
       <div className="rook-glow relative flex min-w-0 flex-1 flex-col">
         {wallet.account && <ThemeToggle className="absolute top-2.5 right-3 z-10 sm:top-3 md:right-5" />}

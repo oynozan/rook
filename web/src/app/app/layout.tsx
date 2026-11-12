@@ -5,6 +5,7 @@ import { ModeProvider } from '@/hooks/mode';
 import { getMode, listTasks, whyUnreachable } from '@/lib/server/orchestrator';
 import { currentAccount } from '@/lib/server/session';
 import { WalletProvider } from '@/hooks/wallet';
+import { AgentWalletProvider } from '@/hooks/agent-wallet';
 
 export const dynamic = 'force-dynamic';
 
@@ -18,10 +19,12 @@ export default async function AppLayout({ children }: { children: ReactNode }) {
   return (
     <ModeProvider mode={mode} down={down}>
       <WalletProvider account={owner}>
-        <AppShell tasks={tasks}>
-          <Chat tasks={tasks} />
-          {children}
-        </AppShell>
+        <AgentWalletProvider>
+          <AppShell tasks={tasks}>
+            <Chat tasks={tasks} />
+            {children}
+          </AppShell>
+        </AgentWalletProvider>
       </WalletProvider>
     </ModeProvider>
   );
