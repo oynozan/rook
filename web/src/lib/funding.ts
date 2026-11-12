@@ -409,10 +409,12 @@ export async function untilFinal<T extends { ok: boolean; message?: string }>(ru
 /**
  * Whether a task's money ever moved, so its run started: a ledger snapshot, a receipt, a hire, or a ledger event. The
  * kill's own ledger line doesn't count: runner.ts kill() adds it even to a task stopped before its funding was bound.
+ * Nor do the agent wallet's funding steps before the bind (wallet_withdraw, wallet_approval_needed, wallet_transfer,
+ * wallet_failed): the budget is still on its way to the contract, and the page shows those steps, with the vote.
  */
 export const moneyMoved = (snap: { ledger: unknown; receipts: unknown[] }, events: { type: string; data?: { op?: string } }[]) =>
   !!snap.ledger || snap.receipts.length > 0
-  || events.some((e) => e.type === 'hire_sent' || e.type === 'receipt' || (e.type === 'ledger' && e.data?.op !== 'kill'));
+  || events.some((e) => e.type === 'hire_sent' || e.type === 'receipt' || (e.type === 'ledger' && e.data?.op !== 'kill' && !(e.data?.op?.startsWith('wallet_') && e.data.op !== 'wallet_bound')));
 
 /** Closing the wallet or declining is a choice, not a failure. */
 export const isWalletCancel = (message: string) => /clos|cancel|reject|denied|declin/i.test(message);

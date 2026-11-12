@@ -278,6 +278,9 @@ test('a task stopped before its funding was bound never ran, though the kill add
   assert.equal(moneyMoved(none, [{ type: 'task_status' }, { type: 'ledger', data: { op: 'kill' } }]), false);
   assert.equal(moneyMoved(none, [{ type: 'ledger', data: { op: 'restored' } }]), true);
   assert.equal(moneyMoved(none, [{ type: 'hire_sent' }]), true);
+  // Funding from the agent wallet: its steps before the bind are no run (browser QA: "Running" hid the Approve button).
+  for (const op of ['wallet_withdraw', 'wallet_approval_needed', 'wallet_transfer', 'wallet_failed']) assert.equal(moneyMoved(none, [{ type: 'ledger', data: { op } }]), false, op);
+  assert.equal(moneyMoved(none, [{ type: 'ledger', data: { op: 'wallet_bound' } }]), true);
   assert.equal(moneyMoved({ ledger: null, receipts: [{}] }, []), true);
   assert.equal(moneyMoved({ ledger: { spent_atomic: '0' }, receipts: [] }, []), true);
 });
