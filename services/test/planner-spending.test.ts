@@ -197,6 +197,19 @@ test('POST /plan: an amount the message mentions, read as the total but not in a
   assert.ok(p.notes.includes("Rook kept this task's budget at 3.00 USDC, the budget sent with your message: it didn't take the 5.00 USDC you mention as this task's total. If you meant that, say 'make it 5.00 USDC', or send your next message with that budget."), p.notes.join('\n'));
 });
 
+test('POST /plan: a limit the model gives "per task" is the per-task limit, and its line that it took that total as the budget is dropped', async (t) => {
+  // Browser QA 2026-11-12: period "task" was left out and the 5 USD read as a monthly limit, beside "Budget set to 5.00 USDC as you asked".
+  const h = await harness(t, () => ({
+    subtasks: [sub('Copy')], budget_usdc: 5, spending: { budget_usd: 5, period: 'task', approval: 'every' },
+    assumptions: ['The description is generic copy.', 'Budget set to 5.00 USDC as you asked.'],
+  }));
+  const p = await h.plan({ prompt: 'Write a two-sentence product description for a reusable water bottle. Only spend $5 and ask me before paying.' });
+  assert.deepEqual(p.spending, { per_task_max_usd: 5, approval: 'every' });
+  assert.equal(p.budget.budget_atomic, '3000000');
+  assert.deepEqual(p.assumptions, ['The description is generic copy.']);
+  assert.ok(!p.notes.some((n: string) => /period|monthly/.test(n)), p.notes.join('\n'));
+});
+
 test('POST /plan: the conversation\'s rules carry into a later plan, its questions too, and a change applies on top', async (t) => {
   let reply: unknown = { subtasks: [sub('Holders')] };
   const h = await harness(t, () => reply);

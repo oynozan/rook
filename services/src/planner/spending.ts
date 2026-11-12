@@ -83,7 +83,11 @@ export function readSpending(raw: unknown, said: string[], carried: SpendingRule
   }
   const amounts = said.flatMap(numbersSaid), days = said.flatMap(daysSaid);
   const stated: SpendingRules = {};
-  for (const [k, v0] of Object.entries(raw)) {
+  // "Only spend $5" on a task, which a model writes as a budget "per task": that is the per-task limit, not a monthly one.
+  const r = raw as Record<string, unknown>;
+  const perTask = typeof r.period === 'string' && /^(?:per[\s_-]*|each[\s_-]*|one[\s_-]*)?(?:task|job)s?$/i.test(r.period.trim()) && r.budget_usd != null && r.per_task_max_usd == null;
+  const fields = perTask ? Object.entries({ ...r, period: undefined, budget_usd: undefined, per_task_max_usd: r.budget_usd }) : Object.entries(raw);
+  for (const [k, v0] of fields) {
     if (v0 == null) continue; // the model's way of saying "none"
     if (!FIELDS.includes(k as Field)) { notes.push(`the draft gave a spending rule Rook doesn't know (${k.slice(0, 40)}): left out`); continue; }
     const f = k as Field;

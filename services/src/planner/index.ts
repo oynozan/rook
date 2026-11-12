@@ -14,7 +14,7 @@ import {
 import { BUDGET_HOW, aggregate, draft, select, selfDo } from './prompts.ts';
 import { AggregateIn, agentOf, isMerged } from './canned.ts';
 import { readReferences } from './reference.ts';
-import { describeSpending, readSpending } from './spending.ts';
+import { describeSpending, numbersSaid, readSpending } from './spending.ts';
 
 const gw = () => config.urls.marketGateway;
 
@@ -92,7 +92,7 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
   // The parts of the plan being revised, with their criteria and the rest of each part as the orchestrator sends it.
   const parts = conv?.plan ?? [];
   const refs = await readReferences(conv?.revising && !conv.plan?.length ? [req.prompt, ...[...conv.earlier].reverse()] : [req.prompt]);
-  const { draft: drafted0, notATask, questions, assumptions, notes: draftNotes, budgetAtomic: drafted, action: draftAction, spending: rawSpending } = await llmStep(calls, () => draft(req.prompt, sent, sent - share(sent, req.reserve_share), conv, refs));
+  const { draft: drafted0, notATask, questions, assumptions: assumed, notes: draftNotes, budgetAtomic: drafted, action: draftAction, spending: rawSpending } = await llmStep(calls, () => draft(req.prompt, sent, sent - share(sent, req.reserve_share), conv, refs));
   // The conversation's spending rules, with the ones this message states on top: every amount from the user's own
   // messages, never the model's (spending.ts). Every plan carries them, so the next message keeps them.
   const spendNotes: string[] = [];
@@ -105,7 +105,7 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
     const changed = !!spending && (Object.keys({ ...spending, ...conv?.spending }) as (keyof typeof spending)[]).some((k) => spending[k] !== conv?.spending?.[k]);
     if (stated && spending && (changed || !notATask)) {
       const { questions: _none, ...nothing } = asking([], sent, req.reserve_share, false);
-      return { ...nothing, notes: [...refs.notes, ...spendNotes, ...draftNotes], assumptions: assumptions?.length ? assumptions : [describeSpending(spending)], spending, llm_calls: calls };
+      return { ...nothing, notes: [...refs.notes, ...spendNotes, ...draftNotes], assumptions: assumed?.length ? assumed : [describeSpending(spending)], spending, llm_calls: calls };
     }
     const unread = rawSpending != null ? "Rook couldn't keep the spending rules in your message: write each amount in digits, like 'only spend 1000 USDC a month'." : undefined;
     throw new HttpError(422, notATask || unread || 'This does not read as a task Rook can plan: say what you want done.', { llm_calls: calls });
@@ -124,6 +124,10 @@ async function plan(body: unknown, progress: (p: PlanProgress) => void = () => {
       : moneyAmounts(req.prompt).includes(drafted)
         ? `Rook kept this task's budget at ${formatUsdc(sent)} USDC, the budget sent with your message: it didn't take the ${formatUsdc(drafted)} USDC you mention as this task's total. If you meant that, say 'make it ${formatUsdc(drafted)} USDC', or send your next message with that budget.`
         : `Rook kept the budget at ${formatUsdc(sent)} USDC: your message doesn't name a total of ${formatUsdc(drafted)} USDC. ${BUDGET_HOW}`] : [];
+  // The model's own line that it took that total ("Budget set to 5.00 USDC as you asked") would contradict the note.
+  const assumptions = ignored.length
+    ? assumed?.filter((a) => !(/budget/i.test(a) && numbersSaid(a).some((n) => BigInt(Math.round(n * 1_000_000)) === drafted)))
+    : assumed;
   const problem = named === undefined ? null : namedBudgetProblem(named, BigInt(req.min_budget_atomic ?? '0'), config.maxBudgetAtomic);
   if (problem) throw new HttpError(422, problem, { llm_calls: calls });
   const budget = named ?? sent;
