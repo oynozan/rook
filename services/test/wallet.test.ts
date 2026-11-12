@@ -373,6 +373,7 @@ test('a contract task the funding created but could not bind is closed, and its 
     const cid = String(nextTask - 1);
     assert.equal(contractTasks.get(cid).status, 'Closed'); // Rook closed it: the contract refunded the wallet's account
     assert.match(s.task.wallet_funding.error, new RegExp(`^The USDC reached Rook's contract as task ${cid}, but the run could not start: .*Rook closed that contract task`));
+    assert.notEqual(s.task.status, 'failed'); // the USDC came back: not a stop for the double-funding guard
     await until(() => walletOps(t.id), (x) => x.some((e: any) => e.op === 'wallet_swept'));
     assert.equal(native.get(near), 0n);
     assert.equal(api.agents.get(agentId)!.balance, has); // all of it back in the wallet
@@ -388,8 +389,13 @@ test('a transfer that went through but whose contract task cannot be read says t
     const s = await until(() => snap(t.id), (x: any) => x.task.wallet_funding?.state === 'failed');
     const { error, tx_hash } = s.task.wallet_funding;
     assert.ok(tx_hash);
-    assert.ok(error.startsWith(`Your agent wallet's NEAR account sent 1.00 USDC to Rook's contract (transaction ${tx_hash}), but Rook couldn't read the contract task it made: NEAR didn't show that transaction in time. Check that transaction before funding this plan again`), error);
+    assert.ok(error.startsWith(`Your agent wallet's NEAR account sent 1.00 USDC to Rook's contract (transaction ${tx_hash}), but Rook couldn't read the contract task it made: NEAR didn't show that transaction in time.`), error);
+    assert.match(error, /this plan stops here: check that transaction, then send the task again.$/);
     assert.doesNotMatch(error, /TIMEOUT_ERROR|is on your agent wallet's NEAR account/);
+    // USDC that may sit in a contract task never leaves the plan fundable: a second funding would pay twice.
+    assert.equal(s.task.status, 'failed');
+    await assert.rejects(call(`${orch.url}/tasks/${t.id}/fund-from-wallet`, { owner: OWNER }));
+    await assert.rejects(call(`${orch.url}/tasks/${t.id}/approve`, { owner: OWNER }));
   } finally { gwCreated = null; }
   // What did reach the contract is not this test's: the next tests start from a wallet without that open contract task.
   for (const [id, ct] of contractTasks) if (ct.status === 'Open' && ct.funder === near) ct.status = 'Closed';

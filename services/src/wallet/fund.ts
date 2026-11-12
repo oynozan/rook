@@ -86,13 +86,18 @@ export async function runFunding(d: FundDeps, t: Task, transfer: { contract_id: 
   const signal = t.abort.signal;
   const op = (name: string, data: object = {}) => emit(t, 'ledger', { op: name, ...data }, undefined, isTerminal(t.status));
   const save = () => saveTask(t);
+  // The transfer reached Rook's contract and nothing sent it back (refused, or closed by Rook): see fail.
+  let returned = false;
   const fail = (message: string) => {
     Object.assign(f, { state: 'failed', error: message });
     delete f.approval_id;
     save();
     op('wallet_failed', { message });
-    // Nothing reached the contract: the plan can be funded again, from the wallet or by the user's own.
-    if (!isTerminal(t.status)) setStatus(t, 'planned');
+    // Nothing reached the contract, or it came back: the plan can be funded again, from the wallet or by the user's own.
+    // USDC that may still sit in a contract task ends the task instead: offered again, a second click funded it twice.
+    if (f.tx_hash && !returned) {
+      if (!isTerminal(t.status)) { t.error = message; setStatus(t, 'failed'); }
+    } else if (!isTerminal(t.status)) setStatus(t, 'planned');
     void d.sweep?.(t.owner!);
   };
   const w = d.wallets.ready(t.owner!);
@@ -175,9 +180,10 @@ export async function runFunding(d: FundDeps, t: Task, transfer: { contract_id: 
           if (t.shutdown.signal.aborted) throw e;
           const why = /TIMEOUT|NOT_OBSERVED|UNKNOWN_TRANSACTION/.test((e as Error)?.message ?? '') ? "NEAR didn't show that transaction in time" : "Rook's chain-gateway couldn't read it";
           console.error(`[wallet] created task of ${f.tx_hash}:`, (e as Error)?.message ?? e);
-          throw new Stop(`Your agent wallet's NEAR account sent ${sAmount} to Rook's contract (transaction ${f.tx_hash}), but Rook couldn't read the contract task it made: ${why}. Check that transaction before funding this plan again: Rook's contract holds the USDC, unless it refused it and sent it back to that account, from where Rook moves it into your agent wallet.`);
+          throw new Stop(`Your agent wallet's NEAR account sent ${sAmount} to Rook's contract (transaction ${f.tx_hash}), but Rook couldn't read the contract task it made: ${why}. Rook's contract holds the USDC, unless it refused it and sent it back to that account, from where Rook moves it into your agent wallet. So that it is never funded twice, this plan stops here: check that transaction, then send the task again.`);
         });
       if (!made.found) {
+        returned = !!made.refunded;
         throw new Stop(made.refunded
           ? `Rook's contract refused the transfer (${made.refunded}), so the USDC went back. ${ON_NATIVE}`
           : `Rook couldn't find the contract task transaction ${f.tx_hash} made. Nothing runs until that is checked.`);
@@ -195,6 +201,7 @@ export async function runFunding(d: FundDeps, t: Task, transfer: { contract_id: 
           console.error(`[wallet] close of unbound contract task ${made.task_id}:`, (x as Error)?.message ?? x);
           return false;
         });
+        returned = closed;
         throw new Stop(closed
           ? `The USDC reached Rook's contract as task ${made.task_id}, but the run could not start: ${why}. Rook closed that contract task, which sent the USDC back to your agent wallet's NEAR account; Rook moves it back into your agent wallet.`
           : `Rook's contract holds the USDC as task ${made.task_id}, funded by your agent wallet's NEAR account, but the run could not start: ${why}. Rook's operator can close that contract task to send it back.`);
