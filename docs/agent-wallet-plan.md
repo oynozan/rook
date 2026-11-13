@@ -90,6 +90,9 @@ from their NEAR wallet, one click), and Rook registers the wallet's native accou
 ## What only the user can do
 
 - Create the partner API key at https://partners.near-intents.org/ and put it in `ROOK_AGENT_API_KEY` (server env only).
+  Until the Agent API leaves its pre-production phase (NEAR devops, 2026-11-13), use the demo hosts instead: the key from
+  https://partners.demo.agentsonintents.com and `ROOK_AGENT_API_URL=https://api.demo.agentsonintents.com`. The demo
+  API still calls itself a mainnet-only beta, so it moves real funds.
 - Sign the three setup intents and the approvals with their NEAR wallet.
 
 ## Open questions to check against the live API
