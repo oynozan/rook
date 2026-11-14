@@ -27,6 +27,8 @@ export function budgetCovers(remainingUsd: string | null, amount: bigint): boole
  * The wallet's policy for `rules`. `nearAccountId`: the wallet's own account, once `agent_create` made it known; until
  * then no withdrawal destination exists for it.
  *
+ * - `confidential: true`: the API refuses a new policy without it. The owner's deposit (ft_transfer_call to intents.near)
+ *   lands in the legacy public balance, which a withdrawal with `confidential: false` still pays from.
  * - `actions: [withdraw]`: the only money action Rook needs, the move of a task's budget to the wallet's native account.
  *   That withdrawal is where the budget, the per-task limit and the owner's approval apply.
  * - `assets`: USDC, and wNEAR only because the provider counts the 1 yoctoNEAR an `ft_transfer_call` attaches as wNEAR.
@@ -46,7 +48,7 @@ export function policyFor(rules: SpendingRules, nearAccountId: string | null, us
   return {
     frozen: false,
     actions: ['withdraw'],
-    confidential: false,
+    confidential: true, // required in every new policy (references/policy.md, 2026-11-13); deposits to intents.near still land in the public balance
     owner_approval: rules.approval === 'every',
     assets: [asset, WNEAR_ASSET],
     limits: rules.per_task_max_usd === undefined ? {} : { per_transaction: { [asset]: usdcAtomic(rules.per_task_max_usd).toString() } },

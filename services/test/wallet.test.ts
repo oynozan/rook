@@ -314,7 +314,7 @@ test('fund from the wallet: refused over the per-task limit, unregistered, or sh
 
   // The withdrawal went to the wallet's own account, the call to USDC with the plan's create_task msg, both under the grant.
   const w = api.requests.find((r) => r.path.endsWith('/withdraw'))!;
-  assert.deepEqual(w.body, { asset: USDC_ASSET, amount: '1000000', chain: 'near', recipient: near });
+  assert.deepEqual(w.body, { asset: USDC_ASSET, amount: '1000000', chain: 'near', recipient: near, confidential: false }); // from the public balance the deposit lands in
   const c = api.requests.find((r) => r.path.endsWith('/native/near/call'))!;
   assert.deepEqual(c.body, {
     receiver_id: USDC_CONTRACT, method_name: 'ft_transfer_call', gas: '100000000000000', deposit: '1',

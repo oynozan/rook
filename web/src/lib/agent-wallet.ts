@@ -219,6 +219,28 @@ export const depositTransaction = (token: string, wallet_account: string, amount
   }],
 });
 
+/**
+ * NEAR for gas: the wallet's own account pays for its contract calls (the transfer to Rook's contract, the sweep back),
+ * else the API refuses with custody_native_balance_required. A deposit tops it up to 0.1 NEAR when it holds under 0.05.
+ */
+export const GAS_NEAR_LOW = 50_000_000_000_000_000_000_000n;
+export const gasTopUp = (wallet_account: string) => ({
+  receiverId: wallet_account,
+  actions: [{ type: 'Transfer' as const, params: { deposit: '100000000000000000000000' } }],
+});
+
+/** NEAR `account` holds, in yocto; 0 for an account that doesn't exist yet (a transfer creates an implicit one). */
+export async function nearBalance(rpc: string, account: string, fetchImpl: typeof fetch = fetch): Promise<bigint> {
+  const r = await fetchImpl(rpc, {
+    method: 'POST', headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ jsonrpc: '2.0', id: 'rook', method: 'query', params: { request_type: 'view_account', finality: 'final', account_id: account } }),
+  });
+  const j = await r.json() as { result?: { amount?: string }; error?: { cause?: { name?: string } } };
+  if (j.error?.cause?.name === 'UNKNOWN_ACCOUNT') return 0n;
+  if (!/^\d+$/.test(j.result?.amount ?? '')) throw new Error('view_account returned no amount');
+  return BigInt(j.result!.amount!);
+}
+
 /** The amount typed for a deposit, in atomic USDC, or what to fix. */
 export function parseDeposit(input: string): { ok: true; atomic: string } | { ok: false; error: string } {
   const b = parseBudget(input);

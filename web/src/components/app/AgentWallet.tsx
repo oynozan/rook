@@ -5,10 +5,11 @@
 import { useEffect, useId, useRef, useState } from 'react';
 import { ActionButton } from '@/components/app/controls';
 import {
-  approvalLine, budgetLeftLine, depositProblem, depositTransaction, intentHeadline, parseDeposit, policyLines, rulesAskedLine, rulesSentence, setupSteps,
+  approvalLine, budgetLeftLine, depositProblem, depositTransaction, GAS_NEAR_LOW, gasTopUp, intentHeadline, nearBalance, parseDeposit, policyLines, rulesAskedLine, rulesSentence, setupSteps,
   USDC_MAINNET, walletReady,
 } from '@/lib/agent-wallet';
 import { isWalletCancel, usdc } from '@/lib/funding';
+import { rpcFor } from '@/lib/network';
 import { detail } from '@/lib/errors';
 import type { AgentWalletView, OwnerIntentView, SpendingRules } from '@/lib/server/orchestrator';
 import { useAgentWallet, WalletStepError, type SetupFrom } from '@/hooks/agent-wallet';
@@ -158,11 +159,14 @@ export function AgentWalletDialog() {
     const a = parseDeposit(amount);
     if (!a.ok) { setError(a.error); return; }
     if (!token || !view?.near_account_id) return;
+    // Gas for the wallet's own contract calls first; a read that fails tops up anyway (0.1 NEAR at most).
+    const topUp = await nearBalance(rpcFor(network), view.near_account_id).catch(() => 0n) < GAS_NEAR_LOW;
+    if (topUp) await wallet.sendTransaction(gasTopUp(view.near_account_id));
     const outcome = await wallet.sendTransaction(depositTransaction(token, view.near_account_id, a.atomic));
     const why = depositProblem(outcome);
     if (why) { setError(`The deposit didn't go through: ${why}.`); return; }
     setAmount('');
-    setNote(`Sent ${usdc(a.atomic)} USDC. It shows in the balance within a minute.`);
+    setNote(`Sent ${usdc(a.atomic)} USDC${topUp ? ', and 0.1 NEAR for its gas' : ''}. It shows in the balance within a minute.`);
     await agent.refresh();
   });
 

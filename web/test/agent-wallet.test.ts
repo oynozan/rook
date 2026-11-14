@@ -236,3 +236,13 @@ test('each setup signature is said in Rook\'s words before the wallet opens', ()
   assert.match(intentHeadline('policy_update', 'alice.near'), /its own NEAR account/);
   assert.match(intentHeadline('grant_issue', null), /^Give Rook a spending key/);
 });
+
+test('gas for the wallet account: 0.1 NEAR sent to it; its balance read from NEAR, 0 for an account not made yet', async () => {
+  const { gasTopUp, nearBalance, GAS_NEAR_LOW } = await import('../src/lib/agent-wallet.ts');
+  assert.deepEqual(gasTopUp('ab'.repeat(32)), { receiverId: 'ab'.repeat(32), actions: [{ type: 'Transfer', params: { deposit: '100000000000000000000000' } }] });
+  const answer = (j: unknown) => (async () => new Response(JSON.stringify(j))) as unknown as typeof fetch;
+  assert.equal(await nearBalance('rpc', 'a', answer({ result: { amount: '7' } })), 7n);
+  assert.equal(await nearBalance('rpc', 'a', answer({ error: { cause: { name: 'UNKNOWN_ACCOUNT' } } })), 0n);
+  await assert.rejects(nearBalance('rpc', 'a', answer({ error: { cause: { name: 'TIMEOUT_ERROR' } } })));
+  assert.ok(GAS_NEAR_LOW < 100_000_000_000_000_000_000_000n);
+});

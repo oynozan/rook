@@ -111,7 +111,7 @@ export function agentApi(opts: { url?: string; key?: string } = {}) {
     grants: (id: string) => req<{ data: GrantView[] }>('GET', `${agent(id)}/grants`),
     approvals: (id: string) => req<{ data: ApprovalView[] }>('GET', `${agent(id)}/approvals`),
     /** 202 StatusResponse. Needs the grant and an Idempotency-Key persisted before the call. */
-    withdraw: (id: string, grant: string, idem: string, body: { asset: string; amount: string; chain: string; recipient: string; memo?: string }) =>
+    withdraw: (id: string, grant: string, idem: string, body: { asset: string; amount: string; chain: string; recipient: string; memo?: string; confidential?: boolean }) =>
       req<StatusResponse>('POST', `${agent(id)}/withdraw`, { body, grant, idem, timeoutMs: SETTLE_MS }),
     /** 202 StatusResponse: a function call from the wallet's native NEAR account on a contract the policy lists. */
     nearCall: (id: string, grant: string, idem: string, body: { receiver_id: string; method_name: string; args?: object; gas?: string; deposit?: string }) =>

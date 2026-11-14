@@ -108,7 +108,8 @@ export async function runFunding(d: FundDeps, t: Task, transfer: { contract_id: 
     if (f.state === 'withdrawing' || f.state === 'awaiting_approval') {
       if (!f.withdraw_correlation_id) {
         signal.throwIfAborted();
-        const body = { asset: USDC_ASSET, amount: f.amount_atomic, chain: 'near', recipient: w.near_account_id };
+        // ponytail: from the public balance, where the owner's intents.near deposit lands; a 1Click deposit (confidential) would need the default.
+        const body = { asset: USDC_ASSET, amount: f.amount_atomic, chain: 'near', recipient: w.near_account_id, confidential: false };
         let s: StatusResponse;
         try {
           s = await sent(() => d.api.withdraw(w.agent_id, w.grant.token, `${f.key}:withdraw`, body), d, signal);
