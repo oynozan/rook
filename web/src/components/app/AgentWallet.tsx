@@ -159,14 +159,14 @@ export function AgentWalletDialog() {
     const a = parseDeposit(amount);
     if (!a.ok) { setError(a.error); return; }
     if (!token || !view?.near_account_id) return;
-    // Gas for the wallet's own contract calls first; a read that fails tops up anyway (0.1 NEAR at most).
+    // Gas for the wallet's own contract calls first; a read that fails tops up anyway (0.2 NEAR at most).
     const topUp = await nearBalance(rpcFor(network), view.near_account_id).catch(() => 0n) < GAS_NEAR_LOW;
     if (topUp) await wallet.sendTransaction(gasTopUp(view.near_account_id));
     const outcome = await wallet.sendTransaction(depositTransaction(token, view.near_account_id, a.atomic));
     const why = depositProblem(outcome);
     if (why) { setError(`The deposit didn't go through: ${why}.`); return; }
     setAmount('');
-    setNote(`Sent ${usdc(a.atomic)} USDC${topUp ? ', and 0.1 NEAR for its gas' : ''}. It shows in the balance within a minute.`);
+    setNote(`Sent ${usdc(a.atomic)} USDC${topUp ? ', and 0.2 NEAR for its gas' : ''}. It shows in the balance within a minute.`);
     await agent.refresh();
   });
 

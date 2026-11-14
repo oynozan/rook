@@ -221,12 +221,12 @@ export const depositTransaction = (token: string, wallet_account: string, amount
 
 /**
  * NEAR for gas: the wallet's own account pays for its contract calls (the transfer to Rook's contract, the sweep back),
- * else the API refuses with custody_native_balance_required. A deposit tops it up to 0.1 NEAR when it holds under 0.05.
+ * else the API refuses with custody_native_balance_required. The API asks it to hold 0.1 NEAR per call (100 Tgas) beyond its storage, so a deposit sends 0.2 NEAR when it holds under 0.15.
  */
-export const GAS_NEAR_LOW = 50_000_000_000_000_000_000_000n;
+export const GAS_NEAR_LOW = 150_000_000_000_000_000_000_000n;
 export const gasTopUp = (wallet_account: string) => ({
   receiverId: wallet_account,
-  actions: [{ type: 'Transfer' as const, params: { deposit: '100000000000000000000000' } }],
+  actions: [{ type: 'Transfer' as const, params: { deposit: '200000000000000000000000' } }],
 });
 
 /** NEAR `account` holds, in yocto; 0 for an account that doesn't exist yet (a transfer creates an implicit one). */

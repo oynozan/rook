@@ -8,7 +8,7 @@ import {
   approvalLine, budgetLeftLine, cleanRules, depositProblem, depositTransaction, intentHeadline, intentViewOf, nep366Request, nep413Request, parseDeposit, parseIntentAsk,
   rulesAsked, rulesAskedLine, rulesReplyLead, walletStopped,
   planRules, policyLines, rulesSentence, sameRules, setupSteps, signedNep366, signedNep413, walletEventLine, walletFundable, walletFundingLine,
-  walletFundingLive, walletReady, walletReason, walletViewOf, USDC_MAINNET,
+  walletFundingLive, walletReady, walletReason, walletViewOf, USDC_MAINNET, gasTopUp, nearBalance, GAS_NEAR_LOW,
 } from '@/lib/agent-wallet';
 import { feedFrom } from '@/lib/feed';
 import { payloadHash, signatureValid } from '@/lib/nep413';
@@ -237,12 +237,11 @@ test('each setup signature is said in Rook\'s words before the wallet opens', ()
   assert.match(intentHeadline('grant_issue', null), /^Give Rook a spending key/);
 });
 
-test('gas for the wallet account: 0.1 NEAR sent to it; its balance read from NEAR, 0 for an account not made yet', async () => {
-  const { gasTopUp, nearBalance, GAS_NEAR_LOW } = await import('../src/lib/agent-wallet.ts');
-  assert.deepEqual(gasTopUp('ab'.repeat(32)), { receiverId: 'ab'.repeat(32), actions: [{ type: 'Transfer', params: { deposit: '100000000000000000000000' } }] });
+test('gas for the wallet account: 0.2 NEAR sent to it; its balance read from NEAR, 0 for an account not made yet', async () => {
+  assert.deepEqual(gasTopUp('ab'.repeat(32)), { receiverId: 'ab'.repeat(32), actions: [{ type: 'Transfer', params: { deposit: '200000000000000000000000' } }] });
   const answer = (j: unknown) => (async () => new Response(JSON.stringify(j))) as unknown as typeof fetch;
   assert.equal(await nearBalance('rpc', 'a', answer({ result: { amount: '7' } })), 7n);
   assert.equal(await nearBalance('rpc', 'a', answer({ error: { cause: { name: 'UNKNOWN_ACCOUNT' } } })), 0n);
   await assert.rejects(nearBalance('rpc', 'a', answer({ error: { cause: { name: 'TIMEOUT_ERROR' } } })));
-  assert.ok(GAS_NEAR_LOW < 100_000_000_000_000_000_000_000n);
+  assert.ok(GAS_NEAR_LOW > 100_000_000_000_000_000_000_000n); // above the 0.1 NEAR one call needs on hand
 });

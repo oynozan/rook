@@ -81,8 +81,14 @@ export function agentApi(opts: { url?: string; key?: string } = {}) {
     try { j = text ? JSON.parse(text) : null; } catch { /* not JSON */ }
     if (!r.ok) {
       const e = Array.isArray(j?.errors) ? j.errors[0] : null;
+      // The gas the wallet's own NEAR account is short of, in NEAR, instead of the API's yoctoNEAR field names.
+      const near = (y: unknown) => (typeof y === 'string' && /^\d+$/.test(y) ? (Number(BigInt(y) / 10n ** 18n) / 1e6).toFixed(4) : null);
+      const [held, cost] = [near(e?.meta?.available_amount), near(e?.meta?.min_amount)];
+      const detail = e?.code === 'custody_native_balance_required' && held && cost
+        ? `Your agent wallet's own NEAR account holds ${held} NEAR and this call needs ${cost} NEAR for gas. Send it NEAR and try again.`
+        : e?.detail ?? null;
       throw new AgentApiError(
-        r.status, typeof e?.code === 'string' ? e.code : `http_${r.status}`, e?.layer ?? null, e?.title ?? `HTTP ${r.status}`, e?.detail ?? null,
+        r.status, typeof e?.code === 'string' ? e.code : `http_${r.status}`, e?.layer ?? null, e?.title ?? `HTTP ${r.status}`, detail,
         e?.meta?.retryable === true, e?.meta?.available_at ?? null, j?.meta?.request_id ?? r.headers.get('x-request-id'),
       );
     }
