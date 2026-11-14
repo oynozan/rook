@@ -13,3 +13,6 @@ next-env.d.ts
 # local one-off chain operations (read keys from .env, never commit)
 /services/.ops/
 /.claude/worktrees/
+
+# server-only env files for docker compose (deploy/*.env.example are committed)
+/deploy/*.env

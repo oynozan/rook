@@ -68,6 +68,45 @@ Spending is bounded per task by `ROOK_MAX_BUDGET_USDC` (default 50) and by the c
 | `NEXT_PUBLIC_NEAR_RPC_URL` | web app, optional: the RPC the browser reads funding transactions from, for the wallet's network (default FastNEAR) |
 | `SIM_PAYMENT_NETWORK`, `SIM_USDC_ID`, `SIM_PAY_TO` | simulated market with `ROOK_LEDGER=chain` (testnet): quote in `near:testnet` with the contract's token and a payee. The simulator verifies each payment's NEP-366 delegate and never submits it |
 
+## Deploy (Docker, runrook.xyz)
+
+`docker-compose.yml` runs two containers: `rook` (every service and the web app, one image) and `caddy` (HTTPS for
+runrook.xyz, certificates from Let's Encrypt). The web app and the services share a container because the services
+listen on 127.0.0.1 only and refuse any other Host: nothing holding a key is reachable from outside it.
+
+| Port | What | Reachable from |
+| --- | --- | --- |
+| 80, 443 | Caddy: runrook.xyz → the web app | the internet |
+| 7888 | web app | the server itself (`127.0.0.1:7888`) and Caddy |
+| 7889 | orchestrator | inside the `rook` container only |
+| 7890, 7891, 7892 | planner, evaluator, market-gateway | inside the `rook` container only |
+| 7893, 7894 | signer, chain-gateway (they hold the role keys) | inside the `rook` container only |
+
+On the server (Docker with compose; the A record points at it; ports 80 and 443 open and free):
+
+1. `git clone` the repo, then create the two secret files, both gitignored:
+   - `deploy/services.env` from `deploy/services.env.example`: your `~/.rook/mainnet.env` plus `NEARAI_API_KEY` and
+     `ROOK_AGENT_API_KEY`. Never the admin key.
+   - `deploy/web.env` from `deploy/web.env.example`: the same `ROOK_SERVICE_TOKEN`, and a `ROOK_SESSION_SECRET`.
+2. `docker compose up -d --build`. Caddy gets the certificate on the first request to https://runrook.xyz.
+3. Logs: `docker compose logs -f rook`. The CLI: `docker compose exec rook pnpm rook list`.
+
+Data lives in the `rook-data` volume (`/data/rook.sqlite`: tasks and agent wallets; `/data/web.sqlite`: sign-ins and
+chats). To bring the local data along, stop the local stack first (two copies on the same role keys race each other's
+transactions and run the same tasks twice), then on the server, with the two files copied next to the compose file:
+
+```sh
+docker compose stop rook
+docker compose cp rook.sqlite rook:/data/rook.sqlite
+docker compose cp web.sqlite rook:/data/web.sqlite
+docker compose run --rm --no-deps -u root --entrypoint sh rook -c 'chown node:node /data/*.sqlite'
+docker compose start rook
+```
+
+Copy the `.sqlite` files with their `-wal` file merged in: with the stack stopped, open each once and run
+`PRAGMA wal_checkpoint(TRUNCATE)` (or copy the `-wal` and `-shm` files with it). Updating: `git pull`, then
+`docker compose up -d --build`.
+
 ## Keys and their limits
 
 No single leaked key can send USDC anywhere except approved caps into Rook's own sub-accounts and refunds to the funder ([docs/x402-payments-plan.md](x402-payments-plan.md) 4.6).

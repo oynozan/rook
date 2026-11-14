@@ -1,0 +1,14 @@
+.git
+.claude
+**/node_modules
+**/.next
+**/.data
+**/*.tsbuildinfo
+.env
+**/.env
+**/.env.*
+deploy/*.env
+services/data
+services/.ops
+contract/target
+*.log
