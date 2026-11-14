@@ -1,5 +1,6 @@
 # Rook on runrook.xyz: `docker compose up -d --build` (docs/operations.md, Deploy).
 # Before the first start, create deploy/services.env and deploy/web.env from their .example files.
+# The server's nginx serves https://runrook.xyz and proxies it to 127.0.0.1:7888 (deploy/nginx-runrook.xyz.conf).
 services:
   rook:
     build: .
@@ -12,22 +13,7 @@ services:
     environment:
       ROOK_SIGNIN_RECIPIENT: runrook.xyz
     ports:
-      - "127.0.0.1:7888:7888" # the web app, for checks on the server itself; the public way in is Caddy
-
-  caddy:
-    image: caddy:2
-    restart: unless-stopped
-    depends_on: [rook]
-    ports:
-      - "80:80"
-      - "443:443"
-      - "443:443/udp"
-    volumes:
-      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
-      - caddy-data:/data
-      - caddy-config:/config
+      - "127.0.0.1:7888:7888" # the web app, for nginx on this server only
 
 volumes:
   rook-data: # both SQLite files: tasks and agent wallets (rook.sqlite), sign-ins and chats (web.sqlite)
-  caddy-data: # the TLS certificates
-  caddy-config:

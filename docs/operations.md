@@ -70,26 +70,28 @@ Spending is bounded per task by `ROOK_MAX_BUDGET_USDC` (default 50) and by the c
 
 ## Deploy (Docker, runrook.xyz)
 
-`docker-compose.yml` runs two containers: `rook` (every service and the web app, one image) and `caddy` (HTTPS for
-runrook.xyz, certificates from Let's Encrypt). The web app and the services share a container because the services
+`docker-compose.yml` runs one container, `rook`: every service and the web app, one image. The server's nginx serves
+https://runrook.xyz and proxies it to `127.0.0.1:7888` (`deploy/nginx-runrook.xyz.conf`, certificate from certbot). The web app and the services share a container because the services
 listen on 127.0.0.1 only and refuse any other Host: nothing holding a key is reachable from outside it.
 
 | Port | What | Reachable from |
 | --- | --- | --- |
-| 80, 443 | Caddy: runrook.xyz → the web app | the internet |
-| 7888 | web app | the server itself (`127.0.0.1:7888`) and Caddy |
+| 80, 443 | nginx (already on the server): runrook.xyz → the web app | the internet |
+| 7888 | web app | the server itself (`127.0.0.1:7888`), so nginx |
 | 7889 | orchestrator | inside the `rook` container only |
 | 7890, 7891, 7892 | planner, evaluator, market-gateway | inside the `rook` container only |
 | 7893, 7894 | signer, chain-gateway (they hold the role keys) | inside the `rook` container only |
 
-On the server (Docker with compose; the A record points at it; ports 80 and 443 open and free):
+On the server (Docker with compose, nginx, certbot; the A record points at it):
 
 1. `git clone` the repo, then create the two secret files, both gitignored:
    - `deploy/services.env` from `deploy/services.env.example`: your `~/.rook/mainnet.env` plus `NEARAI_API_KEY` and
      `ROOK_AGENT_API_KEY`. Never the admin key.
    - `deploy/web.env` from `deploy/web.env.example`: the same `ROOK_SERVICE_TOKEN`, and a `ROOK_SESSION_SECRET`.
-2. `docker compose up -d --build`. Caddy gets the certificate on the first request to https://runrook.xyz.
-3. Logs: `docker compose logs -f rook`. The CLI: `docker compose exec rook pnpm rook list`.
+2. `docker compose up -d --build`.
+3. nginx: install the site and its certificate with the commands at the top of `deploy/nginx-runrook.xyz.conf`. It
+   only adds a `server_name runrook.xyz` block; the other sites on the server are untouched.
+4. Logs: `docker compose logs -f rook`. The CLI: `docker compose exec rook pnpm rook list`.
 
 Data lives in the `rook-data` volume (`/data/rook.sqlite`: tasks and agent wallets; `/data/web.sqlite`: sign-ins and
 chats). To bring the local data along, stop the local stack first (two copies on the same role keys race each other's

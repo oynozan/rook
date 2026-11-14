@@ -1,4 +1,0 @@
-runrook.xyz {
-	encode zstd gzip
-	reverse_proxy rook:7888
-}
