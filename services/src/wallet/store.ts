@@ -25,6 +25,8 @@ export type WalletRecord = {
   grant: { grant_id: string; token: string; expires_at: string } | null; // token: secret, server side only
   intents: IssuedIntent[]; // newest last
   updated_at: string;
+  /** Wallets the API stopped knowing (another API key, or deleted), kept for the record; their grant tokens dropped. */
+  previous?: { agent_id: string; near_account_id: string | null; grant_id: string | null; set_aside_at: string }[];
 };
 
 /** Persistence for wallet records (db.ts): the whole record as one document per owner. */

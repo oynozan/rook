@@ -110,6 +110,18 @@ export function createWallets(d: {
     }
   }
 
+  /**
+   * The API says the owner's stored wallet is not theirs to read (agent_not_found: a new API key, say demo to
+   * production, or the wallet was deleted). It is set aside in `previous`, so the owner can set up a new one.
+   */
+  const gone = (e: unknown) => e instanceof AgentApiError && e.code === 'agent_not_found';
+  const setAside = (owner: string) => d.store.update(owner, (r) => {
+    if (!r.agent_id) return;
+    (r.previous ??= []).push({ agent_id: r.agent_id, near_account_id: r.near_account_id, grant_id: r.grant?.grant_id ?? null, set_aside_at: new Date().toISOString() });
+    Object.assign(r, { agent_id: null, near_account_id: null, step: null, grant: null });
+    console.warn(`[wallet] the Agent API doesn't know ${owner}'s stored wallet; set aside, a new setup can start`);
+  });
+
   const ownTasks = (owner: string) => [...d.tasks()].filter((t) => t.owner === owner && t.wallet_funding);
 
   /** GET /wallet: what the web app shows. Reads the API live; a read that fails leaves its part empty. */
@@ -128,6 +140,7 @@ export function createWallets(d: {
       r.near_account_id ? d.nativeBalance(r.near_account_id) : Promise.resolve(null),
     ]);
     const ok = <T>(x: PromiseSettledResult<T>) => (x.status === 'fulfilled' ? x.value : null);
+    if (agent.status === 'rejected' && gone(agent.reason)) { setAside(owner); return { ...empty, rules: r.rules }; }
     for (const x of [agent, policy, balances, approvals, native]) if (x.status === 'rejected') console.error('[wallet] read', (x.reason as Error)?.message);
     const a = ok(agent), p = ok(policy);
     // An unreadable agent was created (agent_create succeeded), so it shows as active; archived or deleted as none.
@@ -161,7 +174,10 @@ export function createWallets(d: {
     let body: Record<string, unknown>;
     const extra: Partial<IssuedIntent> = {};
     if (b.type === 'agent_create') {
-      need(!r?.agent_id, 'You already have an agent wallet.');
+      if (r?.agent_id) await d.api.agent(r.agent_id).then(() => need(false, 'You already have an agent wallet.'), (e) => {
+        if (!gone(e)) throw refusal(e);
+        setAside(b.owner);
+      });
       if (!b.public_key) throw new HttpError(400, 'public_key is required: the full-access key your wallet signs with');
       const rules = b.rules ?? {};
       extra.rules = rules;

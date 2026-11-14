@@ -500,3 +500,24 @@ test('a restart picks the wallet funding up where it was: the wallet and its gra
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test('a stored wallet the API no longer knows (a new API key, say demo to production) is set aside, and a new setup can start', async () => {
+  const DAVE = 'dave.near';
+  await sign('agent_create', { rules: { budget_usd: 50 }, public_key: PK }, orch.url, DAVE);
+  await sign('policy_update', {}, orch.url, DAVE);
+  const first = await sign('grant_issue', {}, orch.url, DAVE);
+  assert.equal(first.next_step, 'ready');
+  api.agents.delete(first.agent_id); // the API key that made it is gone
+  // Asking to create a new one finds the old one gone and goes ahead.
+  const g = await call(`${orch.url}/wallet/intents`, { owner: DAVE, type: 'agent_create', rules: { budget_usd: 50 }, public_key: PK });
+  assert.equal(g.type, 'agent_create');
+  const second = await call(`${orch.url}/wallet/intents/${g.correlation_id}/submit`, { owner: DAVE, signed_data: { signed_delegate: 'A'.repeat(64) } });
+  assert.deepEqual([second.next_step, second.grant], ['allow_destination', null]);
+  assert.notEqual(second.agent_id, first.agent_id);
+  // Reading the wallet finds it gone too: no wallet shows, the rules stay, the old one is kept aside.
+  api.agents.delete(second.agent_id);
+  const v = await wallet(orch.url, DAVE);
+  assert.deepEqual([v.status, v.agent_id, v.next_step, v.grant, v.rules], ['none', null, null, null, { budget_usd: 50 }]);
+  const kept = await call(`${orch.url}/wallet/intents`, { owner: DAVE, type: 'agent_create', public_key: PK });
+  assert.equal(kept.type, 'agent_create');
+});
