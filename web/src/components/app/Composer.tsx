@@ -3,7 +3,7 @@
 import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { budgetField, outgoing, placeholderFor, waitReason } from '@/lib/conversations';
-import { checkDraft, parseBudget } from '@/lib/draft';
+import { checkDraft } from '@/lib/draft';
 import { useMode } from '@/hooks/mode';
 import type { TaskSummary } from '@/lib/server/orchestrator';
 import { useWallet } from '@/hooks/wallet';
@@ -30,12 +30,6 @@ const EXAMPLES = [
 ];
 
 export type ComposerErrors = { prompt?: string; budget?: string; message?: string };
-
-function reserveLabel(budget: string) {
-  const b = parseBudget(budget);
-  // The plan keeps at least 20% for re-hires, and whatever its caps leave on top of that.
-  return b.ok ? `at least ${(Number(b.atomic) / 1e6 * 0.2).toFixed(2)} held for re-hires` : 'at least 20% held for re-hires';
-}
 
 /**
  * A conversation page: the task a message follows (`parent`), the one it acts on (`current`: a plan it revises, or work
@@ -163,7 +157,6 @@ export function Composer({ onSend, errors, sending, compact, thread }: {
               />
               USDC
             </label>
-            <span className="mt-2 hidden text-sm whitespace-nowrap text-ink/55 sm:inline">{reserveLabel(budget)}</span>
           </div>
         </div>
         <button
