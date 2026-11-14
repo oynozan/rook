@@ -101,3 +101,19 @@ from their NEAR wallet, one click), and Rook registers the wallet's native accou
 - Whether a withdrawal to the wallet's own native account is allowed as a destination (the docs don't say otherwise).
 - Who pays gas for `native/near/call` (the docs say the wallet provider sends it).
 - Whether `agent_create` can list the native account in `destinations` before it exists (if not, step 2 stays).
+
+## Verified on mainnet (2026-11-14, demo Agent API host)
+
+The whole loop ran for real, owner `oynozan.near`, agent `0b75abd6…502c`, wallet account `2fe23d46…e71b`:
+setup (three signatures) → deposit 1.20 USDC → task t_b8de1ae3 funded with 1.00 USDC (owner approval voted) →
+contract task bound, run, refunded 1.00 → swept back: the wallet ends at 1.20 USDC. Answers to the questions above:
+
+- A withdrawal to the wallet's own native account is allowed; the step-2 destination is needed (it isn't known before
+  `agent_create`).
+- The wallet's own NEAR account pays `native/near/call` gas. The API wants 0.1 NEAR on hand per 100 Tgas call beyond
+  the account's storage (`custody_native_balance_required`), so a deposit tops it up with 0.2 NEAR below 0.15.
+- The API changed on 2026-11-13: a new policy must set `confidential: true`. An `intents.near` deposit still lands in
+  the legacy public balance, which a withdrawal with `confidential: false` pays from. Moving to the confidential
+  balance (1Click deposit addresses, `shield`) is in agent-wallet-ideas.md.
+- Each withdrawal counts against the USD budget; the swept-back refund doesn't credit it (998 of 1000 left after two).
+- A stored wallet the API no longer knows (`agent_not_found`, as after a new API key) is set aside and set up again.
